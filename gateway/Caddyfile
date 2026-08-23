@@ -1,0 +1,33 @@
+# --- Production Caddyfile (gateway service, §10.2) ---
+# Terminates TLS, routes to internal services, applies security headers.
+# Only ports 80/443 are published by the host.
+
+{
+    email admin@careangelssupport.com
+    # Staging certs during initial validation; switch to production after validation.
+    # acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+# Application
+app.careangelssupport.com {
+    reverse_proxy api:8080 {
+        header_up Host {host}
+    }
+    reverse_proxy /assets/* web:3000
+    reverse_proxy /static/* web:3000
+    reverse_proxy web:3000
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+}
+
+# Identity provider
+auth.careangelssupport.com {
+    reverse_proxy authentik-server:9000
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+}

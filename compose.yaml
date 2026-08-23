@@ -1,0 +1,277 @@
+# Production-like single-host Compose suite (spec §10.1, §10.2)
+# Only `gateway` is published (ports 80/443). Everything else is on private networks.
+
+services:
+  gateway:
+    image: caddy:2.8
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [front, back]
+    healthcheck:
+      test: ["CMD", "caddy", "version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on: [api, web, authentik-server]
+
+  web:
+    build:
+      context: ../apps/web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks: [back]
+    expose: ["3000"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  api:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      args:
+        ARTIFACT: workforce
+    image: careangels/api:${APP_VERSION:-latest}
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    networks: [back, data]
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      MINIO_ENDPOINT: http://object-storage:9000
+      MINIO_ACCESS_KEY_FILE: /run/secrets/minio_access
+      MINIO_SECRET_KEY_FILE: /run/secrets/minio_secret
+      CLAMAV_HOST: clamav
+      GOTENBERG_URL: http://gotenberg:3000
+      OIDC_ISSUER: ${OIDC_ISSUER}
+      OIDC_CLIENT_ID_FILE: /run/secrets/oidc_client_id
+      OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+    secrets:
+      - db_password
+      - minio_access
+      - minio_secret
+      - oidc_client_id
+      - oidc_client_secret
+    deploy:
+      resources:
+        limits: { memory: 1g }
+        reservations: { memory: 512m }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health/readiness"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      object-storage:
+        condition: service_started
+
+  worker:
+    image: careangels/api:${APP_VERSION:-latest}
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    command: ["java", "-jar", "/app/app.jar", "--spring.profiles.active=prod,worker"]
+    networks: [back, data]
+    environment:
+      SPRING_PROFILES_ACTIVE: prod,worker
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      MINIO_ENDPOINT: http://object-storage:9000
+      MINIO_ACCESS_KEY_FILE: /run/secrets/minio_access
+      MINIO_SECRET_KEY_FILE: /run/secrets/minio_secret
+      CLAMAV_HOST: clamav
+      GOTENBERG_URL: http://gotenberg:3000
+    secrets:
+      - db_password
+      - minio_access
+      - minio_secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    networks: [data]
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    image: careangels/api:${APP_VERSION:-latest}
+    command: ["java", "-jar", "/app/app.jar", "--spring.profiles.active=prod,migrate"]
+    restart: "no"
+    networks: [data]
+    environment:
+      SPRING_PROFILES_ACTIVE: prod,migrate
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      MINIO_ENDPOINT: http://object-storage:9000
+      MINIO_ACCESS_KEY_FILE: /run/secrets/minio_access
+      MINIO_SECRET_KEY_FILE: /run/secrets/minio_secret
+    secrets:
+      - db_password
+      - minio_access
+      - minio_secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  object-storage:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    networks: [data]
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_access
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_secret
+    secrets:
+      - minio_access
+      - minio_secret
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  clamav:
+    image: clamav/clamav:latest
+    restart: unless-stopped
+    networks: [data]
+    volumes:
+      - clamav_data:/var/lib/clamav
+
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    restart: unless-stopped
+    networks: [back]
+    command:
+      - "gotenberg"
+      - "--chromium-disable-java=true"
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:2024.12
+    restart: unless-stopped
+    networks: [back, data]
+    command: server
+    environment:
+      AUTHENTIK_POSTGRES__HOST: authentik-postgres
+      AUTHENTIK_POSTGRES__USER: ${AK_DB_USER}
+      AUTHENTIK_POSTGRES__NAME: ${AK_DB_NAME}
+      AUTHENTIK_POSTGRES__PASSWORD_FILE: /run/secrets/ak_db_password
+      AUTHENTIK_SECRET_KEY_FILE: /run/secrets/ak_secret
+    secrets:
+      - ak_db_password
+      - ak_secret
+    volumes:
+      - ak_media:/media
+      - ak_certs:/certs
+      - ak_geoip:/geoip
+    depends_on:
+      authentik-postgres:
+        condition: service_healthy
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:2024.12
+    restart: unless-stopped
+    networks: [back, data]
+    command: worker
+    environment:
+      AUTHENTIK_POSTGRES__HOST: authentik-postgres
+      AUTHENTIK_POSTGRES__USER: ${AK_DB_USER}
+      AUTHENTIK_POSTGRES__NAME: ${AK_DB_NAME}
+      AUTHENTIK_POSTGRES__PASSWORD_FILE: /run/secrets/ak_db_password
+      AUTHENTIK_SECRET_KEY_FILE: /run/secrets/ak_secret
+    secrets:
+      - ak_db_password
+      - ak_secret
+    volumes:
+      - ak_media:/media
+      - ak_certs:/certs
+    depends_on:
+      authentik-postgres:
+        condition: service_healthy
+
+  authentik-postgres:
+    image: postgres:16
+    restart: unless-stopped
+    networks: [data]
+    environment:
+      POSTGRES_DB: ${AK_DB_NAME}
+      POSTGRES_USER: ${AK_DB_USER}
+      POSTGRES_PASSWORD_FILE: /run/secrets/ak_db_password
+    secrets:
+      - ak_db_password
+    volumes:
+      - ak_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AK_DB_USER} -d ${AK_DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  minio_access:
+    file: ./secrets/minio_access
+  minio_secret:
+    file: ./secrets/minio_secret
+  oidc_client_id:
+    file: ./secrets/oidc_client_id
+  oidc_client_secret:
+    file: ./secrets/oidc_client_secret
+  ak_db_password:
+    file: ./secrets/ak_db_password
+  ak_secret:
+    file: ./secrets/ak_secret
+
+volumes:
+  caddy_data:
+  caddy_config:
+  pg_data:
+  minio_data:
+  clamav_data:
+  ak_media:
+  ak_certs:
+  ak_geoip:
+  ak_pg_data:
+
+networks:
+  front:
+  back:
+  data:

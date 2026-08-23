@@ -1,0 +1,33 @@
+# Local development overrides (spec §10.2).
+# If you use the Maven Wrapper, replace `mvn` with `./mvnw` in the commands below.
+# Runs ONLY the supporting infrastructure with host-mapped ports so you can run
+# the API/worker locally with `mvn spring-boot:run` (no need to build the image).
+#
+#   docker compose -f compose.yaml -f compose.dev.yaml up -d postgres object-storage clamav gotenberg
+#
+# The `auth` profile adds a local authentik for realistic OIDC testing:
+#   docker compose -f compose.yaml -f compose.dev.yaml --profile auth up -d authentik-postgres authentik-server authentik-worker
+
+services:
+  postgres:
+    ports: ["5432:5432"]
+
+  object-storage:
+    ports: ["9000:9000", "9001:9001"]
+
+  clamav:
+    ports: ["3310:3310"]
+
+  gotenberg:
+    ports: ["3000:3000"]
+
+  authentik-postgres:
+    ports: ["5433:5432"]
+    profiles: ["auth"]
+
+  authentik-server:
+    profiles: ["auth"]
+    ports: ["9000:9000", "9443:9443"]
+
+  authentik-worker:
+    profiles: ["auth"]
