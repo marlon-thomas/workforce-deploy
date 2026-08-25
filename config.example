@@ -9,7 +9,7 @@ DB_USER=careangels_app
 
 # ---- Object storage (MinIO) ----
 # access/secret written to ./deploy/secrets/minio_access and minio_secret
-MINIO_BUCKET=evidence
+MINIO_BUCKET=care-angels-evidence
 
 # ---- authentik (standalone IdP) ----
 OIDC_ISSUER=https://auth.careangelssupport.com/application/o/care-angels/
