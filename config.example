@@ -20,4 +20,6 @@ AK_DB_USER=authentik
 # written to ./deploy/secrets/ak_db_password and ak_secret
 
 # ---- Release ----
+# Required: the image name the api/worker/migration containers are built as and run from.
+API_IMAGE=workforce-api
 APP_VERSION=0.1.0

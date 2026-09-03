@@ -30,9 +30,9 @@ Edit `deploy/.env` — this single file holds every non-secret value:
 | `ACME_EMAIL` | Email for TLS certificate expiry notices | `it@example.com` |
 | `DB_NAME` / `DB_USER` | Application database (leave defaults unless you have a reason) | `workforce` / `workforce_app` |
 | `MINIO_BUCKET` | Evidence storage bucket | `workforce-evidence` |
+| `API_IMAGE` (**required**) | Image name the api/worker/migration containers are built as and run from. No tag — the tag comes from `APP_VERSION`. Locally built (no registry needed): `workforce-api`. From your own registry: `ghcr.io/your-org/workforce-api` | `workforce-api` |
 | `OIDC_ISSUER` | Issuer URL of the authentik application (created in step 3) | `https://auth.example.com/application/o/workforce/` |
 | `APP_VERSION` | Release tag to deploy | `0.1.0` |
-| `API_IMAGE` *(optional)* | Override the container image | `ghcr.io/your-org/workforce-api` |
 
 **Secrets are separate.** Create `deploy/secrets/` and write each value to its own file:
 
@@ -113,6 +113,20 @@ docker compose -f deploy/compose.yaml up -d
 
 Migrations run automatically on start. Read the release notes for any authentik-side steps
 (like the redirect-URI change above) **before** restarting.
+
+### Migrating from a release before `API_IMAGE` existed
+
+Older releases defaulted the container image to a built-in name. This release makes
+`API_IMAGE` a required setting. If `docker compose up` stops with
+"`API_IMAGE is missing a value`", add one line to `deploy/.env` naming the image you already
+use (check `docker images` for the name your previous deployment built):
+
+```bash
+echo 'API_IMAGE=<your-existing-image-name>' >> deploy/.env
+docker compose -f deploy/compose.yaml up -d
+```
+
+Nothing else changes — the same local image continues to be used.
 
 ## Troubleshooting
 
