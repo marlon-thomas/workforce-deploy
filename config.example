@@ -3,8 +3,8 @@
 # NEVER commit .env or ./secrets to source control.
 
 # ---- Application database ----
-DB_NAME=careangels
-DB_USER=careangels_app
+DB_NAME=workforce
+DB_USER=workforce_app
 # DB_PASSWORD must be written to ./deploy/secrets/db_password (mode 600)
 
 # ---- Object storage (MinIO) ----
