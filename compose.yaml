@@ -25,6 +25,9 @@ services:
       - "443:443"
     environment:
       TZ: Europe/London
+      APP_HOSTNAME: ${APP_HOSTNAME:-app.example.com}
+      AUTH_HOSTNAME: ${AUTH_HOSTNAME:-auth.example.com}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
     volumes:
       - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -51,7 +54,7 @@ services:
     networks: [data]
     environment:
       TZ: Europe/London
-      MINIO_BUCKET: ${MINIO_BUCKET:-care-angels-evidence}
+      MINIO_BUCKET: ${MINIO_BUCKET:-workforce-evidence}
     entrypoint:
       - /bin/sh
       - -c
@@ -69,7 +72,7 @@ services:
 
   # One-shot database migrations; the API does NOT run Flyway (§10.2).
   migrate:
-    image: careangels/api:${APP_VERSION:-latest}
+    image: ${API_IMAGE:-careangels/api}:${APP_VERSION:-latest}
     restart: "no"
     networks: [data]
     environment:
@@ -80,7 +83,7 @@ services:
       DB_URL: jdbc:postgresql://postgres:5432/${DB_NAME}
       DB_USER: ${DB_USER}
       WORKFORCE_EVIDENCE_S3_ENDPOINT: http://object-storage:9000
-      WORKFORCE_EVIDENCE_S3_BUCKET: ${MINIO_BUCKET:-care-angels-evidence}
+      WORKFORCE_EVIDENCE_S3_BUCKET: ${MINIO_BUCKET:-workforce-evidence}
     secrets:
       - source: db_password
         target: spring.datasource.password
@@ -102,7 +105,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: careangels/api:${APP_VERSION:-latest}
+    image: ${API_IMAGE:-careangels/api}:${APP_VERSION:-latest}
     restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
@@ -120,7 +123,7 @@ services:
       DB_USER: ${DB_USER}
       OIDC_ISSUER: ${OIDC_ISSUER}
       WORKFORCE_EVIDENCE_S3_ENDPOINT: http://object-storage:9000
-      WORKFORCE_EVIDENCE_S3_BUCKET: ${MINIO_BUCKET:-care-angels-evidence}
+      WORKFORCE_EVIDENCE_S3_BUCKET: ${MINIO_BUCKET:-workforce-evidence}
       WORKFORCE_EVIDENCE_CLAMAV_HOST: clamav
       WORKFORCE_EVIDENCE_CLAMAV_PORT: "3310"
       WORKFORCE_REPORTS_GOTENBERG_URL: http://gotenberg:3000
@@ -130,10 +133,10 @@ services:
         target: spring.datasource.password
         mode: 0444
       - source: oidc_client_id
-        target: spring.security.oauth2.client.registration.care-angels.client-id
+        target: spring.security.oauth2.client.registration.oidc.client-id
         mode: 0444
       - source: oidc_client_secret
-        target: spring.security.oauth2.client.registration.care-angels.client-secret
+        target: spring.security.oauth2.client.registration.oidc.client-secret
         mode: 0444
       - source: minio_access
         target: workforce.evidence.s3-access-key
@@ -160,7 +163,7 @@ services:
         condition: service_completed_successfully
 
   worker:
-    image: careangels/api:${APP_VERSION:-latest}
+    image: ${API_IMAGE:-careangels/api}:${APP_VERSION:-latest}
     restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
@@ -180,7 +183,7 @@ services:
       DB_USER: ${DB_USER}
       OIDC_ISSUER: ${OIDC_ISSUER}
       WORKFORCE_EVIDENCE_S3_ENDPOINT: http://object-storage:9000
-      WORKFORCE_EVIDENCE_S3_BUCKET: ${MINIO_BUCKET:-care-angels-evidence}
+      WORKFORCE_EVIDENCE_S3_BUCKET: ${MINIO_BUCKET:-workforce-evidence}
       WORKFORCE_EVIDENCE_CLAMAV_HOST: clamav
       WORKFORCE_EVIDENCE_CLAMAV_PORT: "3310"
       WORKFORCE_REPORTS_GOTENBERG_URL: http://gotenberg:3000
@@ -190,10 +193,10 @@ services:
         target: spring.datasource.password
         mode: 0444
       - source: oidc_client_id
-        target: spring.security.oauth2.client.registration.care-angels.client-id
+        target: spring.security.oauth2.client.registration.oidc.client-id
         mode: 0444
       - source: oidc_client_secret
-        target: spring.security.oauth2.client.registration.care-angels.client-secret
+        target: spring.security.oauth2.client.registration.oidc.client-secret
         mode: 0444
       - source: minio_access
         target: workforce.evidence.s3-access-key

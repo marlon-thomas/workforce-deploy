@@ -1,15 +1,19 @@
 # --- Production Caddyfile (gateway service, spec §10.1) ---
+# Hostnames, ACME email and TLS are supplied by the deployment via .env
+# (APP_HOSTNAME, AUTH_HOSTNAME, ACME_EMAIL) — Caddy reads {$VAR} placeholders
+# from its environment at startup. See deploy/README.md.
+# --- Production Caddyfile (gateway service, spec §10.1) ---
 # Terminates TLS, routes to internal services, applies security headers.
 # Only ports 80/443 are published by the host. The compiled UI is served by
 # `api`, so a single upstream handles everything.
 
 {
-	email admin@careangelssupport.com
+	email {$ACME_EMAIL}
 	# Staging certs during initial validation; switch to production after validation.
 	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
 }
 
-app.careangelssupport.com {
+{$APP_HOSTNAME} {
 	reverse_proxy api:8080 {
 		header_up X-Forwarded-Proto {scheme}
 	}
@@ -23,7 +27,7 @@ app.careangelssupport.com {
 	}
 }
 
-auth.careangelssupport.com {
+{$AUTH_HOSTNAME} {
 	reverse_proxy authentik-server:9000
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"

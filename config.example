@@ -9,10 +9,10 @@ DB_USER=workforce_app
 
 # ---- Object storage (MinIO) ----
 # access/secret written to ./deploy/secrets/minio_access and minio_secret
-MINIO_BUCKET=care-angels-evidence
+MINIO_BUCKET=workforce-evidence
 
 # ---- authentik (standalone IdP) ----
-OIDC_ISSUER=https://auth.careangelssupport.com/application/o/care-angels/
+OIDC_ISSUER=https://auth.example.com/application/o/<your-application-slug>/
 # client id/secret written to ./deploy/secrets/oidc_client_id and oidc_client_secret
 
 AK_DB_NAME=authentik
