@@ -163,6 +163,21 @@ if [ "${SMOKE}" -eq 1 ]; then
   warn "--smoke: the api will boot without the sign-in chain (smoke profile)."
 fi
 
+# Pull fallback: GHCR first; if the org's IP is rate-limited and a Docker Hub mirror
+# is configured (optional DOCKERHUB_USER in .env), switch to it transparently.
+HUB_USER="${DOCKERHUB_USER:-}"
+if [ -n "${HUB_USER}" ]; then
+  say "Fetching images…"
+  if ! docker pull "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1; then
+    if docker pull "docker.io/${HUB_USER}/workforce-suite:${APP_VERSION}" >/dev/null 2>&1; then
+      say "GHCR unavailable from this network — using the Docker Hub mirror."
+      sed -i.bak "s|^API_IMAGE=.*|API_IMAGE=docker.io/${HUB_USER}/workforce-suite|" .env
+    else
+      fail "Could not fetch the images from GHCR or the Docker Hub mirror. Check your internet connection."
+    fi
+  fi
+fi
+
 say "Starting the platform (this downloads and starts everything; first run takes a while)…"
 if [ "${SMOKE}" -eq 1 ]; then
   docker compose -f compose.yaml -f compose.smoke.yaml up -d
