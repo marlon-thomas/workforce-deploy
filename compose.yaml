@@ -102,10 +102,10 @@ services:
     logging: *default-logging
 
   api:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the image name to build and deploy, e.g. workforce-api}:${APP_VERSION:-latest}
+    # Pulled by default (deployment-spec §B1: orgs run published images, pinned by
+    # APP_VERSION). Building from source is a dev override:
+    #   docker compose -f deploy/compose.yaml build api worker
+    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/careangels/workforce-suite}:${APP_VERSION:-latest}
     restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
@@ -163,7 +163,7 @@ services:
         condition: service_completed_successfully
 
   worker:
-    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the image name to build and deploy, e.g. workforce-api}:${APP_VERSION:-latest}
+    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/careangels/workforce-suite}:${APP_VERSION:-latest}
     restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
