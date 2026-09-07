@@ -260,7 +260,7 @@ sed   -e "s|\${OIDC_CLIENT_ID}|$(cat secrets/oidc_client_id)|g" \
   -e "s|\${WF_REDIRECT_URI}|https://${APP_HOSTNAME}/login/oauth2/code/oidc|g" \
   -e "s|\${ACME_EMAIL}|${ACME_EMAIL}|g" \
   -e "s|\${AK_ADMIN_PASSWORD}|${AK_ADMIN_PASSWORD}|g" \
-  ../blueprints/workforce-app.yaml.template > blueprints/workforce-app.yaml 2>/dev/null \
+  blueprints/workforce-app.yaml.template > blueprints/workforce-app.yaml 2>/dev/null \
   || sed \
   -e "s|\${OIDC_CLIENT_ID}|$(cat secrets/oidc_client_id)|g" \
   -e "s|\${OIDC_CLIENT_SECRET}|$(cat secrets/oidc_client_secret)|g" \
