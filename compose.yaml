@@ -75,7 +75,7 @@ services:
 
   # One-shot database migrations; the API does NOT run Flyway (§10.2).
   migrate:
-    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/careangels/workforce-suite}:${APP_VERSION:-latest}
+    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
     restart: "no"
     networks: [data]
     environment:
@@ -112,7 +112,7 @@ services:
     # Pulled by default (deployment-spec §B1: orgs run published images, pinned by
     # APP_VERSION). Building from source is a dev override:
     #   docker compose -f deploy/compose.yaml build api worker
-    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/careangels/workforce-suite}:${APP_VERSION:-latest}
+    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
     restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
@@ -173,7 +173,7 @@ services:
     # (healthy) so the whole graph resolves without a cycle.
 
   worker:
-    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/careangels/workforce-suite}:${APP_VERSION:-latest}
+    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
     restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
