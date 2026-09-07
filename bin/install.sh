@@ -27,12 +27,72 @@ say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m ->\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mXX\033[0m %s\n' "$*"; exit 1; }
 
-command -v docker >/dev/null || fail "Docker is not installed. See https://docs.docker.com/engine/install/ (or ask support to do this step with you)."
-docker compose version >/dev/null 2>&1 || fail "The Docker compose plugin is missing. Install docker-compose-plugin, then re-run."
-
-if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
-  fail "Root privileges are needed (install Docker, open the firewall). Run me with sudo."
+# ---------------------------------------------------------------- bootstrap levels
+# The installer is designed to be run ONCE, as root, on a fresh VPS. It handles the
+# whole journey: service user -> Docker -> registry login -> the four questions ->
+# the running stack. Re-running as the service user afterwards skips straight to
+# configuration/updates (everything below is idempotent).
+NEED_BOOTSTRAP=0
+if [ "$(id -u)" -eq 0 ]; then
+  NEED_BOOTSTRAP=1
+elif command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+  NEED_BOOTSTRAP=0
+else
+  NEED_BOOTSTRAP=1
 fi
+
+if [ "${NEED_BOOTSTRAP}" -eq 1 ] && [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+  fail "Root privileges are needed (create user, install Docker, open the firewall). Run me with sudo."
+fi
+
+bootstrap() {
+  # ---- 0. A normal user (never operate the system as root) --------------------
+  if [ "$(id -u)" -eq 0 ]; then
+    echo ""
+    echo "Setting up a service user (the system is never operated as root)…"
+    SERVICE_USER="${SERVICE_USER:-workforce_app_sa}"
+    if id "$SERVICE_USER" >/dev/null 2>&1; then
+      echo "   user '$SERVICE_USER' already exists."
+    else
+      adduser --disabled-password --gecos "Care Angels Workforce service account,,," "$SERVICE_USER"
+      usermod -aG sudo "$SERVICE_USER"
+      echo "   user '$SERVICE_USER' created (sudo member). Set a login password now:"
+      passwd "$SERVICE_USER" || true
+    fi
+    DEPLOY_DIR="$(pwd)"
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$DEPLOY_DIR"
+
+    # ---- 3. Docker (engine + compose plugin) ----------------------------------
+    if command -v docker >/dev/null 2>&1; then
+      echo "Docker is already installed."
+    else
+      echo "Installing Docker…"
+      curl -fsSL https://get.docker.com | sh
+    fi
+    SERVICE_USER="${SERVICE_USER:-workforce_app_sa}"
+    usermod -aG docker "$SERVICE_USER" 2>/dev/null || true
+
+    # ---- 4. Registry login (images are private until licensing ships) ---------
+    if ! grep -q "ghcr.io" "/home/${SERVICE_USER}/.docker/config.json" 2>/dev/null; then
+      echo ""
+      echo "The container images are pulled from GitHub's registry (private while"
+      echo "licensing is in development). A GitHub personal access token with"
+      echo "read:packages is required (Settings -> Developer settings -> Tokens classic)."
+      printf "GitHub username [marlon-thomas]: "
+      read -r GH_USER
+      GH_USER="${GH_USER:-marlon-thomas}"
+      docker login ghcr.io -u "$GH_USER" || fail "Registry login failed — the token needs read:packages scope."
+    fi
+
+    # Hand over: re-exec the rest of the installer as the service user.
+    echo ""
+    echo "Bootstrap complete. Continuing as '$SERVICE_USER'…"
+    if [ "${SMOKE}" -eq 1 ]; then
+      exec sudo -E -u "$SERVICE_USER" env SMOKE=1 bash "$0" --smoke "$@"
+    fi
+    exec sudo -u "$SERVICE_USER" bash "$0" "$@"
+  fi
+}
 
 # ---------------------------------------------------------------- firewall
 # The system needs exactly three inbound ports: 22 (ssh — already open), 80+443 (the app).
@@ -53,6 +113,8 @@ open_port() {
     warn "No active firewall detected on this machine — ports 80/443 depend on your cloud provider's firewall."
   fi
 }
+
+bootstrap
 
 if [ -f .env ]; then
   warn "This deployment is already configured (deploy/.env exists)."
