@@ -30,6 +30,30 @@ fail() { printf '\033[1;31mXX\033[0m %s\n' "$*"; exit 1; }
 command -v docker >/dev/null || fail "Docker is not installed. See https://docs.docker.com/engine/install/ (or ask support to do this step with you)."
 docker compose version >/dev/null 2>&1 || fail "The Docker compose plugin is missing. Install docker-compose-plugin, then re-run."
 
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+  fail "Root privileges are needed (install Docker, open the firewall). Run me with sudo."
+fi
+
+# ---------------------------------------------------------------- firewall
+# The system needs exactly three inbound ports: 22 (ssh — already open), 80+443 (the app).
+# Docker publishes 80/443 directly via iptables, bypassing ufw; we still open them in
+# ufw so the rules are explicit and survive Docker being restarted differently.
+# CLOUD FIREWALLS (Hetzner/DO/etc.) are a separate layer we cannot touch — the runbook
+# tells the user to allow 80/443 there; doctor.sh verifies reachability end-to-end.
+open_port() {
+  PORT="$1"
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow "$PORT/tcp" >/dev/null 2>&1 && say "Firewall (ufw): allowing ${PORT}/tcp" \
+      || warn "Firewall (ufw): could not allow ${PORT}/tcp — check 'ufw status'."
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="$PORT/tcp" >/dev/null 2>&1 && firewall-cmd --reload >/dev/null 2>&1 \
+      && say "Firewall (firewalld): allowing ${PORT}/tcp" \
+      || warn "Firewall (firewalld): could not allow ${PORT}/tcp — check 'firewall-cmd --list-ports'."
+  else
+    warn "No active firewall detected on this machine — ports 80/443 depend on your cloud provider's firewall."
+  fi
+}
+
 if [ -f .env ]; then
   warn "This deployment is already configured (deploy/.env exists)."
   echo "   Use ./bin/update.sh to change versions, or delete .env to reconfigure from scratch."
@@ -56,6 +80,9 @@ verify_dns() {
   return 0
 }
 if [ "${SMOKE}" -eq 0 ]; then
+  say "Opening the firewall for the web (80/tcp, 443/tcp)…"
+  open_port 80
+  open_port 443
   say "Checking the address points at this machine (this can take a few minutes on a fresh domain)…"
   for i in $(seq 1 60); do
     verify_dns && break

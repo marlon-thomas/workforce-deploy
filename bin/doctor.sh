@@ -51,6 +51,12 @@ RESOLVED="$(getent hosts "$APP_HOSTNAME" 2>/dev/null | awk '{print $1}' | head -
 if [ "$SMOKE" -eq 0 ]; then
   ISSUER="$(echo | timeout 8 openssl s_client -connect "${APP_HOSTNAME}:443" -servername "${APP_HOSTNAME}" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null | head -1)"
   [ -n "$ISSUER" ] && row "TLS" ok "certificate present" || row "TLS" warn "certificate not readable yet (first issuance can take a minute)"
+  REACH="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 8 "https://${APP_HOSTNAME}" 2>/dev/null || echo 0)"
+  case "$REACH" in
+    200|301|302|308) row "reachability" ok "https://${APP_HOSTNAME} answers (${REACH})" ;;
+    000) row "reachability" fail "no answer on 443 — check the cloud provider's firewall (80/443) and DNS" ;;
+    *) row "reachability" warn "answered ${REACH} (some providers return odd codes during first setup)" ;;
+  esac
 fi
 
 # --- database + migrations
