@@ -42,9 +42,12 @@ services:
       retries: 3
     depends_on:
       api:
-        condition: service_healthy
-      authentik-server:
+        # STARTED, not healthy: api needs the gateway (and sign-in server) reachable
+        # for its OIDC discovery fetch, so the gateway must come up first and serve
+        # 502s until api finishes booting. Caddy handles upstream-down gracefully.
         condition: service_started
+      authentik-server:
+        condition: service_healthy
 
   # One-shot: validate object storage, create the evidence bucket if missing,
   # and lock it down to authenticated access (spec §10.2 init requirements).
@@ -165,6 +168,9 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    # No dependency on the gateway: api retries its OIDC discovery fetch until
+    # authentik is up; the gateway in turn waits for api (started) and authentik
+    # (healthy) so the whole graph resolves without a cycle.
 
   worker:
     image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/careangels/workforce-suite}:${APP_VERSION:-latest}
