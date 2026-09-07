@@ -59,8 +59,24 @@ bootstrap() {
       echo "   user '$SERVICE_USER' created (sudo member). Set a login password now:"
       passwd "$SERVICE_USER" || true
     fi
-    DEPLOY_DIR="$(pwd)"
-    chown -R "$SERVICE_USER:$SERVICE_USER" "$DEPLOY_DIR"
+
+    # ---- 1. Relocate the bundle to /opt (a dir under /root blocks the service
+    #         user — traversal through /root is denied regardless of file ownership).
+    TARGET="/opt/workforce-deploy"
+    CURRENT="$(cd "$(dirname "$0")/.." && pwd)"
+    if [ "$CURRENT" != "$TARGET" ]; then
+      echo "Moving the deployment bundle to $TARGET (the service user cannot live under /root)…"
+      mkdir -p "$(dirname "$TARGET")"
+      if [ -d "$TARGET" ] && [ -f "$TARGET/.env" ]; then
+        # a previous install lives there — keep its .env/secrets, refresh the tooling
+        cp -a "$CURRENT"/bin "$CURRENT"/gateway "$CURRENT"/compose.yaml "$CURRENT"/blueprints "$TARGET/" 2>/dev/null || true
+      else
+        rm -rf "$TARGET"
+        mkdir -p "$TARGET"
+        cp -a "$CURRENT/." "$TARGET/"
+      fi
+    fi
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$TARGET"
 
     # ---- 3. Docker (engine + compose plugin) ----------------------------------
     if command -v docker >/dev/null 2>&1; then
@@ -69,11 +85,13 @@ bootstrap() {
       echo "Installing Docker…"
       curl -fsSL https://get.docker.com | sh
     fi
-    SERVICE_USER="${SERVICE_USER:-workforce_app_sa}"
     usermod -aG docker "$SERVICE_USER" 2>/dev/null || true
+    mkdir -p "/home/${SERVICE_USER}/.docker"
 
     # ---- 4. Registry login (images are private until licensing ships) ---------
-    if ! grep -q "ghcr.io" "/home/${SERVICE_USER}/.docker/config.json" 2>/dev/null; then
+    # The login MUST be performed as the service user — credentials land in THEIR
+    # docker config, not root's.
+    if ! sudo -u "$SERVICE_USER" sh -c 'grep -q ghcr.io ~/.docker/config.json' 2>/dev/null; then
       echo ""
       echo "The container images are pulled from GitHub's registry (private while"
       echo "licensing is in development). A GitHub personal access token with"
@@ -81,16 +99,20 @@ bootstrap() {
       printf "GitHub username [marlon-thomas]: "
       read -r GH_USER
       GH_USER="${GH_USER:-marlon-thomas}"
-      docker login ghcr.io -u "$GH_USER" || fail "Registry login failed — the token needs read:packages scope."
+      echo -n "GitHub token (read:packages): "
+      read -rs GH_TOKEN
+      echo ""
+      sudo -E -u "$SERVICE_USER" env GH_USER="$GH_USER" GH_TOKEN="$GH_TOKEN" \
+        sh -c 'echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin' \
+        || fail "Registry login failed — the token needs read:packages scope."
     fi
 
-    # Hand over: re-exec the rest of the installer as the service user.
+    # Hand over: re-exec the rest of the installer as the service user, from /opt.
     echo ""
-    echo "Bootstrap complete. Continuing as '$SERVICE_USER'…"
-    if [ "${SMOKE}" -eq 1 ]; then
-      exec sudo -E -u "$SERVICE_USER" env SMOKE=1 bash "$0" --smoke "$@"
-    fi
-    exec sudo -u "$SERVICE_USER" bash "$0" "$@"
+    echo "Bootstrap complete. Continuing as '$SERVICE_USER' from $TARGET…"
+    SMOKE_FLAG=""
+    [ "${SMOKE}" -eq 1 ] && SMOKE_FLAG="--smoke"
+    exec sudo -u "$SERVICE_USER" bash "$TARGET/bin/install.sh" $SMOKE_FLAG
   fi
 }
 
@@ -117,10 +139,23 @@ open_port() {
 bootstrap
 
 if [ -f .env ]; then
-  warn "This deployment is already configured (deploy/.env exists)."
-  echo "   Use ./bin/update.sh to change versions, or delete .env to reconfigure from scratch."
+  # Resume: an existing configuration just needs the stack (re)started and checked.
+  warn "This deployment is already configured (deploy/.env exists) — resuming…"
+  # shellcheck disable=SC1091
+  . ./.env
+  say "Fetching images and starting the stack…"
+  docker compose pull api worker >/dev/null 2>&1 || true
+  docker compose up -d
+  sleep 20
+  ./bin/doctor.sh
+  echo ""
+  echo "Re-run ./bin/update.sh <version> to change versions."
   exit 0
 fi
+
+# Sanity: the wizard must run from the bundle root (compose.yaml present).
+[ -f compose.yaml ] || fail "compose.yaml not found — run me from the deployment bundle directory."
+
 
 # ---------------------------------------------------------------- prompt 1/4
 PUBLIC_IP="$(curl -4 -fsS --max-time 8 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
