@@ -84,6 +84,10 @@ services:
       DB_USER: ${DB_USER}
       WORKFORCE_EVIDENCE_S3_ENDPOINT: http://object-storage:9000
       WORKFORCE_EVIDENCE_S3_BUCKET: ${MINIO_BUCKET:-workforce-evidence}
+      # Same conditional-bean set as api — the Spring context must boot identically here.
+      WORKFORCE_REPORTS_GOTENBERG_URL: http://gotenberg:3000
+      WORKFORCE_EVIDENCE_CLAMAV_HOST: clamav
+      WORKFORCE_EVIDENCE_CLAMAV_PORT: "3310"
     secrets:
       - source: db_password
         target: spring.datasource.password
@@ -309,6 +313,18 @@ services:
         crond -f -L /dev/null
     logging: *default-logging
 
+  ak-redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    networks: [data]
+    command: --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    logging: *default-logging
+
   authentik-server:
     image: ghcr.io/goauthentik/server:2024.12
     restart: unless-stopped
@@ -316,21 +332,31 @@ services:
     command: server
     environment:
       TZ: Europe/London
-      AUTHENTIK_POSTGRES__HOST: authentik-postgres
-      AUTHENTIK_POSTGRES__USER: ${AK_DB_USER}
-      AUTHENTIK_POSTGRES__NAME: ${AK_DB_NAME}
-      AUTHENTIK_POSTGRES__PASSWORD__FILE: /run/secrets/ak_db_password
-      AUTHENTIK_SECRET_KEY__FILE: /run/secrets/ak_secret
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__USER: ${AK_DB_USER}
+      AUTHENTIK_POSTGRESQL__NAME: ${AK_DB_NAME}
+      AUTHENTIK_REDIS__HOST: ak-redis
       AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
-    secrets: [ak_db_password, ak_secret]
+    secrets:
+      - source: ak_db_password
+        target: ak_db_password
+      - source: ak_secret
+        target: ak_secret
+      - source: ak_config
+        target: /etc/authentik/config.yml
+        mode: 0444
     volumes:
       - ak_media:/media
       - ak_certs:/certs
       - ak_geoip:/geoip
+      # Rendered by install.sh from blueprints/workforce-app.yaml.template (§B5)
+      - ./blueprints/workforce-app.yaml:/blueprints/workforce-app.yaml:ro
     logging: *default-logging
     stop_grace_period: 30s
     depends_on:
       authentik-postgres:
+        condition: service_healthy
+      ak-redis:
         condition: service_healthy
 
   authentik-worker:
@@ -340,13 +366,19 @@ services:
     command: worker
     environment:
       TZ: Europe/London
-      AUTHENTIK_POSTGRES__HOST: authentik-postgres
-      AUTHENTIK_POSTGRES__USER: ${AK_DB_USER}
-      AUTHENTIK_POSTGRES__NAME: ${AK_DB_NAME}
-      AUTHENTIK_POSTGRES__PASSWORD__FILE: /run/secrets/ak_db_password
-      AUTHENTIK_SECRET_KEY__FILE: /run/secrets/ak_secret
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__USER: ${AK_DB_USER}
+      AUTHENTIK_POSTGRESQL__NAME: ${AK_DB_NAME}
+      AUTHENTIK_REDIS__HOST: ak-redis
       AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
-    secrets: [ak_db_password, ak_secret]
+    secrets:
+      - source: ak_db_password
+        target: ak_db_password
+      - source: ak_secret
+        target: ak_secret
+      - source: ak_config
+        target: /etc/authentik/config.yml
+        mode: 0444
     volumes:
       - ak_media:/media
       - ak_certs:/certs
@@ -354,6 +386,8 @@ services:
     stop_grace_period: 30s
     depends_on:
       authentik-postgres:
+        condition: service_healthy
+      ak-redis:
         condition: service_healthy
 
   authentik-postgres:
@@ -391,6 +425,8 @@ secrets:
     file: ./secrets/ak_db_password
   ak_secret:
     file: ./secrets/ak_secret
+  ak_config:
+    file: ./secrets/ak_config.yml
 
 volumes:
   caddy_data:

@@ -75,11 +75,11 @@ else
 fi
 
 # --- antivirus
-CV=$(docker compose exec -T clamav nc -z localhost 3310 >/dev/null 2>&1 && echo ok || echo no)
+CV=$(docker compose exec -T clamav sh -c "nc -z localhost 3310" >/dev/null 2>&1 && echo ok || echo no)
 [ "$CV" = ok ] && row "antivirus" ok "ClamAV listening" || row "antivirus" warn "not answering (it can take minutes on first ever start)"
 
 # --- sign-in server
-AH=$(docker compose exec -T authentik-server curl -fsS http://localhost:9000/-/health/ >/dev/null 2>&1 && echo ok || echo no)
+AH=$(docker compose exec -T authentik-server /ak-root/venv/bin/python -c 'import urllib.request; urllib.request.urlopen("http://localhost:9000/-/health/ready/", timeout=3)' >/dev/null 2>&1 && echo ok || echo no)
 [ "$AH" = ok ] && row "sign-in server" ok "healthy" || row "sign-in server" fail "not healthy"
 
 # --- disk + backups

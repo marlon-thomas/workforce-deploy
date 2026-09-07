@@ -90,10 +90,18 @@ read -r BACKUP_TARGET
 
 # ---------------------------------------------------------------- generate
 say "Generating secrets (they are never displayed)…"
-mkdir -p secrets backups
+mkdir -p secrets backups blueprints
 gen() { [ -s "secrets/$1" ] || openssl rand -base64 32 | tr -d '\n' > "secrets/$1"; }
 gen db_password; gen minio_access; gen minio_secret
 gen ak_db_password; gen ak_secret
+# authentik 2024.12 no longer supports *_FILE for its own settings and cannot write
+# /etc as a non-root user — its documented /etc/authentik/config.yml is delivered as a
+# Docker secret composed from the other two secrets.
+{
+  echo "secret_key: $(cat secrets/ak_secret)"
+  echo "postgresql:"
+  echo "  password: $(cat secrets/ak_db_password)"
+} > secrets/ak_config.yml
 OIDC_CLIENT_ID="workforce-$(openssl rand -hex 4)"
 echo "$OIDC_CLIENT_ID" > secrets/oidc_client_id
 openssl rand -base64 32 | tr -d '\n' > secrets/oidc_client_secret
@@ -135,11 +143,29 @@ else
   docker compose up -d
 fi
 
-say "Waiting for the sign-in server to be ready, then connecting it to the workforce system…"
+say "Connecting the workforce system to the sign-in server (authentik applies the blueprint on startup)…"
 if [ "${SMOKE}" -eq 1 ]; then
-  warn "--smoke: sign-in provisioning runs against the local authentik container."
+  warn "--smoke: sign-in is wired for localhost (no TLS) — production runs use https."
 fi
-./bin/provision-authentik.sh
+# Render the provisioning blueprint (deployment-spec §B5): OIDC provider + application +
+# first administrator. authentik applies it natively on every startup (idempotent).
+AK_ADMIN_PASSWORD="${ADMIN_PASSWORD}"
+export AK_ADMIN_PASSWORD
+sed   -e "s|\${OIDC_CLIENT_ID}|$(cat secrets/oidc_client_id)|g" \
+  -e "s|\${OIDC_CLIENT_SECRET}|$(cat secrets/oidc_client_secret)|g" \
+  -e "s|\${WF_REDIRECT_URI}|https://${APP_HOSTNAME}/login/oauth2/code/oidc|g" \
+  -e "s|\${ACME_EMAIL}|${ACME_EMAIL}|g" \
+  -e "s|\${AK_ADMIN_PASSWORD}|${AK_ADMIN_PASSWORD}|g" \
+  ../blueprints/workforce-app.yaml.template > blueprints/workforce-app.yaml 2>/dev/null \
+  || sed \
+  -e "s|\${OIDC_CLIENT_ID}|$(cat secrets/oidc_client_id)|g" \
+  -e "s|\${OIDC_CLIENT_SECRET}|$(cat secrets/oidc_client_secret)|g" \
+  -e "s|\${WF_REDIRECT_URI}|https://${APP_HOSTNAME}/login/oauth2/code/oidc|g" \
+  -e "s|\${ACME_EMAIL}|${ACME_EMAIL}|g" \
+  -e "s|\${AK_ADMIN_PASSWORD}|${AK_ADMIN_PASSWORD}|g" \
+  blueprints/workforce-app.yaml.template > blueprints/workforce-app.yaml
+chmod 600 blueprints/workforce-app.yaml
+docker compose up -d authentik-server authentik-worker
 
 say "Final health check:"
 if [ "${SMOKE}" -eq 1 ]; then
