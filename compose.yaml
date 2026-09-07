@@ -72,7 +72,7 @@ services:
 
   # One-shot database migrations; the API does NOT run Flyway (§10.2).
   migrate:
-    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the image name to build and deploy, e.g. workforce-api}:${APP_VERSION:-latest}
+    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/careangels/workforce-suite}:${APP_VERSION:-latest}
     restart: "no"
     networks: [data]
     environment:
@@ -290,6 +290,24 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  backup:
+    image: alpine:3.20
+    restart: unless-stopped
+    networks: [data, back]
+    volumes:
+      - .:/work
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      TZ: Europe/London
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        apk add -q dcron docker-cli >/dev/null
+        echo '0 2 * * * cd /work && ./bin/backup.sh >> backups/cron.log 2>&1' | crontab -
+        crond -f -L /dev/null
+    logging: *default-logging
 
   authentik-server:
     image: ghcr.io/goauthentik/server:2024.12
