@@ -368,6 +368,8 @@ gen ak_db_password; gen ak_secret
 OIDC_CLIENT_ID="workforce-$(openssl rand -hex 4)"
 echo "$OIDC_CLIENT_ID" > secrets/oidc_client_id
 openssl rand -base64 32 | tr -d '\n' > secrets/oidc_client_secret
+chmod 600 secrets/ak_config.yml 2>/dev/null || true
+chmod 644 secrets/ak_config.yml   # bind-mounted into authentik (rootless uid mapping)
 chmod 600 secrets/*
 
 # ---------------------------------------------------------------- write config

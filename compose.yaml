@@ -345,18 +345,15 @@ services:
       AUTHENTIK_POSTGRESQL__NAME: ${AK_DB_NAME}
       AUTHENTIK_REDIS__HOST: ak-redis
       AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
-    secrets:
-      - source: ak_db_password
-        target: ak_db_password
-      - source: ak_secret
-        target: ak_secret
-      - source: ak_config
-        target: /etc/authentik/config.yml
-        mode: 0444
+    secrets: [ak_db_password, ak_secret]
     volumes:
       - ak_media:/media
       - ak_certs:/certs
       - ak_geoip:/geoip
+      # Rootless-safe config delivery: bind-mounted from the bundle's secrets dir
+      # (a docker-secret mount at this path is unreadable to the in-container user
+      # under a rootless daemon — observed live). install.sh writes+chmods this file.
+      - ./secrets/ak_config.yml:/etc/authentik/config.yml:ro
       # Rendered by install.sh from blueprints/workforce-app.yaml.template (§B5)
       - ./blueprints/workforce-app.yaml:/blueprints/workforce-app.yaml:ro
     logging: *default-logging
@@ -379,17 +376,11 @@ services:
       AUTHENTIK_POSTGRESQL__NAME: ${AK_DB_NAME}
       AUTHENTIK_REDIS__HOST: ak-redis
       AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
-    secrets:
-      - source: ak_db_password
-        target: ak_db_password
-      - source: ak_secret
-        target: ak_secret
-      - source: ak_config
-        target: /etc/authentik/config.yml
-        mode: 0444
+    secrets: [ak_db_password, ak_secret]
     volumes:
       - ak_media:/media
       - ak_certs:/certs
+      - ./secrets/ak_config.yml:/etc/authentik/config.yml:ro
     logging: *default-logging
     stop_grace_period: 30s
     depends_on:
@@ -433,8 +424,6 @@ secrets:
     file: ./secrets/ak_db_password
   ak_secret:
     file: ./secrets/ak_secret
-  ak_config:
-    file: ./secrets/ak_config.yml
 
 volumes:
   caddy_data:
