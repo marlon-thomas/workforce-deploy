@@ -16,9 +16,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."   # deploy/
 
 SMOKE=0
+SYSTEM_DOCKER=0
 for arg in "$@"; do
   case "$arg" in
     --smoke) SMOKE=1 ;;
+    --system-docker) SYSTEM_DOCKER=1 ;;
     *) echo "Unknown option: $arg"; exit 1 ;;
   esac
 done
@@ -86,16 +88,46 @@ bootstrap() {
     fi
     chown -R "$SERVICE_USER:$SERVICE_USER" "$TARGET"
 
-    # ---- 3. Docker (engine + compose plugin) ----------------------------------
-    if command -v docker >/dev/null 2>&1; then
-      echo "Docker is already installed."
+    # ---- 3. Docker (rootless by default — the daemon itself runs as the service
+    #         user, so no root-equivalent daemon is exposed; spec §B4 hardening) ----
+    if [ "${SYSTEM_DOCKER}" -eq 1 ]; then
+      echo "Installing Docker (system daemon — --system-docker requested)…"
+      command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
+      usermod -aG docker "$SERVICE_USER" 2>/dev/null || true
+      mkdir -p "/home/${SERVICE_USER}/.docker"
+      chown -R "$SERVICE_USER:$SERVICE_USER" "/home/${SERVICE_USER}/.docker"
+    elif command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1 \
+         && sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
+              XDG_RUNTIME_DIR="/run/user/$(id -u $SERVICE_USER)" \
+              systemctl --user is-active docker >/dev/null 2>&1; then
+      echo "Rootless Docker is already active for $SERVICE_USER."
     else
-      echo "Installing Docker…"
-      curl -fsSL https://get.docker.com | sh
+      echo "Installing Docker (rootless mode for $SERVICE_USER)…"
+      command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
+      # prerequisites: unprivileged userns, subuid/subgid ranges, lingering
+      usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$SERVICE_USER"
+      loginctl enable-linger "$SERVICE_USER"
+      apt-get -qq install -y uidmap dbus-user-session >/dev/null 2>&1 || true
+      # rootless cannot bind <1024: delegate 80/443 via CAP_NET_BIND_SERVICE on the
+      # rootless dockerd user binary, and have the gateway publish on those ports.
+      setcap cap_net_bind_service=ep /usr/bin/rootlesskit 2>/dev/null \
+        || warn "Could not set cap_net_bind_service on rootlesskit — port binding may need sysctl net.ipv4.ip_unprivileged_port_start=80"
+      sysctl -w net.ipv4.ip_unprivileged_port_start=80 >/dev/null
+      grep -q "ip_unprivileged_port_start" /etc/sysctl.conf 2>/dev/null \
+        || echo "net.ipv4.ip_unprivileged_port_start=80" >> /etc/sysctl.conf
+      sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
+        XDG_RUNTIME_DIR="/run/user/$(id -u $SERVICE_USER)" \
+        dockerd-rootless-setuptool.sh install \
+        || fail "Rootless Docker setup failed. If this kernel lacks unprivileged user
+       namespaces (common on some OpenVZ/LXC hosts like older Contabo images), re-run
+       with --system-docker to use the classic daemon."
+      sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
+        XDG_RUNTIME_DIR="/run/user/$(id -u $SERVICE_USER)" \
+        systemctl --user enable --now docker
+      mkdir -p "/home/${SERVICE_USER}/.docker"
+      chown -R "$SERVICE_USER:$SERVICE_USER" "/home/${SERVICE_USER}/.docker"
+      export DOCKER_HOST="unix:///run/user/${SERVICE_USER}/docker.sock"
     fi
-    usermod -aG docker "$SERVICE_USER" 2>/dev/null || true
-    mkdir -p "/home/${SERVICE_USER}/.docker"
-    chown -R "$SERVICE_USER:$SERVICE_USER" "/home/${SERVICE_USER}/.docker"
 
     # ---- 4. Registry login (images are private until licensing ships) ---------
     # The login MUST be performed as the service user — credentials land in THEIR

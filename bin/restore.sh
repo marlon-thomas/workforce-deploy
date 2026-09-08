@@ -10,6 +10,15 @@ ARCHIVE="${1:-}"
 # shellcheck disable=SC1091
 [ -f .env ] && . ./.env
 
+# Rootless-aware docker context: when run as root on a rootless install, talk to the
+# service user's daemon socket (compose exec etc. need the right socket).
+resolve_docker_context() {
+  if [ "$(id -u)" -eq 0 ] && [ -S "/home/workforce_app_sa/.docker/run/docker.sock" ]; then
+    export DOCKER_HOST="unix:///home/workforce_app_sa/.docker/run/docker.sock"
+  fi
+}
+resolve_docker_context
+
 echo "This will REPLACE the current database and evidence with the contents of:"
 echo "  $ARCHIVE"
 printf 'Type RESTORE to continue: '

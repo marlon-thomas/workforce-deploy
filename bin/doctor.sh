@@ -27,6 +27,15 @@ if [ ! -f .env ]; then
 fi
 # shellcheck disable=SC1091
 . ./.env
+
+# Rootless-aware docker context: when run as root on a rootless install, talk to the
+# service user's daemon socket (compose exec etc. need the right socket).
+resolve_docker_context() {
+  if [ "$(id -u)" -eq 0 ] && [ -S "/home/workforce_app_sa/.docker/run/docker.sock" ]; then
+    export DOCKER_HOST="unix:///home/workforce_app_sa/.docker/run/docker.sock"
+  fi
+}
+resolve_docker_context
 row "configuration" ok "hostname ${APP_HOSTNAME}"
 
 # --- containers

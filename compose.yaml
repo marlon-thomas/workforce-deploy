@@ -307,7 +307,9 @@ services:
     networks: [data, back]
     volumes:
       - .:/work
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Rootless-compatible: the operator's docker socket, wherever it lives
+      # (root: /var/run/docker.sock; rootless: /run/user/<uid>/docker.sock).
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
     environment:
       TZ: Europe/London
     entrypoint:
