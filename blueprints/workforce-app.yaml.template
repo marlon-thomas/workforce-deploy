@@ -51,12 +51,11 @@ entries:
       type: internal
       is_active: true
       email: ${ACME_EMAIL}
-      # Set only when the user is first created (idempotent without being
-      # revert-on-restart: a later org password change must survive restarts).
       password: ${AK_ADMIN_PASSWORD}
     identifiers:
       username: admin
-    conditions:
-      - !Condition needs_admin_user
-    state: present
+    # state "created": applied only when the user does not exist yet — so the
+    # password is set at install time and never reverts on restarts (an org
+    # password change made later must survive).
+    state: created
     model: authentik_core.user
