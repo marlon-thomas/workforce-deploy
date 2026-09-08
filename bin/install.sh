@@ -158,40 +158,57 @@ fi
 
 
 # ---------------------------------------------------------------- prompt 1/4
+# The installer asks for the ORGANISATION'S DOMAIN (e.g. carehome.org.uk) and derives
+# the two hostnames from it: workforce.<domain> (the app) and auth.<domain> (sign-in).
+# Custom prefixes are supported via WF_SUBDOMAIN / AUTH_SUBDOMAIN.
 PUBLIC_IP="$(curl -4 -fsS --max-time 8 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
-printf '1/4  What web address will staff use? (e.g. workforce.carehome.org.uk): '
-read -r APP_HOSTNAME
-[ -n "${APP_HOSTNAME}" ] || fail "A hostname is required."
+printf "1/4  What is your organisation's web domain? (e.g. carehome.org.uk): "
+read -r BASE_DOMAIN
+[ -n "${BASE_DOMAIN}" ] || fail "A domain is required."
+BASE_DOMAIN="${BASE_DOMAIN#http://}"; BASE_DOMAIN="${BASE_DOMAIN#https://}"
+BASE_DOMAIN="${BASE_DOMAIN%/}"
+APP_SUB="${WF_SUBDOMAIN:-workforce}"
+AUTH_SUB="${AUTH_SUBDOMAIN:-auth}"
+APP_HOSTNAME="${APP_SUB}.${BASE_DOMAIN}"
+AUTH_HOSTNAME="${AUTH_SUB}.${BASE_DOMAIN}"
+echo "     The app will be served at:  ${APP_HOSTNAME}"
+echo "     Sign-in will be served at:  ${AUTH_HOSTNAME}"
 
 verify_dns() {
-  RESOLVED="$(getent hosts "$APP_HOSTNAME" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')"
-  if [ -z "${RESOLVED}" ]; then
-    echo "     '${APP_HOSTNAME}' does not resolve yet."
-    return 1
+  OK=1
+  for H in "$APP_HOSTNAME" "$AUTH_HOSTNAME"; do
+    RESOLVED="$(getent hosts "$H" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')"
+    if [ -z "${RESOLVED}" ]; then
+      echo "     '${H}' does not resolve yet."
+      OK=0
+    elif [ -n "${PUBLIC_IP}" ] && [[ " ${RESOLVED} " != *" ${PUBLIC_IP} "* ]]; then
+      echo "     '${H}' points at ${RESOLVED}, but this machine is ${PUBLIC_IP}."
+      OK=0
+    fi
+  done
+  if [ "$OK" -eq 1 ]; then
+    echo "     DNS OK: both hostnames point at this machine."
+    return 0
   fi
-  if [ -n "${PUBLIC_IP}" ] && [[ " ${RESOLVED} " != *" ${PUBLIC_IP} "* ]]; then
-    echo "     '${APP_HOSTNAME}' points at ${RESOLVED}, but this machine is ${PUBLIC_IP}."
-    return 1
-  fi
-  echo "     DNS OK: ${APP_HOSTNAME} -> ${PUBLIC_IP:-this host}"
-  return 0
+  return 1
 }
 if [ "${SMOKE}" -eq 0 ]; then
   say "Opening the firewall for the web (80/tcp, 443/tcp)…"
   open_port 80
   open_port 443
-  say "Checking the address points at this machine (this can take a few minutes on a fresh domain)…"
+  say "Checking that both addresses point at this machine (this can take a few minutes
+      on a fresh domain — create TWO 'A' records: ${APP_HOSTNAME} and ${AUTH_HOSTNAME}
+      -> ${PUBLIC_IP})…"
   for i in $(seq 1 60); do
     verify_dns && break
-    [ "$i" = 60 ] && fail "DNS still not pointing here. Update it at your domain provider
-     (an 'A' record: ${APP_HOSTNAME} -> ${PUBLIC_IP}) and re-run me."
+    [ "$i" = 60 ] && fail "DNS still not pointing here. At your domain provider create
+     two 'A' records: ${APP_HOSTNAME} -> ${PUBLIC_IP} and ${AUTH_HOSTNAME} -> ${PUBLIC_IP},
+     then re-run me."
     sleep 15
   done
 else
   warn "--smoke: DNS verification skipped."
 fi
-AUTH_HOSTNAME="auth.${APP_HOSTNAME#*.}"   # workforce.example.com -> auth.example.com
-
 # ---------------------------------------------------------------- prompt 2/4
 printf '2/4  Email for security-certificate notices: '
 read -r ACME_EMAIL
