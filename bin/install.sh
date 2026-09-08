@@ -77,6 +77,28 @@ preflight_network() {
   echo "     Internet OK, ghcr.io reachable."
 }
 
+pull_stack_images() {
+  # Pull every stack image with retries — large layers over flaky links (or GHCR/DH
+  # connection resets mid-transfer) abort `compose up`; retrying just the pulls
+  # resumes from cached layers, so each attempt gets strictly closer to done.
+  say "Pulling the stack images (retries automatically on network resets)…"
+  ATTEMPT=1
+  MAX=6
+  while true; do
+    if docker compose pull; then
+      echo "     All images pulled."
+      return 0
+    fi
+    if [ "$ATTEMPT" -ge "$MAX" ]; then
+      fail "Image pulls kept failing after $MAX attempts. The stack is stopped.
+     Run me again — pulls resume from where they left off (cached layers are kept)."
+    fi
+    warn "Pull attempt $ATTEMPT hit a network error — waiting 15s and resuming (attempt $((ATTEMPT+1))/$MAX)…"
+    ATTEMPT=$((ATTEMPT+1))
+    sleep 15
+  done
+}
+
 preflight_and_pull() {
   # The application image, with diagnosis. Needs .env (API_IMAGE/APP_VERSION).
   say "Fetching the application image…"
@@ -238,7 +260,7 @@ resume_or_start() {
     fi
     preflight_and_pull
     say "Fetching remaining images and starting the stack…"
-    docker compose pull >/dev/null 2>&1 || true
+    pull_stack_images
     docker compose up -d
     sleep 20
     ./bin/doctor.sh
@@ -361,7 +383,8 @@ chmod 600 .env
 preflight_and_pull
 
 # ---------------------------------------------------------------- start the stack
-say "Starting the platform (this downloads and starts everything; first run takes a while)…"
+say "Starting the platform (first boot takes a while)…"
+pull_stack_images
 if [ "${SMOKE}" -eq 1 ]; then
   docker compose -f compose.yaml -f compose.smoke.yaml up -d
 else
