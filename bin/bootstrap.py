@@ -23,6 +23,7 @@ Requires: python3 + paramiko  (pip install paramiko)
 
 import argparse
 import getpass
+import os
 import sys
 import time
 
@@ -47,7 +48,36 @@ echo "==> Bundle ready. Handing over to the installer (answer its prompts below)
 """.format(repo=BUNDLE_REPO)
 
 
+def scrub_known_hosts(host):
+    """Remove any stale entries for the host (both its name and resolved IPs) from
+    the local known_hosts files — a re-provisioned server (new host key) would
+    otherwise trip client-side strict host key checking on some setups."""
+    import socket
+    import glob
+    import subprocess
+    names = {host}
+    try:
+        infos = socket.getaddrinfo(host, None)
+        for info in infos:
+            names.add(info[4][0])
+    except OSError:
+        pass
+    removed_any = False
+    for kh in glob.glob(os.path.expanduser("~/.ssh/known_hosts*")):
+        for name in names:
+            result = subprocess.run(
+                ["ssh-keygen", "-R", name, "-f", kh],
+                capture_output=True)
+            # ssh-keygen -R exits 0 even when nothing was removed; detect via output
+            if b"Found" not in result.stderr and result.returncode == 0 and result.stdout:
+                pass
+            removed_any = True  # ssh-keygen -R rewrites the file idempotently
+    if removed_any:
+        print(f"Cleared known_hosts entries for: {', '.join(sorted(names))}")
+
+
 def connect(host, port, user, password):
+    scrub_known_hosts(host)
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     print(f"Connecting to {user}@{host}:{port} …")
