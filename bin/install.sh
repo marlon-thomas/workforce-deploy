@@ -56,8 +56,16 @@ bootstrap() {
     else
       adduser --disabled-password --gecos "Care Angels Workforce service account,,," "$SERVICE_USER"
       usermod -aG sudo "$SERVICE_USER"
-      echo "   user '$SERVICE_USER' created (sudo member). Set a login password now:"
-      passwd "$SERVICE_USER" || true
+      echo "   user '$SERVICE_USER' created (sudo member)."
+      # The service account password is mandatory — a locked account the operator
+      # cannot log into breaks day-2 operation. Loop until it is set properly.
+      while true; do
+        if passwd "$SERVICE_USER"; then
+          break
+        fi
+        echo "   Passwords did not match or were rejected — try again."
+      done
+      echo "   Service account password set."
     fi
 
     # ---- 1. Relocate the bundle to /opt (a dir under /root blocks the service
