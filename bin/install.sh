@@ -391,6 +391,9 @@ if [ -n "${HUB_USER}" ]; then
   fi
 fi
 
+# Load the freshly written config (the preflight/pull helper reads API_IMAGE etc.)
+# shellcheck disable=SC1091
+. ./.env
 preflight_and_pull
 
 say "Starting the platform (this downloads and starts everything; first run takes a while)…"
