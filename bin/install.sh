@@ -164,6 +164,23 @@ bootstrap() {
       mkdir -p "$TARGET"
       cp -a "$CURRENT/." "$TARGET/"
     fi
+    # Replace the original clone with a pointer file — a stale copy without .env
+    # is a trap (compose runs from it fail with confusing interpolation errors).
+    rm -rf "$CURRENT"
+    mkdir -p "$CURRENT"
+    cat > "$CURRENT/README-MOVED.txt" <<MOVED
+The Care Angels Workforce deployment bundle has moved to:
+
+    $TARGET
+
+All commands run there (as the $SERVICE_USER user), e.g.:
+
+    cd $TARGET && ./bin/doctor.sh
+
+This directory is only a pointer — the real deployment (including .env
+and secrets) lives at the path above.
+MOVED
+    echo "   (the original clone at $CURRENT is now a pointer to $TARGET)"
   fi
   chown -R "$SERVICE_USER:$SERVICE_USER" "$TARGET"
 
