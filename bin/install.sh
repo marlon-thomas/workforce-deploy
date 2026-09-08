@@ -368,6 +368,18 @@ else
   docker compose up -d
 fi
 
+# First boot convergence: wait (bounded) for the api's identity endpoint through the
+# gateway so the final doctor reflects a ready system, not a booting one.
+if [ "${SMOKE}" -ne 1 ]; then
+  say "Waiting for the application to become ready (first boot can take several minutes)…"
+  for i in $(seq 1 60); do
+    CODE="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://${APP_HOSTNAME}/api/v1/build-meta" 2>/dev/null || echo 000)"
+    if [ "$CODE" = "200" ]; then echo "     Application is up (attempt $i)."; break; fi
+    [ "$i" = 60 ] && warn "The application is still starting — the health check below may show FAILs that clear on re-run."
+    sleep 10
+  done
+fi
+
 # ---------------------------------------------------------------- blueprint
 say "Connecting the workforce system to the sign-in server (authentik applies the blueprint on startup)…"
 if [ "${SMOKE}" -eq 1 ]; then

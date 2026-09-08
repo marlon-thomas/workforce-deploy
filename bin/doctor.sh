@@ -18,6 +18,7 @@ row() { # row <label> <ok|warn|fail> <detail>
 }
 
 echo "Care Angels Workforce — health check ($(date '+%Y-%m-%d %H:%M'))"
+echo "(first boot: api/authentik can take several minutes — re-run if FAILs persist)"
 echo "-------------------------------------------------------------"
 
 # --- configuration present?
@@ -46,7 +47,11 @@ for svc in gateway api worker postgres object-storage clamav authentik-server; d
 done
 
 # --- version identity (compare running vs configured)
-RUNNING_META="$(curl -fsS --max-time 5 "http://127.0.0.1:8080/api/v1/build-meta" 2>/dev/null || true)"
+# The api port is NOT published (only gateway 80/443 are) — probe via the gateway
+# (TLS) and fall back to exec inside the api container.
+RUNNING_META="$(curl -fsSk --max-time 5 "https://${APP_HOSTNAME}/api/v1/build-meta" 2>/dev/null \
+  || docker compose exec -T api curl -fsS --max-time 5 http://localhost:8080/api/v1/build-meta 2>/dev/null \
+  || true)"
 if [ -n "$RUNNING_META" ]; then
   RV="$(echo "$RUNNING_META" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)"
   row "running version" ok "$RV (configured: ${APP_VERSION})"
@@ -60,11 +65,11 @@ RESOLVED="$(getent hosts "$APP_HOSTNAME" 2>/dev/null | awk '{print $1}' | head -
 if [ "$SMOKE" -eq 0 ]; then
   ISSUER="$(echo | timeout 8 openssl s_client -connect "${APP_HOSTNAME}:443" -servername "${APP_HOSTNAME}" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null | head -1)"
   [ -n "$ISSUER" ] && row "TLS" ok "certificate present" || row "TLS" warn "certificate not readable yet (first issuance can take a minute)"
-  REACH="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 8 "https://${APP_HOSTNAME}" 2>/dev/null || echo 0)"
+  REACH="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 8 "https://${APP_HOSTNAME}" 2>/dev/null || echo 000)"
   case "$REACH" in
-    200|301|302|308) row "reachability" ok "https://${APP_HOSTNAME} answers (${REACH})" ;;
     000) row "reachability" fail "no answer on 443 — check the cloud provider's firewall (80/443) and DNS" ;;
-    *) row "reachability" warn "answered ${REACH} (some providers return odd codes during first setup)" ;;
+    2*|3*|4*|5*) row "reachability" ok "https://${APP_HOSTNAME} answers (HTTP ${REACH})" ;;
+    *) row "reachability" warn "unreadable answer (${REACH}) — re-run in a minute" ;;
   esac
 fi
 
@@ -94,7 +99,13 @@ CV=$(docker compose exec -T clamav sh -c "nc -z localhost 3310" >/dev/null 2>&1 
 [ "$CV" = ok ] && row "antivirus" ok "ClamAV listening" || row "antivirus" warn "not answering (it can take minutes on first ever start)"
 
 # --- sign-in server
-AH=$(docker compose exec -T authentik-server /ak-root/venv/bin/python -c 'import urllib.request; urllib.request.urlopen("http://localhost:9000/-/health/ready/", timeout=3)' >/dev/null 2>&1 && echo ok || echo no)
+# Probe authentik readiness via the gateway auth vhost (stable path from the host),
+# falling back to exec python inside the container.
+AH=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 6 "https://${AUTH_HOSTNAME}/-/health/ready/" 2>/dev/null || echo 000)
+case "$AH" in
+  2*|3*) AH=ok ;;
+  *) AH=$(docker compose exec -T authentik-server /ak-root/venv/bin/python -c 'import urllib.request; urllib.request.urlopen("http://localhost:9000/-/health/ready/", timeout=3)' >/dev/null 2>&1 && echo ok || echo no) ;;
+esac
 [ "$AH" = ok ] && row "sign-in server" ok "healthy" || row "sign-in server" fail "not healthy"
 
 # --- disk + backups
