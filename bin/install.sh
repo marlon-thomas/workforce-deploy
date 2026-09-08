@@ -87,6 +87,7 @@ bootstrap() {
     fi
     usermod -aG docker "$SERVICE_USER" 2>/dev/null || true
     mkdir -p "/home/${SERVICE_USER}/.docker"
+    chown -R "$SERVICE_USER:$SERVICE_USER" "/home/${SERVICE_USER}/.docker"
 
     # ---- 4. Registry login (images are private until licensing ships) ---------
     # The login MUST be performed as the service user — credentials land in THEIR
@@ -158,6 +159,16 @@ fi
 
 # Sanity: the wizard must run from the bundle root (compose.yaml present).
 [ -f compose.yaml ] || fail "compose.yaml not found — run me from the deployment bundle directory."
+
+# Preflight: the stack pull needs general internet + the GitHub registry.
+say "Checking internet and registry reachability…"
+PING_OK=$(curl -4 -fsS -o /dev/null -w '%{http_code}' --max-time 8 https://get.docker.com 2>/dev/null || echo 0)
+[ "$PING_OK" != "0" ] || fail "This machine cannot reach the internet (get.docker.com unreachable).
+     On Contabo/other providers the server may need its firewall panel opened, or
+     IPv6 misconfiguration is breaking outbound access — try: curl -4 https://ifconfig.me"
+GH_OK=$(curl -4 -fsS -o /dev/null -w '%{http_code}' --max-time 8 https://ghcr.io/v2/ 2>/dev/null || echo 0)
+[ "$GH_OK" != "0" ] || fail "ghcr.io is unreachable from this machine (network filtering?)"
+echo "     Internet OK, ghcr.io reachable."
 
 
 # ---------------------------------------------------------------- prompt 1/4
@@ -292,6 +303,29 @@ if [ -n "${HUB_USER}" ]; then
     else
       fail "Could not fetch the images from GHCR or the Docker Hub mirror. Check your internet connection."
     fi
+  fi
+fi
+
+# Pull the application image up-front with a clear diagnosis: distinguish
+# "not logged in / not found" from "network down", and self-heal the common
+# wrong-image-name case (an older .env.example shipped with careangels/).
+say "Fetching the application image…"
+if ! docker pull "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1; then
+  FALLBACK="ghcr.io/marlon-thomas/workforce-suite"
+  if [ "${API_IMAGE}" != "${FALLBACK}" ] && docker pull "${FALLBACK}:${APP_VERSION}" >/dev/null 2>&1; then
+    warn "The configured image (${API_IMAGE}) does not exist — using ${FALLBACK} instead."
+    sed -i.bak "s|^API_IMAGE=.*|API_IMAGE=${FALLBACK}|" .env
+    API_IMAGE="${FALLBACK}"
+  elif [ -n "${DOCKERHUB_USER:-}" ] && docker pull "docker.io/${DOCKERHUB_USER}/workforce-suite:${APP_VERSION}" >/dev/null 2>&1; then
+    warn "GHCR unavailable — using the Docker Hub mirror."
+    sed -i.bak "s|^API_IMAGE=.*|API_IMAGE=docker.io/${DOCKERHUB_USER}/workforce-suite|" .env
+    API_IMAGE="docker.io/${DOCKERHUB_USER}/workforce-suite"
+  else
+    fail "Could not pull ${API_IMAGE}:${APP_VERSION}.
+     - If the error says 'denied' or 'authentication required': re-run me and repeat
+       the registry login (the token needs read:packages scope).
+     - If it says 'not found': the image name in .env is wrong.
+     - If everything else is green: check this machine's internet access."
   fi
 fi
 
