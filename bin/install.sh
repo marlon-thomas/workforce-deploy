@@ -166,6 +166,10 @@ bootstrap() {
     fi
     # Replace the original clone with a pointer file — a stale copy without .env
     # is a trap (compose runs from it fail with confusing interpolation errors).
+    # The running script's CWD is inside $CURRENT — move out first or every child
+    # shell dies with getcwd() failed (the running bash keeps its script fd open,
+    # so unlinking is safe once the CWD has moved).
+    cd "$TARGET"
     rm -rf "$CURRENT"
     mkdir -p "$CURRENT"
     cat > "$CURRENT/README-MOVED.txt" <<MOVED
