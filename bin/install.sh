@@ -147,8 +147,17 @@ if [ -f .env ]; then
   warn "This deployment is already configured (deploy/.env exists) — resuming…"
   # shellcheck disable=SC1091
   . ./.env
-  say "Fetching images and starting the stack…"
-  docker compose pull api worker >/dev/null 2>&1 || true
+  # Silent migration: early bundles shipped a placeholder image name that never
+  # existed (ghcr.io/careangels/...). The published path is marlon-thomas/...
+  # (.env is generated at install time, so git pull does not update it).
+  if [ "${API_IMAGE}" = "ghcr.io/careangels/workforce-suite" ]; then
+    sed -i 's|^API_IMAGE=.*|API_IMAGE=ghcr.io/marlon-thomas/workforce-suite|' .env
+    API_IMAGE="ghcr.io/marlon-thomas/workforce-suite"
+    warn "Migrated the image registry path in .env (early placeholder) — nothing to do."
+  fi
+  preflight_and_pull
+  say "Fetching remaining images and starting the stack…"
+  docker compose pull >/dev/null 2>&1 || true
   docker compose up -d
   sleep 20
   ./bin/doctor.sh
@@ -159,6 +168,42 @@ fi
 
 # Sanity: the wizard must run from the bundle root (compose.yaml present).
 [ -f compose.yaml ] || fail "compose.yaml not found — run me from the deployment bundle directory."
+
+preflight_and_pull() {
+  # Preflight: the stack pull needs general internet + the GitHub registry.
+  say "Checking internet and registry reachability…"
+  PING_OK=$(curl -4 -fsS -o /dev/null -w '%{http_code}' --max-time 8 https://get.docker.com 2>/dev/null || echo 0)
+  [ "$PING_OK" != "0" ] || fail "This machine cannot reach the internet (get.docker.com unreachable).
+     On Contabo/other providers the server may need its firewall panel opened, or
+     IPv6 misconfiguration is breaking outbound access — try: curl -4 https://ifconfig.me"
+  GH_OK=$(curl -4 -fsS -o /dev/null -w '%{http_code}' --max-time 8 https://ghcr.io/v2/ 2>/dev/null || echo 0)
+  [ "$GH_OK" != "0" ] || fail "ghcr.io is unreachable from this machine (network filtering?)"
+  echo "     Internet OK, ghcr.io reachable."
+
+  # Pull the application image up-front with a clear diagnosis: distinguish
+  # "not logged in / not found" from "network down", and self-heal the common
+  # wrong-image-name case (an older .env.example shipped with careangels/).
+  say "Fetching the application image…"
+  if ! docker pull "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1; then
+    FALLBACK="ghcr.io/marlon-thomas/workforce-suite"
+    if [ "${API_IMAGE}" != "${FALLBACK}" ] && docker pull "${FALLBACK}:${APP_VERSION}" >/dev/null 2>&1; then
+      warn "The configured image (${API_IMAGE}) does not exist — using ${FALLBACK} instead."
+      sed -i.bak "s|^API_IMAGE=.*|API_IMAGE=${FALLBACK}|" .env
+      API_IMAGE="${FALLBACK}"
+    elif [ -n "${DOCKERHUB_USER:-}" ] && docker pull "docker.io/${DOCKERHUB_USER}/workforce-suite:${APP_VERSION}" >/dev/null 2>&1; then
+      warn "GHCR unavailable — using the Docker Hub mirror."
+      sed -i.bak "s|^API_IMAGE=.*|API_IMAGE=docker.io/${DOCKERHUB_USER}/workforce-suite|" .env
+      API_IMAGE="docker.io/${DOCKERHUB_USER}/workforce-suite"
+    else
+      fail "Could not pull ${API_IMAGE}:${APP_VERSION}.
+     - If the error says 'denied' or 'authentication required': re-run me and repeat
+       the registry login (the token needs read:packages scope).
+     - If it says 'not found': the image name in .env is wrong.
+     - If everything else is green: check this machine's internet access."
+    fi
+  fi
+}
+
 
 # Preflight: the stack pull needs general internet + the GitHub registry.
 say "Checking internet and registry reachability…"
@@ -306,28 +351,7 @@ if [ -n "${HUB_USER}" ]; then
   fi
 fi
 
-# Pull the application image up-front with a clear diagnosis: distinguish
-# "not logged in / not found" from "network down", and self-heal the common
-# wrong-image-name case (an older .env.example shipped with careangels/).
-say "Fetching the application image…"
-if ! docker pull "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1; then
-  FALLBACK="ghcr.io/marlon-thomas/workforce-suite"
-  if [ "${API_IMAGE}" != "${FALLBACK}" ] && docker pull "${FALLBACK}:${APP_VERSION}" >/dev/null 2>&1; then
-    warn "The configured image (${API_IMAGE}) does not exist — using ${FALLBACK} instead."
-    sed -i.bak "s|^API_IMAGE=.*|API_IMAGE=${FALLBACK}|" .env
-    API_IMAGE="${FALLBACK}"
-  elif [ -n "${DOCKERHUB_USER:-}" ] && docker pull "docker.io/${DOCKERHUB_USER}/workforce-suite:${APP_VERSION}" >/dev/null 2>&1; then
-    warn "GHCR unavailable — using the Docker Hub mirror."
-    sed -i.bak "s|^API_IMAGE=.*|API_IMAGE=docker.io/${DOCKERHUB_USER}/workforce-suite|" .env
-    API_IMAGE="docker.io/${DOCKERHUB_USER}/workforce-suite"
-  else
-    fail "Could not pull ${API_IMAGE}:${APP_VERSION}.
-     - If the error says 'denied' or 'authentication required': re-run me and repeat
-       the registry login (the token needs read:packages scope).
-     - If it says 'not found': the image name in .env is wrong.
-     - If everything else is green: check this machine's internet access."
-  fi
-fi
+preflight_and_pull
 
 say "Starting the platform (this downloads and starts everything; first run takes a while)…"
 if [ "${SMOKE}" -eq 1 ]; then
