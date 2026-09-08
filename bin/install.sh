@@ -2,18 +2,16 @@
 # install.sh — Care Angels Workforce Suite, B-mode appliance installer
 # (deployment-spec §B2: "paste one line, answer four questions").
 #
-# Run from the deploy/ directory:  ./bin/install.sh
-# Local/no-TLS test run:           ./bin/install.sh --smoke
+# Run as root on a fresh VPS:   ./bin/install.sh
+# Local/no-TLS test run:        ./bin/install.sh --smoke
+# Classic system docker:        ./bin/install.sh --system-docker
 #
-# The four prompts (everything else is generated):
-#   1. Public hostname of the app (DNS verified against this host, with a
-#      plain-English wait loop)
-#   2. Email for TLS certificate notices
-#   3. First administrator password (or empty -> generated, printed ONCE)
-#   4. Off-site backup target (optional; empty -> local only)
+# Journey (root phase): service user -> bundle relocation to /opt -> Docker (rootless
+# by default) -> registry login -> hand over. Journey (service-user phase): the four
+# questions -> secrets -> images -> the running stack -> health check.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."   # deploy/
+cd "$(dirname "$0")/.."   # bundle root
 
 SMOKE=0
 SYSTEM_DOCKER=0
@@ -29,144 +27,12 @@ say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m ->\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mXX\033[0m %s\n' "$*"; exit 1; }
 
-# ---------------------------------------------------------------- bootstrap levels
-# The installer is designed to be run ONCE, as root, on a fresh VPS. It handles the
-# whole journey: service user -> Docker -> registry login -> the four questions ->
-# the running stack. Re-running as the service user afterwards skips straight to
-# configuration/updates (everything below is idempotent).
-NEED_BOOTSTRAP=0
-if [ "$(id -u)" -eq 0 ]; then
-  NEED_BOOTSTRAP=1
-elif command -v docker >/dev/null && docker info >/dev/null 2>&1; then
-  NEED_BOOTSTRAP=0
-else
-  NEED_BOOTSTRAP=1
-fi
+# ============================================================ helper functions
 
-if [ "${NEED_BOOTSTRAP}" -eq 1 ] && [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
-  fail "Root privileges are needed (create user, install Docker, open the firewall). Run me with sudo."
-fi
-
-bootstrap() {
-  # ---- 0. A normal user (never operate the system as root) --------------------
-  if [ "$(id -u)" -eq 0 ]; then
-    echo ""
-    echo "Setting up a service user (the system is never operated as root)…"
-    SERVICE_USER="${SERVICE_USER:-workforce_app_sa}"
-    if id "$SERVICE_USER" >/dev/null 2>&1; then
-      echo "   user '$SERVICE_USER' already exists."
-    else
-      adduser --disabled-password --gecos "Care Angels Workforce service account,,," "$SERVICE_USER"
-      usermod -aG sudo "$SERVICE_USER"
-      echo "   user '$SERVICE_USER' created (sudo member)."
-      # The service account password is mandatory — a locked account the operator
-      # cannot log into breaks day-2 operation. Loop until it is set properly.
-      while true; do
-        if passwd "$SERVICE_USER"; then
-          break
-        fi
-        echo "   Passwords did not match or were rejected — try again."
-      done
-      echo "   Service account password set."
-    fi
-
-    # ---- 1. Relocate the bundle to /opt (a dir under /root blocks the service
-    #         user — traversal through /root is denied regardless of file ownership).
-    TARGET="/opt/workforce-deploy"
-    CURRENT="$(cd "$(dirname "$0")/.." && pwd)"
-    if [ "$CURRENT" != "$TARGET" ]; then
-      echo "Moving the deployment bundle to $TARGET (the service user cannot live under /root)…"
-      mkdir -p "$(dirname "$TARGET")"
-      if [ -d "$TARGET" ] && [ -f "$TARGET/.env" ]; then
-        # a previous install lives there — keep its .env/secrets, refresh the tooling
-        cp -a "$CURRENT"/bin "$CURRENT"/gateway "$CURRENT"/compose.yaml "$CURRENT"/blueprints "$TARGET/" 2>/dev/null || true
-      else
-        rm -rf "$TARGET"
-        mkdir -p "$TARGET"
-        cp -a "$CURRENT/." "$TARGET/"
-      fi
-    fi
-    chown -R "$SERVICE_USER:$SERVICE_USER" "$TARGET"
-
-    # ---- 3. Docker (rootless by default — the daemon itself runs as the service
-    #         user, so no root-equivalent daemon is exposed; spec §B4 hardening) ----
-    if [ "${SYSTEM_DOCKER}" -eq 1 ]; then
-      echo "Installing Docker (system daemon — --system-docker requested)…"
-      command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
-      usermod -aG docker "$SERVICE_USER" 2>/dev/null || true
-      mkdir -p "/home/${SERVICE_USER}/.docker"
-      chown -R "$SERVICE_USER:$SERVICE_USER" "/home/${SERVICE_USER}/.docker"
-    elif command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1 \
-         && sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
-              XDG_RUNTIME_DIR="/run/user/$(id -u $SERVICE_USER)" \
-              systemctl --user is-active docker >/dev/null 2>&1; then
-      echo "Rootless Docker is already active for $SERVICE_USER."
-    else
-      echo "Installing Docker (rootless mode for $SERVICE_USER)…"
-      command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
-      # prerequisites: unprivileged userns, subuid/subgid ranges, lingering
-      usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$SERVICE_USER"
-      loginctl enable-linger "$SERVICE_USER"
-      apt-get -qq install -y uidmap dbus-user-session >/dev/null 2>&1 || true
-      # rootless cannot bind <1024: delegate 80/443 via CAP_NET_BIND_SERVICE on the
-      # rootless dockerd user binary, and have the gateway publish on those ports.
-      setcap cap_net_bind_service=ep /usr/bin/rootlesskit 2>/dev/null \
-        || warn "Could not set cap_net_bind_service on rootlesskit — port binding may need sysctl net.ipv4.ip_unprivileged_port_start=80"
-      sysctl -w net.ipv4.ip_unprivileged_port_start=80 >/dev/null
-      grep -q "ip_unprivileged_port_start" /etc/sysctl.conf 2>/dev/null \
-        || echo "net.ipv4.ip_unprivileged_port_start=80" >> /etc/sysctl.conf
-      sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
-        XDG_RUNTIME_DIR="/run/user/$(id -u $SERVICE_USER)" \
-        dockerd-rootless-setuptool.sh install \
-        || fail "Rootless Docker setup failed. If this kernel lacks unprivileged user
-       namespaces (common on some OpenVZ/LXC hosts like older Contabo images), re-run
-       with --system-docker to use the classic daemon."
-      sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
-        XDG_RUNTIME_DIR="/run/user/$(id -u $SERVICE_USER)" \
-        systemctl --user enable --now docker
-      mkdir -p "/home/${SERVICE_USER}/.docker"
-      chown -R "$SERVICE_USER:$SERVICE_USER" "/home/${SERVICE_USER}/.docker"
-      export DOCKER_HOST="unix:///run/user/${SERVICE_USER}/docker.sock"
-    fi
-
-    # ---- 4. Registry login (images are private until licensing ships) ---------
-    # The login MUST be performed as the service user — credentials land in THEIR
-    # docker config, not root's.
-    if ! sudo -u "$SERVICE_USER" sh -c 'grep -q ghcr.io ~/.docker/config.json' 2>/dev/null; then
-      echo ""
-      echo "The container images are pulled from GitHub's registry (private while"
-      echo "licensing is in development). A GitHub personal access token with"
-      echo "read:packages is required (Settings -> Developer settings -> Tokens classic)."
-      printf "GitHub username [marlon-thomas]: "
-      read -r GH_USER
-      GH_USER="${GH_USER:-marlon-thomas}"
-      echo -n "GitHub token (read:packages): "
-      read -rs GH_TOKEN
-      echo ""
-      # HOME must point at the service user — sudo -E would keep root's HOME,
-      # and docker would try to store credentials in /root/.docker (denied).
-      sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
-        GH_USER="$GH_USER" GH_TOKEN="$GH_TOKEN" \
-        sh -c 'echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin' \
-        || fail "Registry login failed — the token needs read:packages scope."
-    fi
-
-    # Hand over: re-exec the rest of the installer as the service user, from /opt.
-    echo ""
-    echo "Bootstrap complete. Continuing as '$SERVICE_USER' from $TARGET…"
-    SMOKE_FLAG=""
-    [ "${SMOKE}" -eq 1 ] && SMOKE_FLAG="--smoke"
-    exec sudo -u "$SERVICE_USER" bash "$TARGET/bin/install.sh" $SMOKE_FLAG
-  fi
-}
-
-# ---------------------------------------------------------------- firewall
-# The system needs exactly three inbound ports: 22 (ssh — already open), 80+443 (the app).
-# Docker publishes 80/443 directly via iptables, bypassing ufw; we still open them in
-# ufw so the rules are explicit and survive Docker being restarted differently.
-# CLOUD FIREWALLS (Hetzner/DO/etc.) are a separate layer we cannot touch — the runbook
-# tells the user to allow 80/443 there; doctor.sh verifies reachability end-to-end.
 open_port() {
+  # The machine needs exactly three inbound ports: 22 (ssh — already open), 80+443.
+  # CLOUD firewalls (Hetzner/DO/Contabo panels) are a separate layer the installer
+  # cannot touch — doctor.sh verifies reachability end-to-end.
   PORT="$1"
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
     ufw allow "$PORT/tcp" >/dev/null 2>&1 && say "Firewall (ufw): allowing ${PORT}/tcp" \
@@ -174,104 +40,11 @@ open_port() {
   elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
     firewall-cmd --permanent --add-port="$PORT/tcp" >/dev/null 2>&1 && firewall-cmd --reload >/dev/null 2>&1 \
       && say "Firewall (firewalld): allowing ${PORT}/tcp" \
-      || warn "Firewall (firewalld): could not allow ${PORT}/tcp — check 'firewall-cmd --list-ports'."
+      || warn "Firewall (firewalld): could not allow ${PORT}/tcp."
   else
     warn "No active firewall detected on this machine — ports 80/443 depend on your cloud provider's firewall."
   fi
 }
-
-bootstrap
-
-if [ -f .env ]; then
-  # Resume: an existing configuration just needs the stack (re)started and checked.
-  warn "This deployment is already configured (deploy/.env exists) — resuming…"
-  # shellcheck disable=SC1091
-  . ./.env
-  # Silent migration: early bundles shipped a placeholder image name that never
-  # existed (ghcr.io/careangels/...). The published path is marlon-thomas/...
-  # (.env is generated at install time, so git pull does not update it).
-  if [ "${API_IMAGE}" = "ghcr.io/careangels/workforce-suite" ]; then
-    sed -i 's|^API_IMAGE=.*|API_IMAGE=ghcr.io/marlon-thomas/workforce-suite|' .env
-    API_IMAGE="ghcr.io/marlon-thomas/workforce-suite"
-    warn "Migrated the image registry path in .env (early placeholder) — nothing to do."
-  fi
-  preflight_and_pull
-  say "Fetching remaining images and starting the stack…"
-  docker compose pull >/dev/null 2>&1 || true
-  docker compose up -d
-  sleep 20
-  ./bin/doctor.sh
-  echo ""
-  echo "Re-run ./bin/update.sh <version> to change versions."
-  exit 0
-fi
-
-# Sanity: the wizard must run from the bundle root (compose.yaml present).
-[ -f compose.yaml ] || fail "compose.yaml not found — run me from the deployment bundle directory."
-
-preflight_and_pull() {
-  # Preflight: the stack pull needs general internet + the GitHub registry.
-  say "Checking internet and registry reachability…"
-  PING_OK=$(curl -4 -fsS -o /dev/null -w '%{http_code}' --max-time 8 https://get.docker.com 2>/dev/null || echo 0)
-  [ "$PING_OK" != "0" ] || fail "This machine cannot reach the internet (get.docker.com unreachable).
-     On Contabo/other providers the server may need its firewall panel opened, or
-     IPv6 misconfiguration is breaking outbound access — try: curl -4 https://ifconfig.me"
-  GH_OK=$(curl -4 -fsS -o /dev/null -w '%{http_code}' --max-time 8 https://ghcr.io/v2/ 2>/dev/null || echo 0)
-  [ "$GH_OK" != "0" ] || fail "ghcr.io is unreachable from this machine (network filtering?)"
-  echo "     Internet OK, ghcr.io reachable."
-
-  # Pull the application image up-front with a clear diagnosis: distinguish
-  # "not logged in / not found" from "network down", and self-heal the common
-  # wrong-image-name case (an older .env.example shipped with careangels/).
-  say "Fetching the application image…"
-  if ! docker pull "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1; then
-    FALLBACK="ghcr.io/marlon-thomas/workforce-suite"
-    if [ "${API_IMAGE}" != "${FALLBACK}" ] && docker pull "${FALLBACK}:${APP_VERSION}" >/dev/null 2>&1; then
-      warn "The configured image (${API_IMAGE}) does not exist — using ${FALLBACK} instead."
-      sed -i.bak "s|^API_IMAGE=.*|API_IMAGE=${FALLBACK}|" .env
-      API_IMAGE="${FALLBACK}"
-    elif [ -n "${DOCKERHUB_USER:-}" ] && docker pull "docker.io/${DOCKERHUB_USER}/workforce-suite:${APP_VERSION}" >/dev/null 2>&1; then
-      warn "GHCR unavailable — using the Docker Hub mirror."
-      sed -i.bak "s|^API_IMAGE=.*|API_IMAGE=docker.io/${DOCKERHUB_USER}/workforce-suite|" .env
-      API_IMAGE="docker.io/${DOCKERHUB_USER}/workforce-suite"
-    else
-      fail "Could not pull ${API_IMAGE}:${APP_VERSION}.
-     - If the error says 'denied' or 'authentication required': re-run me and repeat
-       the registry login (the token needs read:packages scope).
-     - If it says 'not found': the image name in .env is wrong.
-     - If everything else is green: check this machine's internet access."
-    fi
-  fi
-}
-
-
-# Preflight: the stack pull needs general internet + the GitHub registry.
-say "Checking internet and registry reachability…"
-PING_OK=$(curl -4 -fsS -o /dev/null -w '%{http_code}' --max-time 8 https://get.docker.com 2>/dev/null || echo 0)
-[ "$PING_OK" != "0" ] || fail "This machine cannot reach the internet (get.docker.com unreachable).
-     On Contabo/other providers the server may need its firewall panel opened, or
-     IPv6 misconfiguration is breaking outbound access — try: curl -4 https://ifconfig.me"
-GH_OK=$(curl -4 -fsS -o /dev/null -w '%{http_code}' --max-time 8 https://ghcr.io/v2/ 2>/dev/null || echo 0)
-[ "$GH_OK" != "0" ] || fail "ghcr.io is unreachable from this machine (network filtering?)"
-echo "     Internet OK, ghcr.io reachable."
-
-
-# ---------------------------------------------------------------- prompt 1/4
-# The installer asks for the ORGANISATION'S DOMAIN (e.g. carehome.org.uk) and derives
-# the two hostnames from it: workforce.<domain> (the app) and auth.<domain> (sign-in).
-# Custom prefixes are supported via WF_SUBDOMAIN / AUTH_SUBDOMAIN.
-PUBLIC_IP="$(curl -4 -fsS --max-time 8 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
-printf "1/4  What is your organisation's web domain? (e.g. carehome.org.uk): "
-read -r BASE_DOMAIN
-[ -n "${BASE_DOMAIN}" ] || fail "A domain is required."
-BASE_DOMAIN="${BASE_DOMAIN#http://}"; BASE_DOMAIN="${BASE_DOMAIN#https://}"
-BASE_DOMAIN="${BASE_DOMAIN%/}"
-APP_SUB="${WF_SUBDOMAIN:-workforce}"
-AUTH_SUB="${AUTH_SUBDOMAIN:-auth}"
-APP_HOSTNAME="${APP_SUB}.${BASE_DOMAIN}"
-AUTH_HOSTNAME="${AUTH_SUB}.${BASE_DOMAIN}"
-echo "     The app will be served at:  ${APP_HOSTNAME}"
-echo "     Sign-in will be served at:  ${AUTH_HOSTNAME}"
 
 verify_dns() {
   OK=1
@@ -291,6 +64,215 @@ verify_dns() {
   fi
   return 1
 }
+
+preflight_network() {
+  # Internet + registry reachability — safe to run before the questions.
+  say "Checking internet and registry reachability…"
+  PING_OK=$(curl -4 -fsS -o /dev/null -w '%{http_code}' --max-time 8 https://get.docker.com 2>/dev/null || echo 0)
+  [ "$PING_OK" != "0" ] || fail "This machine cannot reach the internet (get.docker.com unreachable).
+     On Contabo/other providers the server may need its firewall panel opened, or
+     IPv6 misconfiguration is breaking outbound access — try: curl -4 https://ifconfig.me"
+  GH_OK=$(curl -4 -fsS -o /dev/null -w '%{http_code}' --max-time 8 https://ghcr.io/v2/ 2>/dev/null || echo 0)
+  [ "$GH_OK" != "0" ] || fail "ghcr.io is unreachable from this machine (network filtering?)"
+  echo "     Internet OK, ghcr.io reachable."
+}
+
+preflight_and_pull() {
+  # The application image, with diagnosis. Needs .env (API_IMAGE/APP_VERSION).
+  say "Fetching the application image…"
+  if ! docker pull "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1; then
+    FALLBACK="ghcr.io/marlon-thomas/workforce-suite"
+    if [ "${API_IMAGE}" != "${FALLBACK}" ] && docker pull "${FALLBACK}:${APP_VERSION}" >/dev/null 2>&1; then
+      warn "The configured image (${API_IMAGE}) does not exist — using ${FALLBACK} instead."
+      sed -i.bak "s|^API_IMAGE=.*|API_IMAGE=${FALLBACK}|" .env
+      API_IMAGE="${FALLBACK}"
+    elif [ -n "${DOCKERHUB_USER:-}" ] && docker pull "docker.io/${DOCKERHUB_USER}/workforce-suite:${APP_VERSION}" >/dev/null 2>&1; then
+      warn "GHCR unavailable — using the Docker Hub mirror."
+      sed -i.bak "s|^API_IMAGE=.*|API_IMAGE=docker.io/${DOCKERHUB_USER}/workforce-suite|" .env
+      API_IMAGE="docker.io/${DOCKERHUB_USER}/workforce-suite"
+    else
+      fail "Could not pull ${API_IMAGE}:${APP_VERSION}.
+     - 'denied' or 'authentication required': re-run me and repeat the registry
+       login (the token needs read:packages scope).
+     - 'not found': the image name in .env is wrong.
+     - Otherwise: check this machine's internet access."
+    fi
+  fi
+}
+
+bootstrap() {
+  # Runs ONLY as root: creates the service user, relocates the bundle to /opt,
+  # installs Docker (rootless by default), performs the registry login AS the
+  # service user, then re-execs the installer as that user. Everything after the
+  # handover runs unprivileged.
+  if [ "$(id -u)" -ne 0 ]; then
+    return 0
+  fi
+
+  echo ""
+  echo "Setting up a service user (the system is never operated as root)…"
+  SERVICE_USER="${SERVICE_USER:-workforce_app_sa}"
+  if id "$SERVICE_USER" >/dev/null 2>&1; then
+    echo "   user '$SERVICE_USER' already exists."
+  else
+    adduser --disabled-password --gecos "Care Angels Workforce service account,,," "$SERVICE_USER"
+    usermod -aG sudo "$SERVICE_USER"
+    echo "   user '$SERVICE_USER' created (sudo member)."
+    # The service-account password is mandatory — a locked account breaks day-2
+    # operation. Loop until passwd succeeds.
+    while true; do
+      if passwd "$SERVICE_USER"; then break; fi
+      echo "   Passwords did not match or were rejected — try again."
+    done
+    echo "   Service account password set."
+  fi
+
+  # Relocate the bundle to /opt — a dir under /root blocks the service user no
+  # matter how files are chowned (traversal through 0700 /root is denied).
+  TARGET="/opt/workforce-deploy"
+  CURRENT="$(cd "$(dirname "$0")/.." && pwd)"
+  if [ "$CURRENT" != "$TARGET" ]; then
+    echo "Moving the deployment bundle to $TARGET (the service user cannot live under /root)…"
+    mkdir -p "$(dirname "$TARGET")"
+    if [ -d "$TARGET" ] && [ -f "$TARGET/.env" ]; then
+      # A previous install lives there — refresh tooling, keep its .env/secrets.
+      cp -a "$CURRENT"/bin "$CURRENT"/gateway "$CURRENT"/blueprints "$CURRENT"/compose.yaml "$CURRENT"/blueprints . "$TARGET/" 2>/dev/null || true
+    else
+      rm -rf "$TARGET"
+      mkdir -p "$TARGET"
+      cp -a "$CURRENT/." "$TARGET/"
+    fi
+  fi
+  chown -R "$SERVICE_USER:$SERVICE_USER" "$TARGET"
+
+  # ---- Docker: rootless by default (the daemon runs as the service user — no
+  #      root-equivalent socket on the host; deployment-spec §B4 hardening).
+  if [ "${SYSTEM_DOCKER}" -eq 1 ]; then
+    echo "Installing Docker (system daemon — --system-docker requested)…"
+    command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
+    usermod -aG docker "$SERVICE_USER" 2>/dev/null || true
+    mkdir -p "/home/${SERVICE_USER}/.docker"
+    chown -R "$SERVICE_USER:$SERVICE_USER" "/home/${SERVICE_USER}/.docker"
+  elif command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1 \
+       && sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
+            XDG_RUNTIME_DIR="/run/user/$(id -u "$SERVICE_USER")" \
+            systemctl --user is-active docker >/dev/null 2>&1; then
+    echo "Rootless Docker is already active for $SERVICE_USER."
+  else
+    echo "Installing Docker (rootless mode for $SERVICE_USER)…"
+    command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
+    # Prerequisites: unprivileged userns, subuid/subgid ranges, lingering, uidmap.
+    usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$SERVICE_USER"
+    loginctl enable-linger "$SERVICE_USER"
+    apt-get -qq install -y uidmap dbus-user-session >/dev/null 2>&1 || true
+    # Rootless daemons cannot bind <1024: raise the floor so the gateway binds 80/443.
+    sysctl -w net.ipv4.ip_unprivileged_port_start=80 >/dev/null
+    grep -q "ip_unprivileged_port_start" /etc/sysctl.conf 2>/dev/null \
+      || echo "net.ipv4.ip_unprivileged_port_start=80" >> /etc/sysctl.conf
+    if ! sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
+        XDG_RUNTIME_DIR="/run/user/$(id -u "$SERVICE_USER")" \
+        dockerd-rootless-setuptool.sh install; then
+      fail "Rootless Docker setup failed. If this kernel lacks unprivileged user
+     namespaces (some OpenVZ/LXC images), re-run with --system-docker."
+    fi
+    sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
+      XDG_RUNTIME_DIR="/run/user/$(id -u "$SERVICE_USER")" \
+      systemctl --user enable --now docker
+    mkdir -p "/home/${SERVICE_USER}/.docker"
+    chown -R "$SERVICE_USER:$SERVICE_USER" "/home/${SERVICE_USER}/.docker"
+    # Pin the socket + runtime dir for the service user's shells — every later
+    # script (doctor/update/backup) uses plain `docker`.
+    cat > "/home/${SERVICE_USER}/.profile.d-docker" <<PROF
+export DOCKER_HOST=unix:///run/user/$(id -u "$SERVICE_USER")/docker.sock
+export XDG_RUNTIME_DIR=/run/user/$(id -u "$SERVICE_USER")
+PROF
+    if ! grep -q "profile.d-docker" "/home/${SERVICE_USER}/.bashrc" 2>/dev/null; then
+      echo '. "$HOME/.profile.d-docker"' >> "/home/${SERVICE_USER}/.bashrc"
+    fi
+    chown "$SERVICE_USER:$SERVICE_USER" "/home/${SERVICE_USER}/.bashrc" "/home/${SERVICE_USER}/.profile.d-docker"
+  fi
+
+  # ---- Registry login (images are private until licensing ships). Performed AS
+  #      the service user so credentials land in THEIR docker config.
+  if ! sudo -u "$SERVICE_USER" sh -c 'grep -q ghcr.io ~/.docker/config.json' 2>/dev/null; then
+    echo ""
+    echo "The container images are pulled from GitHub's registry (private while"
+    echo "licensing is in development). A GitHub personal access token with"
+    echo "read:packages is required (Settings -> Developer settings -> Tokens classic)."
+    printf "GitHub username [marlon-thomas]: "
+    read -r GH_USER
+    GH_USER="${GH_USER:-marlon-thomas}"
+    echo -n "GitHub token (read:packages): "
+    read -rs GH_TOKEN
+    echo ""
+    # HOME pinned to the service user — sudo -E would keep root's HOME and docker
+    # would try to store credentials in /root/.docker (denied).
+    sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
+      GH_USER="$GH_USER" GH_TOKEN="$GH_TOKEN" \
+      sh -c 'echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin' \
+      || fail "Registry login failed — the token needs read:packages scope."
+  fi
+
+  # Hand over: re-exec as the service user from /opt.
+  echo ""
+  echo "Bootstrap complete. Continuing as '$SERVICE_USER' from $TARGET…"
+  FLAGS=""
+  [ "${SMOKE}" -eq 1 ] && FLAGS="--smoke"
+  [ "${SYSTEM_DOCKER}" -eq 1 ] && FLAGS="${FLAGS} --system-docker"
+  # shellcheck disable=SC2086
+  exec sudo -u "$SERVICE_USER" bash "$TARGET/bin/install.sh" $FLAGS
+}
+
+resume_or_start() {
+  if [ -f .env ]; then
+    # Resume: configuration exists — migrate, pull, start, check.
+    warn "This deployment is already configured (.env exists) — resuming…"
+    # shellcheck disable=SC1091
+    . ./.env
+    # Silent migration: early bundles shipped a placeholder image name that never
+    # existed. .env is generated at install time, so git pull does not update it.
+    if [ "${API_IMAGE}" = "ghcr.io/careangels/workforce-suite" ]; then
+      sed -i 's|^API_IMAGE=.*|API_IMAGE=ghcr.io/marlon-thomas/workforce-suite|' .env
+      API_IMAGE="ghcr.io/marlon-thomas/workforce-suite"
+      warn "Migrated the image registry path in .env (early placeholder)."
+    fi
+    preflight_and_pull
+    say "Fetching remaining images and starting the stack…"
+    docker compose pull >/dev/null 2>&1 || true
+    docker compose up -d
+    sleep 20
+    ./bin/doctor.sh
+    echo ""
+    echo "Re-run ./bin/update.sh <version> to change versions."
+    exit 0
+  fi
+
+  # Sanity: the wizard must run from the bundle root (compose.yaml present).
+  [ -f compose.yaml ] || fail "compose.yaml not found — run me from the deployment bundle directory."
+
+  # Network preflight before the questions: fail fast on connectivity problems.
+  preflight_network
+}
+
+# ============================================================ main
+
+bootstrap
+resume_or_start
+
+# ---------------------------------------------------------------- the four questions
+PUBLIC_IP="$(curl -4 -fsS --max-time 8 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
+printf "1/4  What is your organisation's web domain? (e.g. carehome.org.uk): "
+read -r BASE_DOMAIN
+[ -n "${BASE_DOMAIN}" ] || fail "A domain is required."
+BASE_DOMAIN="${BASE_DOMAIN#http://}"; BASE_DOMAIN="${BASE_DOMAIN#https://}"
+BASE_DOMAIN="${BASE_DOMAIN%/}"
+APP_SUB="${WF_SUBDOMAIN:-workforce}"
+AUTH_SUB="${AUTH_SUBDOMAIN:-auth}"
+APP_HOSTNAME="${APP_SUB}.${BASE_DOMAIN}"
+AUTH_HOSTNAME="${AUTH_SUB}.${BASE_DOMAIN}"
+echo "     The app will be served at:  ${APP_HOSTNAME}"
+echo "     Sign-in will be served at:  ${AUTH_HOSTNAME}"
+
 if [ "${SMOKE}" -eq 0 ]; then
   say "Opening the firewall for the web (80/tcp, 443/tcp)…"
   open_port 80
@@ -308,12 +290,11 @@ if [ "${SMOKE}" -eq 0 ]; then
 else
   warn "--smoke: DNS verification skipped."
 fi
-# ---------------------------------------------------------------- prompt 2/4
+
 printf '2/4  Email for security-certificate notices: '
 read -r ACME_EMAIL
 [ -n "${ACME_EMAIL}" ] || fail "An email is required (certificate expiry notices)."
 
-# ---------------------------------------------------------------- prompt 3/4
 printf '3/4  Pick a password for the first administrator (Enter = generate a strong one): '
 read -rs ADMIN_PASSWORD
 echo ""
@@ -322,21 +303,24 @@ if [ -z "${ADMIN_PASSWORD}" ]; then
   GENERATED_ADMIN=1
 else
   GENERATED_ADMIN=0
+  printf '     Confirm the administrator password: '
+  read -rs ADMIN_PASSWORD2
+  echo ""
+  [ "${ADMIN_PASSWORD}" = "${ADMIN_PASSWORD2}" ] || fail "The administrator passwords did not match — re-run me."
 fi
 
-# ---------------------------------------------------------------- prompt 4/4
 printf '4/4  Off-site backups — paste a target (rsync host:path or s3://bucket) or press Enter for local-only: '
 read -r BACKUP_TARGET
 
-# ---------------------------------------------------------------- generate
+# ---------------------------------------------------------------- generate secrets
 say "Generating secrets (they are never displayed)…"
 mkdir -p secrets backups blueprints
 gen() { [ -s "secrets/$1" ] || openssl rand -base64 32 | tr -d '\n' > "secrets/$1"; }
 gen db_password; gen minio_access; gen minio_secret
 gen ak_db_password; gen ak_secret
-# authentik 2024.12 no longer supports *_FILE for its own settings and cannot write
-# /etc as a non-root user — its documented /etc/authentik/config.yml is delivered as a
-# Docker secret composed from the other two secrets.
+# authentik 2024.12 cannot write /etc as a non-root user and dropped *_FILE support —
+# its documented /etc/authentik/config.yml is delivered as a Docker secret composed
+# here from the other two secrets.
 {
   echo "secret_key: $(cat secrets/ak_secret)"
   echo "postgresql:"
@@ -346,9 +330,8 @@ OIDC_CLIENT_ID="workforce-$(openssl rand -hex 4)"
 echo "$OIDC_CLIENT_ID" > secrets/oidc_client_id
 openssl rand -base64 32 | tr -d '\n' > secrets/oidc_client_secret
 chmod 600 secrets/*
-touch secrets/oidc_client_id secrets/oidc_client_secret
-chmod 600 secrets/oidc_client_id secrets/oidc_client_secret
 
+# ---------------------------------------------------------------- write config
 say "Writing configuration…"
 cat > .env <<ENV
 APP_HOSTNAME=${APP_HOSTNAME}
@@ -365,37 +348,19 @@ AK_DB_USER=authentik
 
 OIDC_ISSUER=https://${AUTH_HOSTNAME}/application/o/workforce/
 
-API_IMAGE=ghcr.io/careangels/workforce-suite
-APP_VERSION=${APP_VERSION:-latest}
+API_IMAGE=ghcr.io/marlon-thomas/workforce-suite
+APP_VERSION=${APP_VERSION:-0.2.0}
 
 BACKUP_TARGET=${BACKUP_TARGET}
 ENV
+chmod 600 .env
 
-if [ "${SMOKE}" -eq 1 ]; then
-  # Local/no-TLS run: OIDC discovery stands down until authentik is provisioned.
-  warn "--smoke: the api will boot without the sign-in chain (smoke profile)."
-fi
-
-# Pull fallback: GHCR first; if the org's IP is rate-limited and a Docker Hub mirror
-# is configured (optional DOCKERHUB_USER in .env), switch to it transparently.
-HUB_USER="${DOCKERHUB_USER:-}"
-if [ -n "${HUB_USER}" ]; then
-  say "Fetching images…"
-  if ! docker pull "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1; then
-    if docker pull "docker.io/${HUB_USER}/workforce-suite:${APP_VERSION}" >/dev/null 2>&1; then
-      say "GHCR unavailable from this network — using the Docker Hub mirror."
-      sed -i.bak "s|^API_IMAGE=.*|API_IMAGE=docker.io/${HUB_USER}/workforce-suite|" .env
-    else
-      fail "Could not fetch the images from GHCR or the Docker Hub mirror. Check your internet connection."
-    fi
-  fi
-fi
-
-# Load the freshly written config (the preflight/pull helper reads API_IMAGE etc.)
+# Load the freshly written config for the preflight/pull helper.
 # shellcheck disable=SC1091
 . ./.env
 preflight_and_pull
 
+# ---------------------------------------------------------------- start the stack
 say "Starting the platform (this downloads and starts everything; first run takes a while)…"
 if [ "${SMOKE}" -eq 1 ]; then
   docker compose -f compose.yaml -f compose.smoke.yaml up -d
@@ -403,30 +368,26 @@ else
   docker compose up -d
 fi
 
+# ---------------------------------------------------------------- blueprint
 say "Connecting the workforce system to the sign-in server (authentik applies the blueprint on startup)…"
 if [ "${SMOKE}" -eq 1 ]; then
   warn "--smoke: sign-in is wired for localhost (no TLS) — production runs use https."
 fi
-# Render the provisioning blueprint (deployment-spec §B5): OIDC provider + application +
-# first administrator. authentik applies it natively on every startup (idempotent).
+# Render the provisioning blueprint (deployment-spec §B5): OIDC provider + application
+# + first administrator. authentik applies it natively on every startup (idempotent).
 AK_ADMIN_PASSWORD="${ADMIN_PASSWORD}"
-export AK_ADMIN_PASSWORD
 sed   -e "s|\${OIDC_CLIENT_ID}|$(cat secrets/oidc_client_id)|g" \
-  -e "s|\${OIDC_CLIENT_SECRET}|$(cat secrets/oidc_client_secret)|g" \
-  -e "s|\${WF_REDIRECT_URI}|https://${APP_HOSTNAME}/login/oauth2/code/oidc|g" \
-  -e "s|\${ACME_EMAIL}|${ACME_EMAIL}|g" \
-  -e "s|\${AK_ADMIN_PASSWORD}|${AK_ADMIN_PASSWORD}|g" \
-  blueprints/workforce-app.yaml.template > blueprints/workforce-app.yaml 2>/dev/null \
-  || sed \
-  -e "s|\${OIDC_CLIENT_ID}|$(cat secrets/oidc_client_id)|g" \
   -e "s|\${OIDC_CLIENT_SECRET}|$(cat secrets/oidc_client_secret)|g" \
   -e "s|\${WF_REDIRECT_URI}|https://${APP_HOSTNAME}/login/oauth2/code/oidc|g" \
   -e "s|\${ACME_EMAIL}|${ACME_EMAIL}|g" \
   -e "s|\${AK_ADMIN_PASSWORD}|${AK_ADMIN_PASSWORD}|g" \
   blueprints/workforce-app.yaml.template > blueprints/workforce-app.yaml
 chmod 600 blueprints/workforce-app.yaml
+# Note: ADMIN_PASSWORD stays in process memory until script exit (seconds) — the
+# summary below prints it for generated passwords. The on-disk blueprint is 0600.
 docker compose up -d authentik-server authentik-worker
 
+# ---------------------------------------------------------------- health check
 say "Final health check:"
 if [ "${SMOKE}" -eq 1 ]; then
   ./bin/doctor.sh --smoke || true
@@ -434,14 +395,12 @@ else
   ./bin/doctor.sh || true
 fi
 
+# ---------------------------------------------------------------- summary
 cat <<DONE
 
 ------------------------------------------------------------------------
-${GENERATED_ADMIN:+  Your administrator password (shown once — save it now):
-      ${ADMIN_PASSWORD}
-}
   Staff will use:  https://${APP_HOSTNAME}
-  First sign-in:   https://${AUTH_HOSTNAME}  (administrator account)
+  First sign-in:   https://${AUTH_HOSTNAME}  (user: admin)
   Then the setup wizard inside the app completes your organisation.
 
   Backups run nightly to ./backups${BACKUP_TARGET:+ and off-site to ${BACKUP_TARGET}}.
@@ -451,3 +410,9 @@ ${GENERATED_ADMIN:+  Your administrator password (shown once — save it now):
     ./bin/backup.sh    make a backup right now
 ------------------------------------------------------------------------
 DONE
+
+if [ "${GENERATED_ADMIN}" -eq 1 ]; then
+  echo "  Your administrator password (shown once — save it now):"
+  echo "      ${ADMIN_PASSWORD}"
+  echo ""
+fi
