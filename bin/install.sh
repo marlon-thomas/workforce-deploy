@@ -102,7 +102,10 @@ bootstrap() {
       echo -n "GitHub token (read:packages): "
       read -rs GH_TOKEN
       echo ""
-      sudo -E -u "$SERVICE_USER" env GH_USER="$GH_USER" GH_TOKEN="$GH_TOKEN" \
+      # HOME must point at the service user — sudo -E would keep root's HOME,
+      # and docker would try to store credentials in /root/.docker (denied).
+      sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
+        GH_USER="$GH_USER" GH_TOKEN="$GH_TOKEN" \
         sh -c 'echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin' \
         || fail "Registry login failed — the token needs read:packages scope."
     fi
