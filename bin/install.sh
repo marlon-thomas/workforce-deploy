@@ -398,9 +398,14 @@ if [ "${SMOKE}" -ne 1 ]; then
   for i in $(seq 1 60); do
     CODE="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://${APP_HOSTNAME}/api/v1/build-meta" 2>/dev/null || echo 000)"
     if [ "$CODE" = "200" ]; then echo "     Application is up (attempt $i)."; break; fi
-    [ "$i" = 60 ] && warn "The application is still starting — the health check below may show FAILs that clear on re-run."
+    # Visible progress: a silent 10-minute wait looks like a hang.
+    printf '     waiting… attempt %d/60 (gateway answered %s)\r' "$i" "$CODE"
+    [ "$i" = 60 ] && { echo ""; warn "The application did not become ready in 10 minutes. Checking whether it is
+     crash-looping: docker compose ps && docker compose logs api --tail 30
+     If logs show 'Started WorkforceApplication', it is fine — re-run ./bin/doctor.sh."; }
     sleep 10
   done
+  echo ""
 fi
 
 # ---------------------------------------------------------------- blueprint
