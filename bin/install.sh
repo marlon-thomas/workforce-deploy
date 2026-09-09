@@ -181,9 +181,10 @@ bootstrap() {
     echo "Moving the deployment bundle to $TARGET (the service user cannot live under /root)…"
     mkdir -p "$(dirname "$TARGET")"
     if [ -d "$TARGET" ] && [ -f "$TARGET/.env" ]; then
-      cp -a "$CURRENT"/bin "$CURRENT"/gateway "$CURRENT"/blueprints "$CURRENT"/ansible \
-        "$CURRENT"/compose.yaml "$CURRENT"/.env.example "$CURRENT"/README.md "$CURRENT"/RUNBOOK.md \
-        "$TARGET/" 2>/dev/null || true
+      # Full-tree sync: newly added bundle directories (the ansible/ lesson)
+      # can never be missed by an itemised copy. Generated state survives
+      # because .env/secrets/backups are only present in $TARGET.
+      cp -a "$CURRENT/." "$TARGET/"
     else
       rm -rf "$TARGET"
       mkdir -p "$TARGET"
