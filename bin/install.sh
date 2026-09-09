@@ -142,7 +142,7 @@ run_ansible_site() {
   fi
 
   say "Converging the platform (ansible playbook — identity plane, blueprint, app plane)…"
-  ansible-playbook -i inventories/prod/hosts.yml ../ansible/site.yml \
+  ansible-playbook -i inventories/prod/hosts.yml ansible/site.yml \
     --connection=local -e "ansible_connection=local" \
     -e "app_hostname=${APP_HOSTNAME}" \
     -e "auth_hostname=${AUTH_HOSTNAME}" \
@@ -302,7 +302,7 @@ resume_or_start() {
   fi
 
   [ -f compose.yaml ] || fail "compose.yaml not found — run me from the deployment bundle directory."
-  [ -f ../ansible/site.yml ] || fail "ansible/site.yml not found — the bundle is incomplete."
+  [ -f ansible/site.yml ] || fail "ansible/site.yml not found — the bundle is incomplete."
   preflight_network
 }
 
