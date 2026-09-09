@@ -193,10 +193,10 @@ def main():
     ap.add_argument("--port", type=int, default=22)
     ap.add_argument("--user", default="root")
     ap.add_argument("--password", help="root password (prompted if omitted)")
-    ap.add_argument("--env", default="prod", choices=["dev", "prod"],
-                    help="deployment environment (selects the env file; default: prod)")
+    ap.add_argument("--env", default="prod", choices=["test", "prod"],
+                    help="deployment environment (test = Ubuntu appliance, prod = live VPS)")
     ap.add_argument("--vagrant", action="store_true",
-                    help="target the dev Vagrant VM (uses 'vagrant ssh-config' for "
+                    help="target the TEST Vagrant VM (uses 'vagrant ssh-config' for "
                          "host/port/key; run from deploy/environments after 'vagrant up')")
     args = ap.parse_args()
 
@@ -237,8 +237,8 @@ def main():
             print("")
             print("=" * 72)
             print(" Installer finished. Dev URLs (tailnet/forwarded ports):")
-            print("   https://app.workforce-dev.duckdns.org  (or localhost:8443)")
-            print("   https://auth.workforce-dev.duckdns.org")
+            print("   https://app.workforce-test.duckdns.org  (or localhost:8443)")
+            print("   https://auth.workforce-test.duckdns.org")
             print("=" * 72)
             client.close()
             return
