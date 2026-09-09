@@ -23,23 +23,37 @@ VAGRANTFILE_API_VERSION = "2"
 MEM  = ENV.fetch("VAGRANT_MEM",  "4096").to_i
 CPUS = ENV.fetch("VAGRANT_CPUS", 2).to_i
 
+# Provider auto-detection with override:
+#   VAGRANT_PROVIDER=libvirt|virtualbox|hyperv  (or let the OS decide)
+# Linux    -> libvirt (fast, native KVM)
+# Windows  -> virtualbox or hyperv (libvirt is Linux-only)
+PROVIDER = ENV.fetch("VAGRANT_PROVIDER") do
+  ruby_platform = RUBY_PLATFORM
+  if ruby_platform =~ /mswin|mingw/
+    "virtualbox"
+  else
+    "libvirt"
+  end
+end
+
 Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   config.vm.box = "bento/ubuntu-24.04"
   config.vm.hostname = "workforce-dev"
 
-  # Forward the gateway ports to the HOST loopback: the tailnet device (your
-  # laptop) reaches the VM through the host — no bridge, no router changes.
+  # Forward the gateway ports to the HOST loopback: the developer's browser
+  # reaches the VM via localhost — no router, no inbound internet (TLS is
+  # DNS-01 via DuckDNS, which needs no inbound at all).
   config.vm.network "forwarded_port", guest: 80,  host: 8080
   config.vm.network "forwarded_port", guest: 443, host: 8443
 
-  config.vm.provider :libvirt do |lv|
-    lv.memory = MEM
-    lv.cpus   = CPUS
-    lv.machine_type = "q35"
+  config.vm.provider PROVIDER do |pv|
+    pv.memory = MEM
+    pv.cpus   = CPUS
   end
-  config.vm.provider :virtualbox do |vb|
-    vb.memory = MEM
-    vb.cpus   = CPUS
+  if PROVIDER == "libvirt"
+    config.vm.provider :libvirt do |lv|
+      lv.machine_type = "q35"
+    end
   end
 
   # Bare box provisioning ONLY: OS-level basics the installer assumes.
