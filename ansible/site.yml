@@ -23,19 +23,25 @@
         ak_admin_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits,length=18') }}"
       when: ak_admin_password is not defined or ak_admin_password | length == 0
 
-    - name: Registry login (service user's docker config)
-      ansible.builtin.expect:
-        command: "docker login ghcr.io -u {{ gh_user | default('marlon-thomas') }} --password-stdin"
-        responses: {}
-      when: false  # handled via stdin task below
+    - name: Check registry credential already works
+      ansible.builtin.shell: |
+        docker manifest inspect ghcr.io/marlon-thomas/workforce-suite:0.2.2 >/dev/null 2>&1 && echo ALREADY-AUTHED
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ service_user }}"
+      register: authed
+      changed_when: false
+      failed_when: false
 
-    - name: Registry login (stdin)
+    - name: Registry login (only when the stored credential cannot see the image)
       ansible.builtin.shell: |
         echo '{{ github_token }}' | docker login ghcr.io -u {{ gh_user | default('marlon-thomas') }} --password-stdin
       args:
         executable: /bin/bash
       become: true
       become_user: "{{ service_user }}"
+      when: "'ALREADY-AUTHED' not in authed.stdout"
       changed_when: true
 
   roles:

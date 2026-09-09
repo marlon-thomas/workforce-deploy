@@ -30,25 +30,16 @@
     group: "{{ service_user }}"
     recurse: true
 
-- name: Docker present
-  ansible.builtin.package:
-    name:
-      - docker-ce
-      - docker-ce-cli
-      - containerd.io
-      - docker-compose-plugin
-      - docker-ce-rootless-extras
-    state: present
-  when: ansible_os_family == "RedHat"
+- name: Docker binary already present?
+  ansible.builtin.command: docker --version
+  register: docker_bin
+  changed_when: false
+  failed_when: false
 
-- name: Docker present (Debian family)
-  ansible.builtin.package:
-    name:
-      - docker.io
-      - docker-compose-v2
-      - docker-ce-rootless-extras
-    state: present
-  when: ansible_os_family == "Debian"
+- name: Docker installed via get.docker.com (skips apt/dnf to avoid repo conflicts
+        with the existing docker-ce installation)
+  ansible.builtin.shell: curl -fsSL https://get.docker.com | sh
+  when: docker_bin.rc != 0
 
 - name: Service user in docker group
   ansible.builtin.user:
