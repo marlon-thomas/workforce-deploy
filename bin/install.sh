@@ -395,9 +395,13 @@ gen ak_db_password; gen ak_secret
 OIDC_CLIENT_ID="workforce-$(openssl rand -hex 4)"
 echo "$OIDC_CLIENT_ID" > secrets/oidc_client_id
 openssl rand -base64 32 | tr -d '\n' > secrets/oidc_client_secret
-chmod 600 secrets/ak_config.yml 2>/dev/null || true
-chmod 644 secrets/ak_config.yml   # bind-mounted into authentik (rootless uid mapping)
+# All secrets are 0600 — EXCEPT ak_config.yml, which is bind-mounted into the
+# authentik containers and must be 0444: under the rootless daemon's uid mapping,
+# a 0600/0644 owner-only... (0644 owner-read-only is fine for other users, but the
+# mapped in-container user is NOT the owner) — 0444 is required for the in-container
+# user to read it (observed live: 0644 → PermissionError).
 chmod 600 secrets/*
+chmod 444 secrets/ak_config.yml
 
 # ---------------------------------------------------------------- write config
 say "Writing configuration…"
@@ -429,8 +433,42 @@ chmod 600 .env
 preflight_and_pull
 
 # ---------------------------------------------------------------- start the stack
-say "Starting the platform (first boot takes a while)…"
+# SEQUENCED START (the OIDC race): authentik must be fully up AND its blueprint
+# applied BEFORE the api boots — the api's first act is fetching the OIDC discovery
+# document, and a 502 there is fatal at context-initialisation. Two phases:
+#   1. identity plane: authentik (+ its db/redis) waits until the discovery
+#      document answers 200 — the blueprint is applied and the provider exists
+#   2. app plane: api + worker + gateway boot against a finished issuer
+say "Starting the identity plane (authentik, first boot migrates its database — takes minutes)…"
 pull_stack_images
+if [ "${SMOKE}" -eq 1 ]; then
+  docker compose -f compose.yaml -f compose.smoke.yaml up -d
+else
+  docker compose up -d authentik-postgres ak-redis authentik-server authentik-worker \
+    postgres object-storage clamav gotenberg
+fi
+
+if [ "${SMOKE}" -ne 1 ]; then
+  say "Waiting for sign-in to be ready and the blueprint applied (up to ~5 minutes)…"
+  BP_OK=0
+  for i in $(seq 1 60); do
+    CODE="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
+      "https://${AUTH_HOSTNAME}/application/o/workforce/.well-known/openid-configuration" 2>/dev/null || echo 000)"
+    if [ "$CODE" = "200" ]; then
+      echo "     Sign-in plane ready, provider published (attempt $i)."
+      BP_OK=1
+      break
+    fi
+    printf '     waiting… attempt %d/60 (discovery answered %s)\r' "$i" "$CODE"
+    sleep 10
+  done
+  echo ""
+  [ "$BP_OK" -eq 1 ] || warn "The OIDC discovery document did not publish in 5 minutes. The api will
+     retry its discovery fetch on restart; if it stays down, check
+     docker compose logs authentik-worker (blueprint errors) and re-run me."
+fi
+
+say "Starting the application plane (api, worker, gateway)…"
 if [ "${SMOKE}" -eq 1 ]; then
   docker compose -f compose.yaml -f compose.smoke.yaml up -d
 else
@@ -440,7 +478,7 @@ fi
 # First boot convergence: wait (bounded) for the api's identity endpoint through the
 # gateway so the final doctor reflects a ready system, not a booting one.
 if [ "${SMOKE}" -ne 1 ]; then
-  say "Waiting for the application to become ready (first boot can take several minutes)…"
+  say "Waiting for the application to become ready…"
   for i in $(seq 1 60); do
     CODE="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://${APP_HOSTNAME}/api/v1/build-meta" 2>/dev/null || echo 000)"
     if [ "$CODE" = "200" ]; then echo "     Application is up (attempt $i)."; break; fi

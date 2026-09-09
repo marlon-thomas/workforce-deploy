@@ -168,6 +168,11 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      authentik-server:
+        # The api's first act is fetching the OIDC discovery document — authentik
+        # (and its applied blueprint) must precede it, or the api's context init
+        # fails. It retries via restart policy regardless; this removes the wait.
+        condition: service_healthy
     # No dependency on the gateway: api retries its OIDC discovery fetch until
     # authentik is up; the gateway in turn waits for api (started) and authentik
     # (healthy) so the whole graph resolves without a cycle.

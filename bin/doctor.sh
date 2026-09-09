@@ -56,7 +56,14 @@ if [ -n "$RUNNING_META" ]; then
   RV="$(echo "$RUNNING_META" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)"
   row "running version" ok "$RV (configured: ${APP_VERSION})"
 else
-  row "running version" fail "api not answering /api/v1/build-meta"
+    DISC="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://${AUTH_HOSTNAME}/application/o/workforce/.well-known/openid-configuration" 2>/dev/null || echo 000)"
+    if [ "$DISC" = "404" ]; then
+      row "running version" fail "api down — the sign-in blueprint has NOT applied (discovery 404). See authentik-worker logs"
+    elif [ "$DISC" = "000" ]; then
+      row "running version" fail "api down and sign-in unreachable — identity plane not converged; re-run me in 2 minutes"
+    else
+      row "running version" warn "api still booting (sign-in OK, discovery ${DISC}) — re-run me in a minute"
+    fi
 fi
 
 # --- DNS + TLS
