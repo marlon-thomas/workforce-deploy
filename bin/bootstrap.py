@@ -35,6 +35,19 @@ except ImportError:
 BUNDLE_REPO = "https://github.com/marlon-thomas/workforce-deploy.git"
 INSTALL_CMD = "cd /root/workforce-deploy && ./bin/install.sh --env {env}"
 
+# Vagrant mode: the bundle lands in /home/vagrant (not /root), and sudo is NOPASSWD.
+VAGRANT_PREP = r"""
+set -e
+echo "==> Installing host prerequisites (git, curl)…"
+sudo apt-get update -qq >/dev/null
+sudo apt-get install -y -qq git curl ca-certificates >/dev/null
+echo "==> Fetching the deployment bundle…"
+rm -rf /home/vagrant/workforce-deploy
+git clone -q {repo} /home/vagrant/workforce-deploy
+sudo chown -R vagrant:vagrant /home/vagrant/workforce-deploy
+echo "==> Bundle ready. Handing over to the installer (answer its prompts below)."
+""".format(repo=BUNDLE_REPO)
+
 PREP = r"""
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -91,12 +104,13 @@ def scrub_known_hosts(host):
         print(f"Cleared known_hosts entries for: {', '.join(sorted(names))}")
 
 
-def connect(host, port, user, password):
+def connect(host, port, user, password, keyfile=None):
     scrub_known_hosts(host)
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     print(f"Connecting to {user}@{host}:{port} …")
     client.connect(host, port=port, username=user, password=password,
+                   key_filename=keyfile,
                    look_for_keys=False, allow_agent=False, timeout=20)
     print("Connected.")
     return client
@@ -181,13 +195,49 @@ def main():
     ap.add_argument("--password", help="root password (prompted if omitted)")
     ap.add_argument("--env", default="prod", choices=["dev", "prod"],
                     help="deployment environment (selects the env file; default: prod)")
+    ap.add_argument("--vagrant", action="store_true",
+                    help="target the dev Vagrant VM (uses 'vagrant ssh-config' for "
+                         "host/port/key; run from deploy/environments after 'vagrant up')")
     args = ap.parse_args()
+
+    if args.vagrant:
+        import subprocess, shlex
+        cfg = subprocess.run(["vagrant", "ssh-config"],
+                             capture_output=True, text=True, check=True).stdout
+        params = {}
+        for line in cfg.splitlines():
+            if " " in line:
+                k, _, v = line.strip().partition(" ")
+                params[k.lstrip(" ")] = v.strip(" \"'")
+        args.host = params.get("HostName", "127.0.0.1")
+        args.port = int(params.get("Port", 2222))
+        args.user = params.get("User", "vagrant")
+        args.keyfile = params.get("IdentityFile")
+        print(f"Vagrant VM: {args.host}:{args.port} (user {args.user}, key auth)")
 
     password = args.password or getpass.getpass(f"Password for {args.user}@{args.host}: ")
 
-    client = connect(args.host, args.port, args.user, password)
+    client = connect(args.host, args.port, args.user, password,
+                     keyfile=getattr(args, "keyfile", None))
     try:
-        rc = run_quiet(client, PREP)
+        prep_cmd = PREP
+        install_cmd = INSTALL_CMD.format(env=args.env)
+        if args.vagrant:
+            rc = run_quiet(client, VAGRANT_PREP)
+            if rc != 0:
+                sys.exit(f"Host preparation failed (exit {rc}).")
+            install_cmd = ("cd /home/vagrant/workforce-deploy && "
+                           "sudo -E bash ./bin/install.sh --env " + args.env)
+            interactive_shell(client, install_cmd)
+            print("")
+            print("=" * 72)
+            print(" Installer finished. Dev URLs (tailnet/forwarded ports):")
+            print("   https://app.workforce-dev.duckdns.org  (or localhost:8443)")
+            print("   https://auth.workforce-dev.duckdns.org")
+            print("=" * 72)
+            client.close()
+            return
+        rc = run_quiet(client, prep_cmd)
         if rc != 0:
             sys.exit(f"Host preparation failed (exit {rc}).")
         print("")
