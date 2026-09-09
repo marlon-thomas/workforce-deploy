@@ -193,7 +193,7 @@ def main():
     ap.add_argument("--port", type=int, default=22)
     ap.add_argument("--user", default="root")
     ap.add_argument("--password", help="root password (prompted if omitted)")
-    ap.add_argument("--env", default="prod", choices=["test", "prod"],
+    ap.add_argument("--env", default="prod", choices=["development", "test", "prod"],
                     help="deployment environment (test = Ubuntu appliance, prod = live VPS)")
     ap.add_argument("--vagrant", action="store_true",
                     help="target the TEST Vagrant VM (uses 'vagrant ssh-config' for "
