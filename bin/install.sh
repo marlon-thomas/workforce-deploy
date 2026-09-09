@@ -158,7 +158,7 @@ bootstrap() {
     mkdir -p "$(dirname "$TARGET")"
     if [ -d "$TARGET" ] && [ -f "$TARGET/.env" ]; then
       # A previous install lives there — refresh tooling, keep its .env/secrets.
-      cp -a "$CURRENT"/bin "$CURRENT"/gateway "$CURRENT"/blueprints "$CURRENT"/compose.yaml "$CURRENT"/blueprints . "$TARGET/" 2>/dev/null || true
+      cp -a "$CURRENT"/bin "$CURRENT"/gateway "$CURRENT"/blueprints "$CURRENT"/compose.yaml "$CURRENT"/.env.example "$CURRENT"/README.md "$CURRENT"/RUNBOOK.md "$TARGET/" 2>/dev/null || true
     else
       rm -rf "$TARGET"
       mkdir -p "$TARGET"
@@ -287,7 +287,6 @@ resume_or_start() {
     say "Rendering the sign-in blueprint…"
     if [ -f secrets/oidc_client_id ] && [ -f secrets/oidc_client_secret ] \
        && grep -q "OIDC_ISSUER=https://" .env; then
-      AUTH_HOSTNAME_RESUMED="$(grep '^AUTH_HOSTNAME=' .env | cut -d= -f2-)"
       APP_HOSTNAME_RESUMED="$(grep '^APP_HOSTNAME=' .env | cut -d= -f2-)"
       ACME_EMAIL_RESUMED="$(grep '^ACME_EMAIL=' .env | cut -d= -f2-)"
       AK_ADMIN_PASSWORD_RESUMED="$(openssl rand -base64 18)"
@@ -329,6 +328,10 @@ read -r BASE_DOMAIN
 [ -n "${BASE_DOMAIN}" ] || fail "A domain is required."
 BASE_DOMAIN="${BASE_DOMAIN#http://}"; BASE_DOMAIN="${BASE_DOMAIN#https://}"
 BASE_DOMAIN="${BASE_DOMAIN%/}"
+case "$BASE_DOMAIN" in
+  # Tolerate pasting a full hostname: strip a leading workforce./auth. prefix.
+  workforce.*|auth.*) BASE_DOMAIN="${BASE_DOMAIN#*.}" ;;
+esac
 APP_SUB="${WF_SUBDOMAIN:-workforce}"
 AUTH_SUB="${AUTH_SUBDOMAIN:-auth}"
 APP_HOSTNAME="${APP_SUB}.${BASE_DOMAIN}"
@@ -414,7 +417,7 @@ AK_DB_USER=authentik
 OIDC_ISSUER=https://${AUTH_HOSTNAME}/application/o/workforce/
 
 API_IMAGE=ghcr.io/marlon-thomas/workforce-suite
-APP_VERSION=${APP_VERSION:-0.2.0}
+APP_VERSION=${APP_VERSION:-0.2.1}
 
 BACKUP_TARGET=${BACKUP_TARGET}
 ENV
@@ -465,9 +468,10 @@ sed   -e "s|\${OIDC_CLIENT_ID}|$(cat secrets/oidc_client_id)|g" \
   -e "s|\${ACME_EMAIL}|${ACME_EMAIL}|g" \
   -e "s|\${AK_ADMIN_PASSWORD}|${AK_ADMIN_PASSWORD}|g" \
   blueprints/workforce-app.yaml.template > blueprints/workforce-app.yaml
-chmod 600 blueprints/workforce-app.yaml
-# Note: ADMIN_PASSWORD stays in process memory until script exit (seconds) — the
-# summary below prints it for generated passwords. The on-disk blueprint is 0600.
+# 644, not 600: the file is bind-mounted into authentik, and under the rootless
+# daemon's uid mapping a 0600 host file is unreadable to the in-container user —
+# blueprint discovery silently skips it (the ak_config.yml lesson, now applied here).
+chmod 644 blueprints/workforce-app.yaml
 docker compose up -d authentik-server authentik-worker
 
 # ---------------------------------------------------------------- health check
