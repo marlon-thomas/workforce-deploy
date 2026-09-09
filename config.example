@@ -1,0 +1,25 @@
+# Copy this file to ./deploy/.env and fill with REAL secrets for production.
+# Non-secret configuration may live here; secrets MUST come from ./deploy/secrets/* (Docker secrets).
+# NEVER commit .env or ./secrets to source control.
+
+# ---- Application database ----
+DB_NAME=workforce
+DB_USER=workforce_app
+# DB_PASSWORD must be written to ./deploy/secrets/db_password (mode 600)
+
+# ---- Object storage (MinIO) ----
+# access/secret written to ./deploy/secrets/minio_access and minio_secret
+MINIO_BUCKET=workforce-evidence
+
+# ---- authentik (standalone IdP) ----
+OIDC_ISSUER=https://auth.example.com/application/o/<your-application-slug>/
+# client id/secret written to ./deploy/secrets/oidc_client_id and oidc_client_secret
+
+AK_DB_NAME=authentik
+AK_DB_USER=authentik
+# written to ./deploy/secrets/ak_db_password and ak_secret
+
+# ---- Release ----
+# Required: the image name the api/worker/migration containers are built as and run from.
+API_IMAGE=workforce-api
+APP_VERSION=0.1.0

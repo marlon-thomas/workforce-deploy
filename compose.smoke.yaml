@@ -1,0 +1,27 @@
+# Offline / pre-provisioning smoke-test override.
+# Use when authentik is not yet configured or the host has no IdP connectivity:
+#
+#   docker compose -f compose.yaml -f compose.smoke.yaml up -d
+#
+# Disables the eager OIDC discovery fetch so api/worker can boot; login will
+# not work until a reachable issuer is configured (compose.yaml default).
+
+services:
+  gateway:
+    volumes:
+      - ./gateway/Caddyfile.smoke:/etc/caddy/Caddyfile:ro
+
+  api:
+    environment:
+      SPRING_AUTOCONFIGURE_EXCLUDE: "org.springframework.boot.security.oauth2.client.autoconfigure.OAuth2ClientAutoConfiguration,org.springframework.boot.security.oauth2.client.autoconfigure.reactive.ReactiveOAuth2ClientAutoConfiguration"
+      # Pre-provisioning smoke only: no IdP configured yet, so the OIDC chain stands down.
+      # The permissive security chain is gated to the `smoke` profile (never active under `prod`).
+      SPRING_PROFILES_ACTIVE: "prod,smoke"
+      WORKFORCE_SECURITY_ENABLED: "false"
+
+  worker:
+    environment:
+      SPRING_AUTOCONFIGURE_EXCLUDE: "org.springframework.boot.security.oauth2.client.autoconfigure.OAuth2ClientAutoConfiguration,org.springframework.boot.security.oauth2.client.autoconfigure.reactive.ReactiveOAuth2ClientAutoConfiguration"
+      # Pre-provisioning smoke only: no IdP configured yet, so the OIDC chain stands down.
+      SPRING_PROFILES_ACTIVE: "prod,smoke"
+      WORKFORCE_SECURITY_ENABLED: "false"

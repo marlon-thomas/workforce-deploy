@@ -1,0 +1,448 @@
+# Production-like single-host Compose suite (spec §10.1, §10.2).
+# Only `gateway` publishes ports (80/443). Everything else is private-network only.
+#
+#   cp .env.example .env      # non-secret configuration
+#   editor secrets/*          # supply real values (never committed)
+#   docker compose up -d      # clean-host start
+#
+# Secret handling: Docker secrets are mounted into first-party containers at
+# dotted filenames under /run/secrets/ and imported by the app through
+# spring.config.import=configtree:/run/secrets/ (see application.yml). Images
+# with native *_FILE support (postgres, minio, authentik) consume them directly.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  gateway:
+    image: caddy:2.8.4
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      TZ: Europe/London
+      APP_HOSTNAME: ${APP_HOSTNAME:-app.example.com}
+      AUTH_HOSTNAME: ${AUTH_HOSTNAME:-auth.example.com}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [front, back]
+    logging: *default-logging
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "caddy", "version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      api:
+        # STARTED, not healthy: api needs the gateway (and sign-in server) reachable
+        # for its OIDC discovery fetch, so the gateway must come up first and serve
+        # 502s until api finishes booting. Caddy handles upstream-down gracefully.
+        condition: service_started
+      authentik-server:
+        condition: service_healthy
+
+  # One-shot: validate object storage, create the evidence bucket if missing,
+  # and lock it down to authenticated access (spec §10.2 init requirements).
+  init:
+    image: minio/mc:RELEASE.2024-11-17T19-35-25Z
+    restart: "no"
+    networks: [data]
+    environment:
+      TZ: Europe/London
+      MINIO_BUCKET: ${MINIO_BUCKET:-workforce-evidence}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        until mc alias set local "http://object-storage:9000" \
+            "$$(cat /run/secrets/minio_access)" "$$(cat /run/secrets/minio_secret)" >/dev/null 2>&1; do
+          echo "waiting for object-storage..." >&2; sleep 2
+        done
+        mc mb --ignore-existing "local/$${MINIO_BUCKET}"
+        mc anonymous set none "local/$${MINIO_BUCKET}"
+        echo "bucket '$${MINIO_BUCKET}' ready"
+    secrets: [minio_access, minio_secret]
+    logging: *default-logging
+
+  # One-shot database migrations; the API does NOT run Flyway (§10.2).
+  migrate:
+    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
+    restart: "no"
+    networks: [data]
+    environment:
+      TZ: Europe/London
+      SPRING_PROFILES_ACTIVE: prod,migrate
+      SPRING_FLYWAY_ENABLED: "true"
+      WORKFORCE_SCHEDULER_ENABLED: "false"
+      DB_URL: jdbc:postgresql://postgres:5432/${DB_NAME}
+      DB_USER: ${DB_USER}
+      WORKFORCE_EVIDENCE_S3_ENDPOINT: http://object-storage:9000
+      WORKFORCE_EVIDENCE_S3_BUCKET: ${MINIO_BUCKET:-workforce-evidence}
+      # Same conditional-bean set as api — the Spring context must boot identically here.
+      WORKFORCE_REPORTS_GOTENBERG_URL: http://gotenberg:3000
+      WORKFORCE_EVIDENCE_CLAMAV_HOST: clamav
+      WORKFORCE_EVIDENCE_CLAMAV_PORT: "3310"
+    secrets:
+      - source: db_password
+        target: spring.datasource.password
+        mode: 0444
+      - source: minio_access
+        target: workforce.evidence.s3-access-key
+        mode: 0444
+      - source: minio_secret
+        target: workforce.evidence.s3-secret-key
+        mode: 0444
+    depends_on:
+      postgres:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    logging: *default-logging
+
+  api:
+    # Pulled by default (deployment-spec §B1: orgs run published images, pinned by
+    # APP_VERSION). Building from source is a dev override:
+    #   docker compose -f deploy/compose.yaml build api worker
+    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    volumes:
+      # Writable home for admin-uploaded branding assets (evidence lives in MinIO)
+      - app_data:/app/data
+    networks: [back, data]
+    environment:
+      TZ: Europe/London
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_FLYWAY_ENABLED: "false"
+      WORKFORCE_SCHEDULER_ENABLED: "false"
+      SERVER_FORWARD_HEADERS_STRATEGY: framework
+      DB_URL: jdbc:postgresql://postgres:5432/${DB_NAME}
+      DB_USER: ${DB_USER}
+      OIDC_ISSUER: ${OIDC_ISSUER}
+      WORKFORCE_EVIDENCE_S3_ENDPOINT: http://object-storage:9000
+      WORKFORCE_EVIDENCE_S3_BUCKET: ${MINIO_BUCKET:-workforce-evidence}
+      WORKFORCE_EVIDENCE_CLAMAV_HOST: clamav
+      WORKFORCE_EVIDENCE_CLAMAV_PORT: "3310"
+      WORKFORCE_REPORTS_GOTENBERG_URL: http://gotenberg:3000
+      BRAND_DATA_DIR: /app/data/branding
+    secrets:
+      - source: db_password
+        target: spring.datasource.password
+        mode: 0444
+      - source: oidc_client_id
+        target: spring.security.oauth2.client.registration.oidc.client-id
+        mode: 0444
+      - source: oidc_client_secret
+        target: spring.security.oauth2.client.registration.oidc.client-secret
+        mode: 0444
+      - source: minio_access
+        target: workforce.evidence.s3-access-key
+        mode: 0444
+      - source: minio_secret
+        target: workforce.evidence.s3-secret-key
+        mode: 0444
+    deploy:
+      resources:
+        limits: { memory: 1g }
+        reservations: { memory: 512m }
+    logging: *default-logging
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
+      interval: 20s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      authentik-server:
+        # The api's first act is fetching the OIDC discovery document — authentik
+        # (and its applied blueprint) must precede it, or the api's context init
+        # fails. It retries via restart policy regardless; this removes the wait.
+        condition: service_healthy
+    # No dependency on the gateway: api retries its OIDC discovery fetch until
+    # authentik is up; the gateway in turn waits for api (started) and authentik
+    # (healthy) so the whole graph resolves without a cycle.
+
+  worker:
+    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    volumes:
+      # Same image as api: branding init writes its data dir on startup
+      - app_data:/app/data
+    networks: [data]
+    # Same immutable image, different command (spec §10.1). Keeps the management
+    # endpoint for health checks; gateway never routes to it.
+    environment:
+      TZ: Europe/London
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_FLYWAY_ENABLED: "false"
+      WORKFORCE_SCHEDULER_ENABLED: "true"
+      SERVER_FORWARD_HEADERS_STRATEGY: framework
+      DB_URL: jdbc:postgresql://postgres:5432/${DB_NAME}
+      DB_USER: ${DB_USER}
+      OIDC_ISSUER: ${OIDC_ISSUER}
+      WORKFORCE_EVIDENCE_S3_ENDPOINT: http://object-storage:9000
+      WORKFORCE_EVIDENCE_S3_BUCKET: ${MINIO_BUCKET:-workforce-evidence}
+      WORKFORCE_EVIDENCE_CLAMAV_HOST: clamav
+      WORKFORCE_EVIDENCE_CLAMAV_PORT: "3310"
+      WORKFORCE_REPORTS_GOTENBERG_URL: http://gotenberg:3000
+      BRAND_DATA_DIR: /app/data/branding
+    secrets:
+      - source: db_password
+        target: spring.datasource.password
+        mode: 0444
+      - source: oidc_client_id
+        target: spring.security.oauth2.client.registration.oidc.client-id
+        mode: 0444
+      - source: oidc_client_secret
+        target: spring.security.oauth2.client.registration.oidc.client-secret
+        mode: 0444
+      - source: minio_access
+        target: workforce.evidence.s3-access-key
+        mode: 0444
+      - source: minio_secret
+        target: workforce.evidence.s3-secret-key
+        mode: 0444
+    deploy:
+      resources:
+        limits: { memory: 768m }
+        reservations: { memory: 256m }
+    logging: *default-logging
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
+      interval: 30s
+      timeout: 5s
+      retries: 6
+      start_period: 90s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  postgres:
+    image: postgres:16.4
+    restart: unless-stopped
+    networks: [data]
+    environment:
+      TZ: Europe/London
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    logging: *default-logging
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  object-storage:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    networks: [data]
+    environment:
+      TZ: Europe/London
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_access
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_secret
+    secrets: [minio_access, minio_secret]
+    volumes:
+      - minio_data:/data
+    logging: *default-logging
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  clamav:
+    image: clamav/clamav:1.4
+    restart: unless-stopped
+    networks: [data]
+    environment:
+      TZ: Europe/London
+    volumes:
+      - clamav_data:/var/lib/clamav
+    logging: *default-logging
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "clamdscan", "--ping", "3"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+
+  gotenberg:
+    image: gotenberg/gotenberg:8.15
+    restart: unless-stopped
+    networks: [data]
+    logging: *default-logging
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  backup:
+    image: alpine:3.20
+    restart: unless-stopped
+    networks: [data, back]
+    volumes:
+      - .:/work
+      # Rootless-compatible: the operator's docker socket, wherever it lives
+      # (root: /var/run/docker.sock; rootless: /run/user/<uid>/docker.sock).
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+    environment:
+      TZ: Europe/London
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        apk add -q dcron docker-cli >/dev/null
+        echo '0 2 * * * cd /work && ./bin/backup.sh >> backups/cron.log 2>&1' | crontab -
+        crond -f -L /dev/null
+    logging: *default-logging
+
+  ak-redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    networks: [data]
+    command: --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    logging: *default-logging
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:2024.12
+    restart: unless-stopped
+    networks: [back, data]
+    command: server
+    environment:
+      TZ: Europe/London
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__USER: ${AK_DB_USER}
+      AUTHENTIK_POSTGRESQL__NAME: ${AK_DB_NAME}
+      AUTHENTIK_REDIS__HOST: ak-redis
+      AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+    secrets: [ak_db_password, ak_secret]
+    volumes:
+      - ak_media:/media
+      - ak_certs:/certs
+      - ak_geoip:/geoip
+      # Rootless-safe config delivery: bind-mounted from the bundle's secrets dir
+      # (a docker-secret mount at this path is unreadable to the in-container user
+      # under a rootless daemon — observed live). install.sh writes+chmods this file.
+      - ./secrets/ak_config.yml:/etc/authentik/config.yml:ro
+      # Rendered by install.sh from blueprints/workforce-app.yaml.template (§B5)
+      - ./blueprints/workforce-app.yaml:/blueprints/workforce-app.yaml:ro
+    logging: *default-logging
+    stop_grace_period: 30s
+    depends_on:
+      authentik-postgres:
+        condition: service_healthy
+      ak-redis:
+        condition: service_healthy
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:2024.12
+    restart: unless-stopped
+    networks: [data]
+    command: worker
+    environment:
+      TZ: Europe/London
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__USER: ${AK_DB_USER}
+      AUTHENTIK_POSTGRESQL__NAME: ${AK_DB_NAME}
+      AUTHENTIK_REDIS__HOST: ak-redis
+      AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+    secrets: [ak_db_password, ak_secret]
+    volumes:
+      - ak_media:/media
+      - ak_certs:/certs
+      - ./secrets/ak_config.yml:/etc/authentik/config.yml:ro
+    logging: *default-logging
+    stop_grace_period: 30s
+    depends_on:
+      authentik-postgres:
+        condition: service_healthy
+      ak-redis:
+        condition: service_healthy
+
+  authentik-postgres:
+    image: postgres:16.4
+    restart: unless-stopped
+    networks: [data]
+    environment:
+      TZ: Europe/London
+      POSTGRES_DB: ${AK_DB_NAME}
+      POSTGRES_USER: ${AK_DB_USER}
+      POSTGRES_PASSWORD_FILE: /run/secrets/ak_db_password
+    secrets: [ak_db_password]
+    volumes:
+      - ak_pg_data:/var/lib/postgresql/data
+    logging: *default-logging
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  minio_access:
+    file: ./secrets/minio_access
+  minio_secret:
+    file: ./secrets/minio_secret
+  oidc_client_id:
+    file: ./secrets/oidc_client_id
+  oidc_client_secret:
+    file: ./secrets/oidc_client_secret
+  ak_db_password:
+    file: ./secrets/ak_db_password
+  ak_secret:
+    file: ./secrets/ak_secret
+
+volumes:
+  caddy_data:
+  caddy_config:
+  app_data:
+  pg_data:
+  minio_data:
+  clamav_data:
+  ak_media:
+  ak_certs:
+  ak_geoip:
+  ak_pg_data:
+
+networks:
+  front:
+  back:
+  data:

@@ -1,0 +1,20 @@
+# Smoke-test gateway config: plain HTTP, no ACME (pre-provisioning environments).
+# Mounted by compose.smoke.yaml in place of the production Caddyfile.
+{
+	auto_https off
+	admin off
+}
+
+:80 {
+	reverse_proxy api:8080 {
+		header_up X-Forwarded-Proto http
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+		-Server
+	}
+}

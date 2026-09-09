@@ -1,0 +1,40 @@
+# --- Production Caddyfile (gateway service, spec §10.1) ---
+# Hostnames, ACME email and TLS are supplied by the deployment via .env
+# (APP_HOSTNAME, AUTH_HOSTNAME, ACME_EMAIL) — Caddy reads {$VAR} placeholders
+# from its environment at startup. See deploy/README.md.
+# --- Production Caddyfile (gateway service, spec §10.1) ---
+# Terminates TLS, routes to internal services, applies security headers.
+# Only ports 80/443 are published by the host. The compiled UI is served by
+# `api`, so a single upstream handles everything.
+
+{
+	email {$ACME_EMAIL}
+	# Pin Let's Encrypt as the only issuer: Caddy's default rotation falls back to
+	# ZeroSSL, whose order finalisation stalls on some hosts (observed on Contabo —
+	# 'order took too long' loops forever, leaving the site dark). LE is reliable
+	# here and rate limits are generous for this use.
+	acme_ca https://acme-v02.api.letsencrypt.org/directory
+}
+
+{$APP_HOSTNAME} {
+	reverse_proxy api:8080 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+		-Server
+	}
+}
+
+{$AUTH_HOSTNAME} {
+	reverse_proxy authentik-server:9000
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+}
