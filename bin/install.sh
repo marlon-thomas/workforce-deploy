@@ -509,11 +509,18 @@ fi
 # gateway so the final doctor reflects a ready system, not a booting one.
 if [ "${SMOKE}" -ne 1 ]; then
   say "Waiting for the application to become ready…"
+  JVM_STAGING_NOTE=0
   for i in $(seq 1 60); do
     CODE="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://${APP_HOSTNAME}/api/v1/build-meta" 2>/dev/null || echo 000)"
     if [ "$CODE" = "200" ]; then echo "     Application is up (attempt $i)."; break; fi
     # Visible progress: a silent 10-minute wait looks like a hang.
     printf '     waiting… attempt %d/60 (gateway answered %s)\r' "$i" "$CODE"
+    if [ "$i" = 20 ] && [ "$JVM_STAGING_NOTE" -eq 0 ]; then
+      JVM_STAGING_NOTE=1
+      warn "If the gateway is using STAGING certificates (rate-limit override), the api's
+     JVM cannot validate authentik's chain — discovery keeps failing until
+     production certificates return. That is expected in this mode."
+    fi
     [ "$i" = 60 ] && { echo ""; warn "The application did not become ready in 10 minutes. Checking whether it is
      crash-looping: docker compose ps && docker compose logs api --tail 30
      If logs show 'Started WorkforceApplication', it is fine — re-run ./bin/doctor.sh."; }
