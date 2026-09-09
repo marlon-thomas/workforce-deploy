@@ -9,8 +9,11 @@
 
 {
 	email {$ACME_EMAIL}
-	# Staging certs during initial validation; switch to production after validation.
-	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+	# Pin Let's Encrypt as the only issuer: Caddy's default rotation falls back to
+	# ZeroSSL, whose order finalisation stalls on some hosts (observed on Contabo —
+	# 'order took too long' loops forever, leaving the site dark). LE is reliable
+	# here and rate limits are generous for this use.
+	acme_ca https://acme-v02.api.letsencrypt.org/directory
 }
 
 {$APP_HOSTNAME} {
