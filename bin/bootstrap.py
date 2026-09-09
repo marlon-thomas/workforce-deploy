@@ -201,7 +201,7 @@ def main():
     args = ap.parse_args()
 
     if args.vagrant:
-        import subprocess, shlex
+        import subprocess
         cfg = subprocess.run(["vagrant", "ssh-config"],
                              capture_output=True, text=True, check=True).stdout
         params = {}
@@ -212,7 +212,12 @@ def main():
         args.host = params.get("HostName", "127.0.0.1")
         args.port = int(params.get("Port", 2222))
         args.user = params.get("User", "vagrant")
-        args.keyfile = params.get("IdentityFile")
+        kf = params.get("IdentityFile")
+        if kf:
+            # Windows vagrant emits backslash paths — paramiko accepts either,
+            # but normalise and expand for safety.
+            kf = os.path.expanduser(kf.replace("\\", "/"))
+        args.keyfile = kf
         print(f"Vagrant VM: {args.host}:{args.port} (user {args.user}, key auth)")
 
     password = args.password or getpass.getpass(f"Password for {args.user}@{args.host}: ")
