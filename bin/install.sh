@@ -103,6 +103,15 @@ preflight_and_pull() {
   # The application image, with diagnosis. Needs .env (API_IMAGE/APP_VERSION).
   say "Fetching the application image…"
   if ! docker pull "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1; then
+    # Distinguish credential problems from missing images: try the anonymous
+    # token flow against the same manifest. 403/401 = our stored credential is
+    # bad — a re-login fixes it; 'not found' with a valid token = wrong image.
+    if docker manifest inspect "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1; then
+      fail "The image exists but your stored registry credential cannot pull it
+     (expired or revoked GitHub token, or missing read:packages scope).
+     Fix: docker login ghcr.io -u <github-user>   (with a fresh read:packages
+     token) — then re-run me."
+    fi
     FALLBACK="ghcr.io/marlon-thomas/workforce-suite"
     if [ "${API_IMAGE}" != "${FALLBACK}" ] && docker pull "${FALLBACK}:${APP_VERSION}" >/dev/null 2>&1; then
       warn "The configured image (${API_IMAGE}) does not exist — using ${FALLBACK} instead."
