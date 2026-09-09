@@ -280,6 +280,26 @@ resume_or_start() {
       warn "Migrated the image registry path in .env (early placeholder)."
     fi
     preflight_and_pull
+
+    # (Re)render the provisioning blueprint — the resume path never rendered it
+    # (earlier installers only rendered on the fresh path), leaving authentik with
+    # no OIDC provider and the api crash-looping on discovery.
+    say "Rendering the sign-in blueprint…"
+    if [ -f secrets/oidc_client_id ] && [ -f secrets/oidc_client_secret ] \
+       && grep -q "OIDC_ISSUER=https://" .env; then
+      AUTH_HOSTNAME_RESUMED="$(grep '^AUTH_HOSTNAME=' .env | cut -d= -f2-)"
+      APP_HOSTNAME_RESUMED="$(grep '^APP_HOSTNAME=' .env | cut -d= -f2-)"
+      ACME_EMAIL_RESUMED="$(grep '^ACME_EMAIL=' .env | cut -d= -f2-)"
+      AK_ADMIN_PASSWORD_RESUMED="$(openssl rand -base64 18)"
+      sed   -e "s|\${OIDC_CLIENT_ID}|$(cat secrets/oidc_client_id)|g" \
+        -e "s|\${OIDC_CLIENT_SECRET}|$(cat secrets/oidc_client_secret)|g" \
+        -e "s|\${WF_REDIRECT_URI}|https://${APP_HOSTNAME_RESUMED}/login/oauth2/code/oidc|g" \
+        -e "s|\${ACME_EMAIL}|${ACME_EMAIL_RESUMED}|g" \
+        -e "s|\${AK_ADMIN_PASSWORD}|${AK_ADMIN_PASSWORD_RESUMED}|g" \
+        blueprints/workforce-app.yaml.template > blueprints/workforce-app.yaml
+      chmod 644 blueprints/workforce-app.yaml
+    fi
+
     say "Fetching remaining images and starting the stack…"
     pull_stack_images
     docker compose up -d
