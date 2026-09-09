@@ -27,8 +27,8 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-[ -n "${ENV_NAME_ARG}" ] && { [ "${ENV_NAME_ARG}" = "test" ] || [ "${ENV_NAME_ARG}" = "prod" ] \
-  || { echo "Unknown environment: ${ENV_NAME_ARG} (test|prod)"; exit 1; }; }
+[ -n "${ENV_NAME_ARG}" ] && { [ "${ENV_NAME_ARG}" = "development" ] || [ "${ENV_NAME_ARG}" = "test" ] || [ "${ENV_NAME_ARG}" = "prod" ] \
+  || { echo "Unknown environment: ${ENV_NAME_ARG} (development|test|prod)"; exit 1; }; }
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m ->\033[0m %s\n' "$*"; }
