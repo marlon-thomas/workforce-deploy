@@ -101,32 +101,53 @@ pull_stack_images() {
 
 preflight_and_pull() {
   # The application image, with diagnosis. Needs .env (API_IMAGE/APP_VERSION).
-  say "Fetching the application image…"
-  if ! docker pull "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1; then
-    # Distinguish credential problems from missing images: try the anonymous
-    # token flow against the same manifest. 403/401 = our stored credential is
-    # bad — a re-login fixes it; 'not found' with a valid token = wrong image.
-    if docker manifest inspect "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1; then
-      fail "The image exists but your stored registry credential cannot pull it
-     (expired or revoked GitHub token, or missing read:packages scope).
-     Fix: docker login ghcr.io -u <github-user>   (with a fresh read:packages
-     token) — then re-run me."
+  # Retries: large layers over flaky dual-stack links get reset mid-transfer
+  # (observed on Contabo over IPv6) — each retry resumes from cached layers.
+  say "Fetching the application image (retries automatically on network resets)…"
+  PULL_ERR=""
+  ATTEMPT=1
+  while true; do
+    PULL_ERR="$(docker pull "${API_IMAGE}:${APP_VERSION}" 2>&1 >/dev/null | tail -2)"
+    if [ -z "$PULL_ERR" ]; then
+      break   # success
     fi
-    FALLBACK="ghcr.io/marlon-thomas/workforce-suite"
-    if [ "${API_IMAGE}" != "${FALLBACK}" ] && docker pull "${FALLBACK}:${APP_VERSION}" >/dev/null 2>&1; then
-      warn "The configured image (${API_IMAGE}) does not exist — using ${FALLBACK} instead."
-      sed -i.bak "s|^API_IMAGE=.*|API_IMAGE=${FALLBACK}|" .env
-      API_IMAGE="${FALLBACK}"
-    elif [ -n "${DOCKERHUB_USER:-}" ] && docker pull "docker.io/${DOCKERHUB_USER}/workforce-suite:${APP_VERSION}" >/dev/null 2>&1; then
-      warn "GHCR unavailable — using the Docker Hub mirror."
-      sed -i.bak "s|^API_IMAGE=.*|API_IMAGE=docker.io/${DOCKERHUB_USER}/workforce-suite|" .env
-      API_IMAGE="docker.io/${DOCKERHUB_USER}/workforce-suite"
+    if [ "$ATTEMPT" -ge 4 ]; then
+      break   # fall through to diagnosis with the last error captured
+    fi
+    warn "Pull attempt $ATTEMPT failed — waiting 15s and resuming (cached layers are kept)…"
+    ATTEMPT=$((ATTEMPT+1))
+    sleep 15
+  done
+
+  if [ -n "$PULL_ERR" ]; then
+    echo "     last error: $PULL_ERR"
+    # Distinguish credential problems from missing images: the manifest probe
+    # needs no pull rights beyond the token, so a 200 here with a failed pull
+    # means credentials are fine and the problem is network/transport.
+    if docker manifest inspect "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1; then
+      case "$PULL_ERR" in
+        *denied*|*authentication*|*unauthorized*)
+          fail "The image exists but your stored registry credential cannot pull it
+     (expired/revoked GitHub token or missing read:packages scope).
+     Fix: docker login ghcr.io -u <github-user>   (fresh read:packages token),
+     then re-run me.";;
+        *"connection reset"*|*timeout*|*EOF*)
+          warn "Credentials are fine — the failure is the network path (the server's
+     IPv6 route to the registry resets mid-transfer on some hosts).
+     Forcing IPv4 preference for this machine…"
+          sysctl -w net.ipv4.tcp_disallow=0 >/dev/null 2>&1 || true
+          grep -q "precedence ::ffff:0:0/96  100" /etc/gai.conf 2>/dev/null \
+            || echo "precedence ::ffff:0:0/96  100" >> /etc/gai.conf
+          warn "IPv4 preferred for future connections. Re-run me — the pull resumes
+     from cached layers (or run it as the service user: docker pull ${API_IMAGE}:${APP_VERSION})"
+          fail "Re-run me after the IPv4 preference change (one command: ./bin/install.sh).";;
+        *)
+          fail "Could not pull ${API_IMAGE}:${APP_VERSION} — see the last error above.";;
+      esac
     else
-      fail "Could not pull ${API_IMAGE}:${APP_VERSION}.
-     - 'denied' or 'authentication required': re-run me and repeat the registry
-       login (the token needs read:packages scope).
-     - 'not found': the image name in .env is wrong.
-     - Otherwise: check this machine's internet access."
+      fail "The image ${API_IMAGE}:${APP_VERSION} does not exist (or the token cannot
+     see it). If the token is fresh and scoped read:packages, check the image name
+     in .env."
     fi
   fi
 }
