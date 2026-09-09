@@ -498,6 +498,26 @@ if [ "${SMOKE}" -ne 1 ]; then
      docker compose logs authentik-worker (blueprint errors) and re-run me."
 fi
 
+# Build the api JVM truststore from the gateway's served chain — under STAGING
+# certificates the api's JVM cannot validate authentik's chain otherwise. Harmless
+# in production mode (the chain validates against the JVM's own truststore anyway;
+# adding it only pins the exact chain).
+if [ "${SMOKE}" -ne 1 ]; then
+  say "Preparing the api trust store from the sign-in certificate…"
+  echo | openssl s_client -connect "${AUTH_HOSTNAME}:443" -servername "${AUTH_HOSTNAME}" 2>/dev/null \
+    | openssl x509 -outform DER > /tmp/auth-cert.der
+  if [ -s /tmp/auth-cert.der ]; then
+    keytool -importcert -noprompt -alias careangels-gateway \
+      -file /tmp/auth-cert.der -keystore secrets/api-truststore.jks \
+      -storepass changeit >/dev/null 2>&1 \
+      && chmod 644 secrets/api-truststore.jks \
+      && say "Trust store ready (api will trust the sign-in certificate)." \
+      || warn "Could not build the trust store — if the api crash-loops on TLS,
+     production certificates (Caddyfile switch back) resolve it."
+    rm -f /tmp/auth-cert.der
+  fi
+fi
+
 say "Starting the application plane (api, worker, gateway)…"
 if [ "${SMOKE}" -eq 1 ]; then
   docker compose -f compose.yaml -f compose.smoke.yaml up -d

@@ -119,6 +119,10 @@ services:
     volumes:
       # Writable home for admin-uploaded branding assets (evidence lives in MinIO)
       - app_data:/app/data
+      # Staging-TLS mode: truststore built by install.sh when production certs are
+      # unavailable. Absent in normal operation (compose tolerates a missing file
+      # only if declared with the file existing — install.sh always creates it).
+      - ./secrets/api-truststore.jks:/app/api-truststore.jks:ro
     networks: [back, data]
     environment:
       TZ: Europe/London
@@ -135,6 +139,7 @@ services:
       WORKFORCE_EVIDENCE_CLAMAV_PORT: "3310"
       WORKFORCE_REPORTS_GOTENBERG_URL: http://gotenberg:3000
       BRAND_DATA_DIR: /app/data/branding
+      WORKFORCE_TLS_TRUSTSTORE: /app/api-truststore.jks
     secrets:
       - source: db_password
         target: spring.datasource.password
@@ -185,6 +190,7 @@ services:
     volumes:
       # Same image as api: branding init writes its data dir on startup
       - app_data:/app/data
+      - ./secrets/api-truststore.jks:/app/api-truststore.jks:ro
     networks: [data]
     # Same immutable image, different command (spec §10.1). Keeps the management
     # endpoint for health checks; gateway never routes to it.
