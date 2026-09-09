@@ -391,6 +391,9 @@ services:
     volumes:
       - ak_media:/media
       - ak_certs:/certs
+      # The WORKER applies blueprints — same mount as the server (the earlier
+      # deployment failed exactly here: provider never created).
+      - ./blueprints/workforce-app.yaml:/blueprints/workforce-app.yaml:ro
       - ./secrets/ak_config.yml:/etc/authentik/config.yml:ro
     logging: *default-logging
     stop_grace_period: 30s
