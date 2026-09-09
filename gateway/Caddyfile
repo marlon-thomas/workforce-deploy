@@ -13,10 +13,10 @@
 	# ZeroSSL, whose order finalisation stalls on some hosts (observed on Contabo —
 	# 'order took too long' loops forever, leaving the site dark). LE is reliable
 	# here and rate limits are generous for this use.
-	# RATE-LIMIT OVERRIDE: uncomment while the production LE limit is exhausted
-	# (5 identical certificates per week). Staging certs are untrusted by browsers
-	# but let the deployment run. Re-comment for production issuance.
-	acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+	# Production Let's Encrypt. (The staging override used during the September
+	# rate-limit window was reverted on 11 Sep — the duplicate-certificate limit
+	# is a rolling 7 days, so re-issuance is safe again.)
+	acme_ca https://acme-v02.api.letsencrypt.org/directory
 }
 
 {$APP_HOSTNAME} {
