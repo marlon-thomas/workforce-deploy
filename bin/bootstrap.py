@@ -39,6 +39,21 @@ PREP = r"""
 set -e
 export DEBIAN_FRONTEND=noninteractive
 echo "==> Installing host prerequisites (git, curl)…"
+
+# Fresh Ubuntu boxes run unattended-upgrades in the background; it holds the dpkg
+# lock for minutes. Wait politely instead of failing (process 1596 lesson).
+for i in $(seq 1 60); do
+  if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 \
+     && ! pgrep -x apt-get >/dev/null \
+     && ! pgrep -x dpkg >/dev/null; then
+    break
+  fi
+  if [ "$i" = 1 ]; then
+    echo "    (waiting for apt/dpkg to become available — unattended-upgrades runs"
+    echo "     automatically on fresh Ubuntu; this usually takes a minute or two)"
+  fi
+  sleep 10
+done
 apt-get update -qq >/dev/null
 apt-get install -y -qq git curl ca-certificates >/dev/null
 echo "==> Fetching the deployment bundle…"
