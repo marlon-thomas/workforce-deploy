@@ -17,13 +17,18 @@ cd "$(dirname "$0")/.."   # bundle root
 
 SMOKE=0
 SYSTEM_DOCKER=0
-for arg in "$@"; do
-  case "$arg" in
+ENV_NAME_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --smoke) SMOKE=1 ;;
     --system-docker) SYSTEM_DOCKER=1 ;;
-    *) echo "Unknown option: $arg"; exit 1 ;;
+    --env) ENV_NAME_ARG="$2"; shift 2 ;;
+    *) echo "Unknown option: $1"; exit 1 ;;
   esac
+  shift
 done
+[ -n "${ENV_NAME_ARG}" ] && { [ "${ENV_NAME_ARG}" = "dev" ] || [ "${ENV_NAME_ARG}" = "prod" ] \
+  || { echo "Unknown environment: ${ENV_NAME_ARG} (dev|prod)"; exit 1; }; }
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m ->\033[0m %s\n' "$*"; }
@@ -142,7 +147,7 @@ run_ansible_site() {
   fi
 
   say "Converging the platform (ansible playbook — identity plane, blueprint, app plane)…"
-  ansible-playbook -i inventories/prod/hosts.yml ../ansible/site.yml \
+  ansible-playbook -i inventories/prod/hosts.yml ansible/site.yml \
     --connection=local -e "ansible_connection=local" \
     -e "app_hostname=${APP_HOSTNAME}" \
     -e "auth_hostname=${AUTH_HOSTNAME}" \
@@ -181,9 +186,10 @@ bootstrap() {
     echo "Moving the deployment bundle to $TARGET (the service user cannot live under /root)…"
     mkdir -p "$(dirname "$TARGET")"
     if [ -d "$TARGET" ] && [ -f "$TARGET/.env" ]; then
-      cp -a "$CURRENT"/bin "$CURRENT"/gateway "$CURRENT"/blueprints "$CURRENT"/ansible \
-        "$CURRENT"/compose.yaml "$CURRENT"/.env.example "$CURRENT"/README.md "$CURRENT"/RUNBOOK.md \
-        "$TARGET/" 2>/dev/null || true
+      # Full-tree sync: newly added bundle directories (the ansible/ lesson)
+      # can never be missed by an itemised copy. Generated state survives
+      # because .env/secrets/backups are only present in $TARGET.
+      cp -a "$CURRENT/." "$TARGET/"
     else
       rm -rf "$TARGET"
       mkdir -p "$TARGET"
@@ -276,7 +282,15 @@ PROF
 }
 
 resume_or_start() {
-  if [ -f .env ]; then
+  # Environment defaults (from --env or environments/<name>.env): pre-fills the
+# domain so prompt 1 only needs Enter in known environments.
+if [ -n "${ENV_NAME_ARG}" ] && [ -f "environments/${ENV_NAME_ARG}.env" ]; then
+  say "Loading environment: ${ENV_NAME_ARG} (environments/${ENV_NAME_ARG}.env)"
+  # shellcheck disable=SC1091
+  . "environments/${ENV_NAME_ARG}.env"
+fi
+
+if [ -f .env ]; then
     warn "This deployment is already configured (.env exists) — resuming…"
     # The handover from root doesn't carry SERVICE_USER into this shell.
     SERVICE_USER="${SERVICE_USER:-workforce_app_sa}"
@@ -301,7 +315,7 @@ resume_or_start() {
   fi
 
   [ -f compose.yaml ] || fail "compose.yaml not found — run me from the deployment bundle directory."
-  [ -f ../ansible/site.yml ] || fail "ansible/site.yml not found — the bundle is incomplete."
+  [ -f ansible/site.yml ] || fail "ansible/site.yml not found — the bundle is incomplete."
   preflight_network
 }
 
@@ -312,9 +326,13 @@ resume_or_start
 
 # ---------------------------------------------------------------- the four questions
 PUBLIC_IP="$(curl -4 -fsS --max-time 8 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
-printf "1/4  What is your organisation's web domain? (e.g. carehome.org.uk): "
-read -r BASE_DOMAIN
-[ -n "${BASE_DOMAIN}" ] || fail "A domain is required."
+if [ -n "${BASE_DOMAIN:-}" ]; then
+  echo "1/4  Organisation web domain (from environment file): ${BASE_DOMAIN}"
+else
+  printf "1/4  What is your organisation's web domain? (e.g. carehome.org.uk): "
+  read -r BASE_DOMAIN
+  [ -n "${BASE_DOMAIN}" ] || fail "A domain is required."
+fi
 BASE_DOMAIN="${BASE_DOMAIN#http://}"; BASE_DOMAIN="${BASE_DOMAIN#https://}"
 BASE_DOMAIN="${BASE_DOMAIN%/}"
 case "$BASE_DOMAIN" in
