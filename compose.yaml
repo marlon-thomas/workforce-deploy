@@ -209,6 +209,7 @@ services:
       WORKFORCE_EVIDENCE_CLAMAV_PORT: "3310"
       WORKFORCE_REPORTS_GOTENBERG_URL: http://gotenberg:3000
       BRAND_DATA_DIR: /app/data/branding
+      WORKFORCE_TLS_TRUSTSTORE: /app/api-truststore.jks
     secrets:
       - source: db_password
         target: spring.datasource.password
