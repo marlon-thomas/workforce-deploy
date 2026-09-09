@@ -33,7 +33,7 @@ except ImportError:
     sys.exit("paramiko is required:  pip install paramiko")
 
 BUNDLE_REPO = "https://github.com/marlon-thomas/workforce-deploy.git"
-INSTALL_CMD = "cd /root/workforce-deploy && ./bin/install.sh"
+INSTALL_CMD = "cd /root/workforce-deploy && ./bin/install.sh --env {env}"
 
 PREP = r"""
 set -e
@@ -179,6 +179,8 @@ def main():
     ap.add_argument("--port", type=int, default=22)
     ap.add_argument("--user", default="root")
     ap.add_argument("--password", help="root password (prompted if omitted)")
+    ap.add_argument("--env", default="prod", choices=["dev", "prod"],
+                    help="deployment environment (selects the env file; default: prod)")
     args = ap.parse_args()
 
     password = args.password or getpass.getpass(f"Password for {args.user}@{args.host}: ")
@@ -196,7 +198,7 @@ def main():
         print("   - the four deployment questions")
         print("=" * 72)
         print("")
-        interactive_shell(client, INSTALL_CMD)
+        interactive_shell(client, INSTALL_CMD.format(env=args.env))
         print("")
         print("=" * 72)
         print(" Installer finished.")
