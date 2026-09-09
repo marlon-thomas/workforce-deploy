@@ -10,7 +10,7 @@
     group: "{{ service_user }}"
     mode: "0700"
 
-- name: ak_config.yml rendered (rootless-readable: 0444, NOT 0600)
+- name: "ak_config.yml rendered (rootless-readable 0444, not 0600)"
   ansible.builtin.copy:
     content: |
       secret_key: {{ ak_secret }}

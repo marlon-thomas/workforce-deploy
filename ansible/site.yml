@@ -13,7 +13,6 @@
     - name: github_token
       prompt: "GitHub token (read:packages) for image pulls"
       private: true
-      when: github_token is not defined
     - name: ak_admin_password
       prompt: "First administrator password (blank = generate)"
       private: true
