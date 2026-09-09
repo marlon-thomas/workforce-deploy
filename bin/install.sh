@@ -123,6 +123,12 @@ run_ansible_site() {
   # truststore→app stack→readiness) is declarative Ansible state — the playbook
   # converges this machine to the declared state idempotently. The shell only
   # handles the interactive parts.
+
+  # GitHub token for the playbook's registry-login task (both paths). Extracted
+  # from the service user's docker config — set at bootstrap, present on both
+  # fresh and resumed installs.
+  GITHUB_TOKEN="$(grep -o '"auth": "[^"]*"' "/home/${SERVICE_USER:-workforce_app_sa}/.docker/config.json" 2>/dev/null | cut -d'"' -f4 | base64 -d 2>/dev/null | cut -d: -f2 || echo "")"
+
   say "Installing Ansible (one-time)…"
   if ! command -v ansible-playbook >/dev/null 2>&1; then
     pip3 install --quiet ansible-core 2>/dev/null \
@@ -272,6 +278,8 @@ PROF
 resume_or_start() {
   if [ -f .env ]; then
     warn "This deployment is already configured (.env exists) — resuming…"
+    # The handover from root doesn't carry SERVICE_USER into this shell.
+    SERVICE_USER="${SERVICE_USER:-workforce_app_sa}"
     # shellcheck disable=SC1091
     . ./.env
     if [ "${API_IMAGE}" = "ghcr.io/careangels/workforce-suite" ]; then
@@ -410,7 +418,6 @@ preflight_and_pull
 # starts first and the playbook WAITS for the OIDC discovery document to answer 200
 # (blueprint applied, provider published) before building the app plane. The api
 # boots against a finished issuer — no OIDC race.
-export GITHUB_TOKEN="$(grep -o '"auth": "[^"]*"' /home/${SERVICE_USER:-workforce_app_sa}/.docker/config.json 2>/dev/null | cut -d'"' -f4 | base64 -d 2>/dev/null | cut -d: -f2 || echo "")"
 run_ansible_site
 
 # ---------------------------------------------------------------- health check
