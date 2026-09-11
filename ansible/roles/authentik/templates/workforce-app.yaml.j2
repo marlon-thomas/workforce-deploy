@@ -36,6 +36,10 @@ entries:
   - attrs:
       name: Workforce
       slug: workforce
+      # The portal tile takes the user INTO the app (which starts the OIDC
+      # flow properly) — a tile without a launch URL lands on the provider's
+      # authorize endpoint without parameters: "Invalid credentials".
+      launch_url: https://{{ app_hostname }}
       provider: !KeyOf workforce-provider
     identifiers:
       slug: workforce
