@@ -390,11 +390,9 @@ def step2():
 
 def step3():
     say("\n───────── STEP 3: install the suite (interactive) ─────────")
-    say("  The installer will ask, here in this terminal:")
-    say("    - GitHub username + token with read:packages (private images)")
-    say("    - email for certificate notices")
-    say("    - admin password (the sign-in account)")
-    say("    - backup directory")
+    say("  First run: the installer asks for a GitHub PAT (read:packages),")
+    say("  email, admin password and backup directory, here in this terminal.")
+    say("  An existing deployment resumes with no prompts at all.")
     say("  The DuckDNS token is copied in automatically if present at:")
     say(f"    {DUCKDNS_TOKEN_FILE}")
     cmd = [sys.executable, BOOTSTRAP, "--vagrant", "--env", "test"]
