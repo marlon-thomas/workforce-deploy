@@ -51,7 +51,7 @@ rm -rf /home/vagrant/workforce-deploy
 git clone -q {repo} /home/vagrant/workforce-deploy
 sudo chown -R vagrant:vagrant /home/vagrant/workforce-deploy
 echo "==> Bundle ready. Handing over to the installer (answer its prompts below)."
-""".format(repo=BUNDLE_REPO)
+"""
 
 PREP = r"""
 set -e
@@ -78,7 +78,7 @@ echo "==> Fetching the deployment bundle…"
 rm -rf /root/workforce-deploy
 git clone -q {repo} /root/workforce-deploy
 echo "==> Bundle ready. Handing over to the installer (answer its prompts below)."
-""".format(repo=BUNDLE_REPO)
+"""
 
 
 def scrub_known_hosts(host):
@@ -203,6 +203,10 @@ def main():
     ap.add_argument("--vagrant", action="store_true",
                     help="target the TEST Vagrant VM (uses 'vagrant ssh-config' for "
                          "host/port/key; run from deploy/environments after 'vagrant up')")
+    ap.add_argument("--repo", default=BUNDLE_REPO,
+                    help="deployment bundle repo to clone inside the target "
+                         "(default: the public bundle; deploy_to_test passes "
+                         "the origin of the bundle it runs from)")
     ap.add_argument("--smoke", action="store_true",
                     help="no-TLS smoke install inside the VM (OIDC-less, HTTP) — "
                          "the only mode that works without router port-forwarding")
@@ -240,8 +244,10 @@ def main():
     try:
         prep_cmd = PREP
         install_cmd = INSTALL_CMD.format(env=args.env)
+        # repo chosen via --repo (or the public bundle default), formatted
+        # into the prep templates at use-site
         if args.vagrant:
-            rc = run_quiet(client, VAGRANT_PREP)
+            rc = run_quiet(client, VAGRANT_PREP.format(repo=args.repo))
             if rc != 0:
                 sys.exit(f"Host preparation failed (exit {rc}).")
             # Drop the host's DuckDNS token file into the VM so the installer
@@ -277,7 +283,7 @@ def main():
             print("=" * 72)
             client.close()
             return
-        rc = run_quiet(client, prep_cmd)
+        rc = run_quiet(client, prep_cmd.format(repo=args.repo))
         if rc != 0:
             sys.exit(f"Host preparation failed (exit {rc}).")
         print("")

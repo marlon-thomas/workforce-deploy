@@ -295,6 +295,52 @@ def step0(attempts=0):
     say("  All prerequisites satisfied.")
 
 
+# ============================================================ bundle pull
+
+def git_repo_root():
+    """Walk up from this script looking for a git repository root."""
+    root = HERE
+    for _ in range(4):
+        if os.path.isdir(os.path.join(root, ".git")):
+            return root
+        parent = os.path.dirname(root)
+        if parent == root:
+            return None
+        root = parent
+    return None
+
+
+def pull_bundle():
+    """Pull the latest bundle BEFORE deploying, and return the origin URL.
+
+    The VM clones the bundle from GitHub fresh on every run (bootstrap.py),
+    so the deployed code is always origin HEAD. This step keeps the LOCAL
+    copy the same story: if this script lives inside a bundle checkout
+    (bin/ + environments/ at the repo root), fast-forward it first and pass
+    its origin to bootstrap, so everything comes from one place. Running
+    from the development source repo is detected and left alone — the VM
+    must get the public bundle, not the private source.
+    """
+    root = git_repo_root()
+    if not root or not have("git"):
+        return None
+    is_bundle = os.path.isfile(os.path.join(root, "environments", "test.env"))
+    if not is_bundle:
+        return None
+    r = subprocess.run(["git", "-C", root, "remote", "get-url", "origin"],
+                       capture_output=True, text=True, check=False)
+    origin = (r.stdout or "").strip()
+    note("self-update: pulling the latest deployment bundle…")
+    p = subprocess.run(["git", "-C", root, "pull", "--ff-only"], check=False)
+    if p.returncode != 0:
+        warn("bundle could not fast-forward (offline or diverged) — "
+             "continuing with the local copy; the VM still clones origin HEAD.")
+    if origin.startswith("https://"):
+        return origin
+    warn("origin is not an https URL — the VM will clone the public bundle.")
+    return None
+
+
 # ============================================================ STEP 1
 
 def vm_created():
@@ -332,7 +378,10 @@ def step2():
     say("    - backup directory")
     say("  The DuckDNS token is copied in automatically if present at:")
     say(f"    {DUCKDNS_TOKEN_FILE}")
-    run([sys.executable, BOOTSTRAP, "--vagrant", "--env", "test"])
+    cmd = [sys.executable, BOOTSTRAP, "--vagrant", "--env", "test"]
+    if getattr(main, "bundle_repo", None):
+        cmd += ["--repo", main.bundle_repo]
+    run(cmd)
 
 
 # ============================================================ STEP 3
@@ -434,6 +483,7 @@ def main():
     if args.check_only:
         say("\nCheck complete — nothing was run.")
         return
+    main.bundle_repo = pull_bundle()
     if not os.path.isdir(ENV_DIR):
         fail(f"environments directory not found: {ENV_DIR}")
 
