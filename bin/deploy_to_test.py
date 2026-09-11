@@ -437,6 +437,14 @@ def step3_tailnet():
     require_hostnames()
     say("  A login URL will appear — open it in a browser and approve "
         "the device.")
+    # Fresh VMs don't have tailscale yet: bootstrap installs it (STEP 4),
+    # but the join now happens first. Install on demand, idempotently.
+    r = sh_out(["vagrant", "ssh", "-c", "command -v tailscale"], cwd=ENV_DIR)
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        note("installing Tailscale inside the VM (one-time)…")
+        sh(["vagrant", "ssh", "-c",
+            "curl -fsSL https://tailscale.com/install.sh | sudo sh"],
+           cwd=ENV_DIR)
     join_cmd = "sudo tailscale up"
     if getattr(main, "ts_auth_key", None):
         join_cmd += f" --auth-key={main.ts_auth_key}"
