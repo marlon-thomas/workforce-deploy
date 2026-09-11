@@ -414,10 +414,28 @@ def step4():
     say("  The DuckDNS token is copied in automatically if present at:")
     say(f"    {DUCKDNS_TOKEN_FILE}")
     cmd = [sys.executable, BOOTSTRAP, "--vagrant", "--env", "test"]
-    sh(cmd)
+    try:
+        sh(cmd)
+    except KeyboardInterrupt:
+        restore_terminal()
+        say("\n  (interrupted — the installer is resumable; rerun this "
+            "script to continue)")
+        raise SystemExit(130)
+    finally:
+        restore_terminal()
 
 
 # ============================================================ STEP 3 (tailnet+DNS)
+
+def restore_terminal():
+    """bootstrap drives the local terminal in raw mode for the remote PTY
+    session. If it dies mid-session (interrupt, connection drop), the
+    terminal can stay raw — no echo, broken newlines — which feels like
+    the script 'didn't return control'. Restore unconditionally."""
+    if OS != "Windows":
+        subprocess.run(["stty", "sane"], check=False)
+        print()
+
 
 def read_duckdns_token():
     if os.path.isfile(DUCKDNS_TOKEN_FILE):
