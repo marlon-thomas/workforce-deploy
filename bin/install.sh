@@ -240,6 +240,9 @@ MOVED
       fail "Rootless Docker setup failed. If this kernel lacks unprivileged user
      namespaces (some OpenVZ/LXC images), re-run with --system-docker."
     fi
+    # Fedora: Vagrant's embedded Ruby needs libxcrypt-compat (not shipped by default)
+    command -v dnf >/dev/null 2>&1 && rpm -q libxcrypt-compat >/dev/null 2>&1 \
+      || (command -v dnf >/dev/null 2>&1 && dnf install -y -q libxcrypt-compat) || true
     sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
       XDG_RUNTIME_DIR="/run/user/$(id -u "$SERVICE_USER")" \
       systemctl --user enable --now docker
