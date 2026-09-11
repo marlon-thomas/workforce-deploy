@@ -22,6 +22,9 @@ entries:
       invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
       client_id: ${OIDC_CLIENT_ID}
       client_secret: ${OIDC_CLIENT_SECRET}
+      # Without a signing_key the provider publishes an EMPTY JWKS and every
+      # id_token fails validation ("no matching key(s) found").
+      signing_key: !Find [authentik_crypto_certificatekeypair, [name, "authentik Self-signed Certificate"]]
       sub_mode: user_email
       access_token_validity: hours=1
       refresh_token_validity: days=30
