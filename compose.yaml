@@ -165,7 +165,7 @@ services:
       WORKFORCE_TLS_TRUSTSTORE: /app/api-truststore.jks
       # TEMPORARY diagnostics: OAuth2 token-exchange failures are silent at
       # INFO; remove once the sign-in issue is closed.
-      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY_OAUTH2: DEBUG
+      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY: TRACE
       LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_WEB: DEBUG
     secrets:
       - source: db_password
