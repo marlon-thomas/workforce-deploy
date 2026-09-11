@@ -39,6 +39,12 @@ INSTALL_CMD = "cd /root/workforce-deploy && ./bin/install.sh --env {env}"
 VAGRANT_PREP = r"""
 set -e
 echo "==> Installing host prerequisites (git, curl, tailscale)…"
+# Some networks blackhole plain-HTTP to Ubuntu mirrors; apt over https
+# works everywhere that has DNS + 443 (observed on a filtered home network).
+sudo sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; \
+             s|http://security.ubuntu.com|https://security.ubuntu.com|g; \
+             s|http://us.archive.ubuntu.com|https://us.archive.ubuntu.com|g' \
+    /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
 sudo apt-get update -qq >/dev/null
 sudo apt-get install -y -qq git curl ca-certificates >/dev/null
 if ! command -v tailscale >/dev/null 2>&1; then
@@ -72,6 +78,10 @@ for i in $(seq 1 60); do
   fi
   sleep 10
 done
+sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; \
+        s|http://security.ubuntu.com|https://security.ubuntu.com|g; \
+        s|http://us.archive.ubuntu.com|https://us.archive.ubuntu.com|g' \
+    /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
 apt-get update -qq >/dev/null
 apt-get install -y -qq git curl ca-certificates >/dev/null
 echo "==> Fetching the deployment bundle…"
