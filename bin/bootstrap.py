@@ -53,7 +53,10 @@ if ! command -v tailscale >/dev/null 2>&1; then
 fi
 sudo systemctl enable --now tailscaled >/dev/null 2>&1 || true
 echo "==> Fetching the deployment bundle…"
-rm -rf /home/vagrant/workforce-deploy
+# sudo: a previous install may have left a root-owned pointer file here
+# (bundle relocated to /opt, 'README-MOVED.txt' left behind) — the vagrant
+# user cannot remove it. The real deployment lives in /opt and is untouched.
+sudo rm -rf /home/vagrant/workforce-deploy
 git clone -q {repo} /home/vagrant/workforce-deploy
 sudo chown -R vagrant:vagrant /home/vagrant/workforce-deploy
 echo "==> Bundle ready. Handing over to the installer (answer its prompts below)."
