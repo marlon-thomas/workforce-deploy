@@ -458,8 +458,12 @@ def step1(fresh):
     # Fail fast on guest internet problems — with automatic repair, instead
     # of a confusing apt failure deep inside the installer.
     def guest_has_internet():
+        # HTTPS deliberately: some networks blackhole plain-HTTP to the
+        # Ubuntu mirrors while everything else works — an HTTP probe would
+        # measure the ISP, not the VM (observed: guest behaved identically
+        # to the host, https fine, http-to-mirror timed out).
         r = run(["vagrant", "ssh", "-c",
-                 "curl -4 -m 8 -sI http://archive.ubuntu.com | head -1"],
+                 "curl -4 -m 8 -sI https://github.com | head -1"],
                 cwd=ENV_DIR, check=False)
         out = r.stdout or ""
         return any(code in out for code in ("200", "301", "302"))
