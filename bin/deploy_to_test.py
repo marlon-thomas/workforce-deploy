@@ -403,18 +403,47 @@ def step1(fresh):
         note("destroying the existing VM (--fresh)…")
         run(["vagrant", "destroy", "-f"], cwd=ENV_DIR)
     run(["vagrant", "up"], cwd=ENV_DIR)
-    # Fail fast on guest internet problems with actionable output, instead
+    # Fail fast on guest internet problems — with automatic repair, instead
     # of a confusing apt failure deep inside the installer.
-    r = run(["vagrant", "ssh", "-c",
-             "curl -4 -m 8 -sI http://archive.ubuntu.com | head -1"],
-            cwd=ENV_DIR, check=False)
-    if "200" not in (r.stdout or "") and "301" not in (r.stdout or "")             and "302" not in (r.stdout or ""):
-        fail("the VM has no outbound internet (DNS may resolve but TCP is "
-             "blocked). On Fedora, fix the forwarding then re-run:\n"
-             "    sudo firewall-cmd --zone=libvirt --add-interface=virbr0\n"
-             "    sudo firewall-cmd --zone=libvirt --add-forward\n"
-             "  …or restart the libvirt network so it re-registers:\n"
-             "    sudo virsh net-destroy default && sudo virsh net-start default")
+    def guest_has_internet():
+        r = run(["vagrant", "ssh", "-c",
+                 "curl -4 -m 8 -sI http://archive.ubuntu.com | head -1"],
+                cwd=ENV_DIR, check=False)
+        out = r.stdout or ""
+        return any(code in out for code in ("200", "301", "302"))
+
+    def repair_guest_nat():
+        """Guest reaches the host but not the internet = the libvirt NAT
+        (masquerade) rules for its network were flushed (firewalld reload /
+        docker restart) and only re-apply when the network restarts."""
+        for netname in ("vagrant-libvirt", "default"):
+            run(["sudo", "virsh", "-c", "qemu:///system", "net-destroy",
+                 netname], check=False)
+            run(["sudo", "virsh", "-c", "qemu:///system", "net-start",
+                 netname], check=False)
+        time.sleep(8)   # guest link flaps; DHCP renews
+
+    for attempt in range(3):
+        if guest_has_internet():
+            ok("VM has outbound internet")
+            break
+        if attempt == 0:
+            warn("VM cannot reach the internet — repairing libvirt NAT "
+                 "(sudo may ask for your password)…")
+            repair_guest_nat()
+        elif attempt == 1:
+            warn("still blocked — adding zone-level masquerade as a "
+                 "fallback (sudo may ask)…")
+            sudo_run(["sudo", "firewall-cmd", "--zone=libvirt",
+                      "--add-masquerade"])
+            time.sleep(3)
+        else:
+            fail("the VM has no outbound internet after repair attempts. "
+                 "Run manually, then re-run me:\n"
+                 "    sudo virsh net-destroy vagrant-libvirt && sudo virsh net-start vagrant-libvirt\n"
+                 "    sudo virsh net-destroy default && sudo virsh net-start default\n"
+                 "    sudo firewall-cmd --zone=libvirt --add-masquerade --permanent\n"
+                 "    sudo firewall-cmd --zone=libvirt --add-masquerade")
     ok("VM has outbound internet")
     if not snapshot_exists():
         run(["vagrant", "snapshot", "save", "clean"], cwd=ENV_DIR)
