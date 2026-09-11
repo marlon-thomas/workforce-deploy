@@ -1,0 +1,53 @@
+---
+# workforce — application plane: env, truststore, app containers (after identity
+# plane convergence, handled by the authentik role).
+
+- name: .env present with pinned version and correct image path
+  ansible.builtin.template:
+    src: env.j2
+    dest: /opt/workforce-deploy/.env
+    owner: "{{ service_user }}"
+    group: "{{ service_user }}"
+    mode: "0600"
+
+- name: api JVM truststore from the gateway chain (staging-TLS support; harmless in prod)
+  ansible.builtin.shell: |
+    set -o pipefail
+    echo | openssl s_client -connect {{ auth_hostname }}:443 -servername {{ auth_hostname }} 2>/dev/null \
+      | openssl x509 -outform DER > /tmp/auth-cert.der
+    docker run --rm -v /opt/workforce-deploy/secrets:/out eclipse-temurin:25-jre \
+      keytool -importcert -noprompt -alias careangels-gateway \
+      -file /out/auth-cert.der -keystore /out/api-truststore.jks -storepass changeit
+    chmod 644 /opt/workforce-deploy/secrets/api-truststore.jks
+  args:
+    executable: /bin/bash
+  changed_when: true
+
+- name: Service user uid
+  ansible.builtin.command: id -u {{ service_user }}
+  register: su_uid
+  changed_when: false
+
+- name: Application plane up — as the SERVICE USER (rootless daemon owns the
+        containers and its docker config holds the GHCR credential; running this
+        as root would pull unauthorized and manage a second, empty daemon)
+  community.docker.docker_compose_v2:
+    project_src: /opt/workforce-deploy
+    files:
+      - compose.yaml
+    state: present
+    pull: missing
+  environment:
+    DOCKER_HOST: "unix:///run/user/{{ su_uid.stdout }}/docker.sock"
+    XDG_RUNTIME_DIR: "/run/user/{{ su_uid.stdout }}"
+
+
+- name: application ready (build-meta answers 200)
+  ansible.builtin.uri:
+    url: "https://{{ app_hostname }}/api/v1/build-meta"
+    status_code: 200
+    validate_certs: false
+  register: buildmeta
+  retries: 60
+  delay: 10
+  until: buildmeta.status == 200

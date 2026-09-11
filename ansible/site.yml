@@ -1,0 +1,59 @@
+---
+# Care Angels Workforce Suite — full provisioning (deployment-spec §B).
+# One playbook, two inventories: dev (Vagrant VM) and prod (VPS).
+#
+#   ansible-playbook -i inventories/prod/hosts.yml site.yml
+#
+# Interactive elements (passwords, tokens) are prompted; everything else
+# converges idempotently — re-running is always safe.
+- name: Care Angels Workforce — provision
+  hosts: all
+  gather_facts: true
+  vars_prompt:
+    - name: github_token
+      prompt: "GitHub token (read:packages) for image pulls"
+      private: true
+    - name: ak_admin_password
+      prompt: "First administrator password (blank = generate)"
+      private: true
+
+  pre_tasks:
+    - name: Generate an admin password when not supplied
+      ansible.builtin.set_fact:
+        ak_admin_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits,length=18') }}"
+      when: ak_admin_password is not defined or ak_admin_password | length == 0
+
+    - name: Check registry credential already works
+      ansible.builtin.shell: |
+        docker manifest inspect ghcr.io/marlon-thomas/workforce-suite:0.2.2 >/dev/null 2>&1 && echo ALREADY-AUTHED
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ service_user }}"
+      register: authed
+      changed_when: false
+      failed_when: false
+
+    - name: Registry login (only when the stored credential cannot see the image)
+      ansible.builtin.shell: |
+        echo '{{ github_token }}' | docker login ghcr.io -u {{ gh_user | default('marlon-thomas') }} --password-stdin
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ service_user }}"
+      when: "'ALREADY-AUTHED' not in authed.stdout"
+      changed_when: true
+
+  roles:
+    - common
+    - authentik
+    - workforce
+
+  post_tasks:
+    - name: Deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "Environment: {{ env_name }}"
+          - "App:        https://{{ app_hostname }}"
+          - "Sign-in:    https://{{ auth_hostname }} (user: admin)"
+          - "Doctor:     cd /opt/workforce-deploy && ./bin/doctor.sh"

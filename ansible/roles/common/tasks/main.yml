@@ -1,0 +1,64 @@
+---
+# common — packages, users, docker (rootless default), firewall, sysctl.
+# Idempotent: re-running converges to the declared state (the lesson of the
+# chmod-undo and heredoc-corruption incidents, expressed as structure).
+
+- name: Base packages
+  ansible.builtin.package:
+    name:
+      - git
+      - curl
+      - tar
+      - unzip
+      - ca-certificates
+      - openssl
+    state: present
+
+- name: Service user exists
+  ansible.builtin.user:
+    name: "{{ service_user }}"
+    shell: /bin/bash
+    groups: sudo
+    append: true
+    password_lock: false
+
+- name: Bundle directory owned by service user
+  ansible.builtin.file:
+    path: /opt/workforce-deploy
+    state: directory
+    owner: "{{ service_user }}"
+    group: "{{ service_user }}"
+    recurse: true
+
+- name: Docker binary already present?
+  ansible.builtin.command: docker --version
+  register: docker_bin
+  changed_when: false
+  failed_when: false
+
+- name: Docker installed via get.docker.com (skips apt/dnf to avoid repo conflicts
+        with the existing docker-ce installation)
+  ansible.builtin.shell: curl -fsSL https://get.docker.com | sh
+  when: docker_bin.rc != 0
+
+- name: Service user in docker group
+  ansible.builtin.user:
+    name: "{{ service_user }}"
+    groups: docker
+    append: true
+
+- name: Unprivileged port floor 80 (rootless binds 80/443)
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_unprivileged_port_start
+    value: "80"
+    sysctl_set: true
+    reload: true
+
+- name: Firewall allows web (ufw)
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop: ["80", "443"]
+  when: ansible_facts.packages['ufw'] is defined
+  failed_when: false
