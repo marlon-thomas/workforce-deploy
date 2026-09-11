@@ -282,8 +282,11 @@ PROF
 
   echo ""
   echo "Bootstrap complete. Continuing as '$SERVICE_USER' from $TARGET…"
+  # Forward the environment selection — without it the service-user phase
+  # loses the env-file prefill (domain, subdomains, TLS mode) entirely.
   FLAGS=""
-  [ "${SMOKE}" -eq 1 ] && FLAGS="--smoke"
+  [ -n "${ENV_NAME_ARG}" ] && FLAGS="--env ${ENV_NAME_ARG}"
+  [ "${SMOKE}" -eq 1 ] && FLAGS="${FLAGS} --smoke"
   [ "${SYSTEM_DOCKER}" -eq 1 ] && FLAGS="${FLAGS} --system-docker"
   # shellcheck disable=SC2086
   exec sudo -u "$SERVICE_USER" bash "$TARGET/bin/install.sh" $FLAGS
