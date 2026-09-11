@@ -39,7 +39,9 @@ entries:
       # The portal tile takes the user INTO the app (which starts the OIDC
       # flow properly) — a tile without a launch URL lands on the provider's
       # authorize endpoint without parameters: "Invalid credentials".
-      launch_url: https://{{ app_hostname }}
+      # NOTE: the blueprint field is meta_launch_url (launch_url is silently
+      # ignored by the serializer — verified against an empty DB column).
+      meta_launch_url: https://{{ app_hostname }}
       provider: !KeyOf workforce-provider
     identifiers:
       slug: workforce
