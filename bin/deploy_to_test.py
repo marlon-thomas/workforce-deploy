@@ -404,10 +404,10 @@ def step2():
                  + "\n  If the host fails too, it is the network, not the VM.")
 
 
-# ============================================================ STEP 3
+# ============================================================ STEP 4 (installer)
 
-def step3():
-    say("\n───────── STEP 3: install the suite (interactive) ─────────")
+def step4():
+    say("\n───────── STEP 4: install the suite (interactive) ─────────")
     say("  First run: the installer asks for a GitHub PAT (read:packages),")
     say("  email, admin password and backup directory, here in this terminal.")
     say("  An existing deployment resumes with no prompts at all.")
@@ -417,7 +417,7 @@ def step3():
     sh(cmd)
 
 
-# ============================================================ STEP 4
+# ============================================================ STEP 3 (tailnet+DNS)
 
 def read_duckdns_token():
     if os.path.isfile(DUCKDNS_TOKEN_FILE):
@@ -429,12 +429,19 @@ def read_duckdns_token():
     return getpass.getpass("  DuckDNS token (input hidden): ").strip()
 
 
-def step4():
-    say("\n───────── STEP 4: Tailscale + DuckDNS ─────────")
+def step3_tailnet():
+    """Join the tailnet and point DuckDNS at THIS VM BEFORE the installer:
+    the playbook's discovery check resolves the public hostname, which must
+    reach THIS VM (the historical fresh-deploy chicken-and-egg)."""
+    say("\n───────── STEP 3: Tailscale + DuckDNS (before install) ─────────")
     require_hostnames()
     say("  A login URL will appear — open it in a browser and approve "
         "the device.")
-    sh(["vagrant", "ssh", "-c", "sudo tailscale up"], cwd=ENV_DIR, check=False)
+    join_cmd = "sudo tailscale up"
+    if getattr(main, "ts_auth_key", None):
+        join_cmd += f" --auth-key={main.ts_auth_key}"
+        note("joining the tailnet with the provided auth key…")
+    sh(["vagrant", "ssh", "-c", join_cmd], cwd=ENV_DIR, check=False)
     r = sh_out(["vagrant", "ssh", "-c", "tailscale ip -4"], cwd=ENV_DIR)
     ip = (r.stdout or "").strip().splitlines()[-1].strip() if r.stdout else ""
     if not ip.startswith("100."):
@@ -492,13 +499,19 @@ def main():
     ap.add_argument("--check-only", action="store_true",
                     help="run STEP 0 (prerequisite report) and exit")
     ap.add_argument("--skip-to", type=int, default=0, choices=[0, 1, 2, 3, 4],
-                    help="resume at a step (runs that step and everything after)")
+                    help="resume at a step (runs that step and everything "
+                         "after): 0 prereqs, 1 VM, 2 guest-internet, "
+                         "3 Tailscale+DuckDNS, 4 install")
+    ap.add_argument("--tailscale-auth-key",
+                    help="join the tailnet unattended (else the login URL "
+                         "is shown for browser approval)")
     args = ap.parse_args()
 
     say("═══════════════════════════════════════════════════════")
     say("  Workforce Suite → TEST environment (any OS)")
     say("═══════════════════════════════════════════════════════")
 
+    main.ts_auth_key = args.tailscale_auth_key
     if args.teardown:
         teardown()
         return
@@ -514,7 +527,7 @@ def main():
     if args.skip_to <= 2:
         step2()
     if args.skip_to <= 3:
-        step3()
+        step3_tailnet()
     if args.skip_to <= 4:
         step4()
 
