@@ -38,9 +38,14 @@ INSTALL_CMD = "cd /root/workforce-deploy && ./bin/install.sh --env {env}"
 # Vagrant mode: the bundle lands in /home/vagrant (not /root), and sudo is NOPASSWD.
 VAGRANT_PREP = r"""
 set -e
-echo "==> Installing host prerequisites (git, curl)…"
+echo "==> Installing host prerequisites (git, curl, tailscale)…"
 sudo apt-get update -qq >/dev/null
 sudo apt-get install -y -qq git curl ca-certificates >/dev/null
+if ! command -v tailscale >/dev/null 2>&1; then
+  curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1 || \
+    echo "WARN: tailscale install failed — install it manually inside the VM."
+fi
+sudo systemctl enable --now tailscaled >/dev/null 2>&1 || true
 echo "==> Fetching the deployment bundle…"
 rm -rf /home/vagrant/workforce-deploy
 git clone -q {repo} /home/vagrant/workforce-deploy
@@ -239,15 +244,36 @@ def main():
             rc = run_quiet(client, VAGRANT_PREP)
             if rc != 0:
                 sys.exit(f"Host preparation failed (exit {rc}).")
+            # Drop the host's DuckDNS token file into the VM so the installer
+            # can pick it up for DNS-01 certificate issuance (silent if absent;
+            # the installer will prompt instead).
+            tok = os.path.expanduser("~/.config/workforce-dev/duckdns.env")
+            if os.path.isfile(tok):
+                sftp = client.open_sftp()
+                try:
+                    sftp.put(tok, "/home/vagrant/duckdns.env")
+                    run_quiet(client, "chmod 600 /home/vagrant/duckdns.env")
+                    print("DuckDNS token file copied into the VM.")
+                except Exception as exc:
+                    print(f"WARN: could not copy DuckDNS token ({exc}); "
+                          "the installer will prompt for it.")
+                finally:
+                    sftp.close()
             install_cmd = ("cd /home/vagrant/workforce-deploy && "
                            "sudo -E bash ./bin/install.sh --env " + args.env
                            + (" --smoke" if args.smoke else ""))
             interactive_shell(client, install_cmd)
             print("")
             print("=" * 72)
-            print(" Installer finished. Dev URLs (tailnet/forwarded ports):")
-            print("   https://app.workforce-test.duckdns.org  (or localhost:8443)")
-            print("   https://auth.workforce-test.duckdns.org")
+            print(" Installer finished. Final step — put the VM on your tailnet:")
+            print("   vagrant ssh -c \"sudo tailscale up\"     (follow the login URL)")
+            print("   vagrant ssh -c \"tailscale ip -4\"       (the VM's tailnet IP)")
+            print(" Then point the DuckDNS records at that IP:")
+            print("   curl 'https://www.duckdns.org/update?domains=workforce-test,workforce-test-auth&token=<TOKEN>&ip=<TAILNET-IP>'")
+            print("")
+            print(" Browse (from any tailnet device):")
+            print("   https://workforce-test.duckdns.org        (app)")
+            print("   https://workforce-test-auth.duckdns.org   (sign-in, user: admin)")
             print("=" * 72)
             client.close()
             return

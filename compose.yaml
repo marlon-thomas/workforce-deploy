@@ -18,7 +18,7 @@ x-logging: &default-logging
 
 services:
   gateway:
-    image: caddy:2.8.4
+    image: ${GATEWAY_IMAGE:-caddy:2.8.4}
     restart: unless-stopped
     ports:
       - "80:80"
@@ -28,8 +28,11 @@ services:
       APP_HOSTNAME: ${APP_HOSTNAME:-app.example.com}
       AUTH_HOSTNAME: ${AUTH_HOSTNAME:-auth.example.com}
       ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+      # Only consumed by the duckdns gateway build (TLS_MODE=dns01); empty is
+      # harmless for the stock HTTP-01 image.
+      DUCKDNS_API_TOKEN: ${DUCKDNS_API_TOKEN:-}
     volumes:
-      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${GATEWAY_CADDYFILE:-./gateway/Caddyfile}:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
     networks: [front, back]
