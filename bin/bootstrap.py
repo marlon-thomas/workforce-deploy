@@ -202,8 +202,13 @@ def main():
 
     if args.vagrant:
         import subprocess
-        cfg = subprocess.run(["vagrant", "ssh-config"],
-                             capture_output=True, text=True, check=True).stdout
+        # Work regardless of caller's cwd: 'vagrant ssh-config' needs the
+        # Vagrantfile directory (deploy/environments, sibling of this script).
+        env_dir = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "environments"))
+        cfg = subprocess.run(["vagrant", "ssh-config"], capture_output=True,
+                             text=True, check=True,
+                             cwd=env_dir if os.path.isdir(env_dir) else None).stdout
         params = {}
         for line in cfg.splitlines():
             if " " in line:
