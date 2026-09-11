@@ -432,18 +432,20 @@ def step1(fresh):
                  "(sudo may ask for your password)…")
             repair_guest_nat()
         elif attempt == 1:
-            warn("still blocked — adding zone-level masquerade as a "
-                 "fallback (sudo may ask)…")
-            sudo_run(["sudo", "firewall-cmd", "--zone=libvirt",
-                      "--add-masquerade"])
-            time.sleep(3)
+            warn("still blocked — docker's FORWARD DROP policy is the prime "
+                 "suspect (it only accepts traffic for its own bridges); "
+                 "allowing the libvirt bridges in DOCKER-USER (sudo may ask)…")
+            for bridge in ("virbr0", "virbr1"):
+                for direction in ("-i", "-o"):
+                    sudo_run(["sudo", "iptables", "-I", "DOCKER-USER",
+                              direction, bridge, "-j", "ACCEPT"])
         else:
             fail("the VM has no outbound internet after repair attempts. "
                  "Run manually, then re-run me:\n"
                  "    sudo virsh net-destroy vagrant-libvirt && sudo virsh net-start vagrant-libvirt\n"
                  "    sudo virsh net-destroy default && sudo virsh net-start default\n"
-                 "    sudo firewall-cmd --zone=libvirt --add-masquerade --permanent\n"
-                 "    sudo firewall-cmd --zone=libvirt --add-masquerade")
+                 "    for b in virbr0 virbr1; do sudo iptables -I DOCKER-USER -i $b -j ACCEPT; sudo iptables -I DOCKER-USER -o $b -j ACCEPT; done\n"
+                 "    sudo firewall-cmd --zone=FedoraWorkstation --add-masquerade")
     ok("VM has outbound internet")
     if not snapshot_exists():
         run(["vagrant", "snapshot", "save", "clean"], cwd=ENV_DIR)
