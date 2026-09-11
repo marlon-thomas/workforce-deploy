@@ -268,8 +268,12 @@ def main():
     else:
         if not args.host:
             sys.exit("error: --host is required (unless --vagrant)")
-        password = args.password or getpass.getpass(
-            f"Password for {args.user}@{args.host}: ")
+        password = args.password
+        while not password:
+            # mandatory: empty input = accidental Enter — retry, not quit
+            password = getpass.getpass(
+                f"Password for {args.user}@{args.host} "
+                "(Enter to retry, Ctrl+C to exit): ")
 
     client = connect(args.host, args.port, args.user, password,
                      keyfile=getattr(args, "keyfile", None))
