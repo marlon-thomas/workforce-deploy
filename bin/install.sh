@@ -352,16 +352,40 @@ if [ "${SMOKE}" -eq 0 ]; then
   say "Opening the firewall for the web (80/tcp, 443/tcp)…"
   open_port 80
   open_port 443
-  say "Checking that both addresses point at this machine (this can take a few minutes
+  if [ "${TLS_MODE:-http01}" = "dns01" ]; then
+    # Certificates come via the DuckDNS API (DNS-01): no A records are needed
+    # for issuance, and reachability is provided by Tailscale rather than a
+    # public IP. The hostname may legitimately resolve to a 100.x tailnet
+    # address, so the HTTP-01 DNS check would be wrong here — skip it.
+    say "TLS_MODE=dns01: certificates will be issued via the DuckDNS API —
+      no A records needed. Reachability comes from Tailscale (the VM's
+      tailnet address must be in the DuckDNS A record for the hostnames
+      you will browse from)."
+    DUCKDNS_API_TOKEN=""
+    TOKEN_FILE="${DUCKDNS_TOKEN_FILE:-}"
+    if [ -n "${TOKEN_FILE}" ] && [ -f "${TOKEN_FILE/#\~/$HOME}" ]; then
+      . "${TOKEN_FILE/#\~/$HOME}"
+      DUCKDNS_API_TOKEN="${DUCKDNS_TOKEN:-}"
+      [ -n "${DUCKDNS_API_TOKEN}" ] && say "DuckDNS token loaded from ${TOKEN_FILE}."
+    fi
+    if [ -z "${DUCKDNS_API_TOKEN}" ]; then
+      printf "     DuckDNS API token (for certificate issuance): "
+      read -rs DUCKDNS_API_TOKEN
+      echo
+    fi
+    [ -n "${DUCKDNS_API_TOKEN}" ] || fail "A DuckDNS API token is required for TLS_MODE=dns01."
+  else
+    say "Checking that both addresses point at this machine (this can take a few minutes
       on a fresh domain — create TWO 'A' records: ${APP_HOSTNAME} and ${AUTH_HOSTNAME}
       -> ${PUBLIC_IP})…"
-  for i in $(seq 1 60); do
-    verify_dns && break
-    [ "$i" = 60 ] && fail "DNS still not pointing here. At your domain provider create
-     two 'A' records: ${APP_HOSTNAME} -> ${PUBLIC_IP} and ${AUTH_HOSTNAME} -> ${PUBLIC_IP},
-     then re-run me."
-    sleep 15
-  done
+    for i in $(seq 1 60); do
+      verify_dns && break
+      [ "$i" = 60 ] && fail "DNS still not pointing here. At your domain provider create
+       two 'A' records: ${APP_HOSTNAME} -> ${PUBLIC_IP} and ${AUTH_HOSTNAME} -> ${PUBLIC_IP},
+       then re-run me."
+      sleep 15
+    done
+  fi
 else
   warn "--smoke: DNS verification skipped."
 fi
@@ -405,11 +429,20 @@ chmod 600 secrets/*
 chmod 444 secrets/ak_config.yml   # bind-mounted into authentik (rootless uid mapping)
 
 say "Writing configuration…"
+GATEWAY_IMAGE_DEFAULT="caddy:2.8.4"
+GATEWAY_CADDYFILE_DEFAULT="./gateway/Caddyfile"
+if [ "${TLS_MODE:-http01}" = "dns01" ] && [ "${SMOKE}" -eq 0 ]; then
+  GATEWAY_IMAGE_DEFAULT="ghcr.io/marlon-thomas/workforce-gateway:latest"
+  GATEWAY_CADDYFILE_DEFAULT="./gateway/Caddyfile.duckdns"
+fi
 cat > .env <<ENV
-ENV_NAME=prod
+ENV_NAME=${ENV_NAME:-prod}
 APP_HOSTNAME=${APP_HOSTNAME}
 AUTH_HOSTNAME=${AUTH_HOSTNAME}
 ACME_EMAIL=${ACME_EMAIL}
+GATEWAY_IMAGE=${GATEWAY_IMAGE_DEFAULT}
+GATEWAY_CADDYFILE=${GATEWAY_CADDYFILE_DEFAULT}
+DUCKDNS_API_TOKEN=${DUCKDNS_API_TOKEN:-}
 
 DB_NAME=workforce
 DB_USER=workforce_app

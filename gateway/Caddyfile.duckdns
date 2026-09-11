@@ -1,0 +1,36 @@
+# --- Test-environment Caddyfile (TLS_MODE=dns01) ---
+# Same routing and headers as the production Caddyfile; certificates are
+# issued via the DuckDNS API (DNS-01) instead of HTTP-01, so the appliance
+# needs no inbound internet reachability. Requires the duckdns-enabled
+# gateway image (GATEWAY_IMAGE) and DUCKDNS_API_TOKEN in the environment.
+
+{
+	email {$ACME_EMAIL}
+	# Same issuer pin rationale as production: LE only, no ZeroSSL fallback.
+	acme_ca https://acme-v02.api.letsencrypt.org/directory
+	# DNS-01 via the DuckDNS API. Works for every <name>.duckdns.org hostname
+	# under the account token; no A records are needed for issuance.
+	acme_dns duckdns {$DUCKDNS_API_TOKEN}
+}
+
+{$APP_HOSTNAME} {
+	reverse_proxy api:8080 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+		-Server
+	}
+}
+
+{$AUTH_HOSTNAME} {
+	reverse_proxy authentik-server:9000
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}
