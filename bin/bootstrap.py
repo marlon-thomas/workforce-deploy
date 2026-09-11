@@ -198,6 +198,9 @@ def main():
     ap.add_argument("--vagrant", action="store_true",
                     help="target the TEST Vagrant VM (uses 'vagrant ssh-config' for "
                          "host/port/key; run from deploy/environments after 'vagrant up')")
+    ap.add_argument("--smoke", action="store_true",
+                    help="no-TLS smoke install inside the VM (OIDC-less, HTTP) — "
+                         "the only mode that works without router port-forwarding")
     args = ap.parse_args()
 
     if args.vagrant:
@@ -237,7 +240,8 @@ def main():
             if rc != 0:
                 sys.exit(f"Host preparation failed (exit {rc}).")
             install_cmd = ("cd /home/vagrant/workforce-deploy && "
-                           "sudo -E bash ./bin/install.sh --env " + args.env)
+                           "sudo -E bash ./bin/install.sh --env " + args.env
+                           + (" --smoke" if args.smoke else ""))
             interactive_shell(client, install_cmd)
             print("")
             print("=" * 72)
