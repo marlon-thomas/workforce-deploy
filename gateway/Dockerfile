@@ -9,6 +9,9 @@
 # Built and published by .github/workflows/publish.yml as
 # ghcr.io/<owner>/workforce-gateway.
 FROM caddy:2.8.4-builder AS builder
+# The duckdns plugin requires go >= 1.24; the builder ships go 1.23 with
+# GOTOOLCHAIN=local (would fatal). 'auto' lets go fetch the toolchain it needs.
+ENV GOTOOLCHAIN=auto
 RUN xcaddy build --with github.com/caddy-dns/duckdns
 
 FROM caddy:2.8.4
