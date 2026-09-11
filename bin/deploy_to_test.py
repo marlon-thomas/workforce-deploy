@@ -469,15 +469,27 @@ def step1(fresh):
         return any(code in out for code in ("200", "301", "302"))
 
     def repair_guest_nat():
-        """Guest reaches the host but not the internet = the libvirt NAT
-        (masquerade) rules for its network were flushed (firewalld reload /
-        docker restart) and only re-apply when the network restarts."""
-        for netname in ("vagrant-libvirt", "default"):
-            run(["sudo", "virsh", "-c", "qemu:///system", "net-destroy",
-                 netname], check=False)
-            run(["sudo", "virsh", "-c", "qemu:///system", "net-start",
-                 netname], check=False)
-        time.sleep(8)   # guest link flaps; DHCP renews
+        """Ordered least-invasive recovery. Lessons from the field:
+        - the historical 'block' on this host was the probe itself (plain
+          HTTP to Ubuntu mirrors blackholed by the network) and stale
+          vagrant-to-libvirt state after the VM was restarted outside
+          vagrant — vagrant ssh then returns nothing and probes capture
+          empty output;
+        - bouncing libvirt networks under a RUNNING VM destroys the
+          guest's DHCP lease. Never net-cycle under a live domain."""
+        r = run(["vagrant", "ssh", "-c", "echo ok"], cwd=ENV_DIR, check=False)
+        if "ok" not in (r.stdout or ""):
+            warn("vagrant cannot reach the VM (likely stale state after an "
+                 "out-of-band restart) — cycling the VM through vagrant…")
+            run(["vagrant", "halt", "--force"], cwd=ENV_DIR, check=False)
+            run(["vagrant", "up"], cwd=ENV_DIR, check=False)
+            time.sleep(3)
+            return
+        warn("renewing the guest's DHCP lease (gentle, no network churn)…")
+        run(["vagrant", "ssh", "-c",
+             "sudo dhclient -r eth0 2>/dev/null; sudo dhclient eth0; sleep 2"],
+            cwd=ENV_DIR, check=False)
+        time.sleep(3)
 
     for attempt in range(3):
         if guest_has_internet():
@@ -496,12 +508,18 @@ def step1(fresh):
                     sudo_run(["sudo", "iptables", "-I", "DOCKER-USER",
                               direction, bridge, "-j", "ACCEPT"])
         else:
-            fail("the VM has no outbound internet after repair attempts. "
-                 "Run manually, then re-run me:\n"
-                 "    sudo virsh net-destroy vagrant-libvirt && sudo virsh net-start vagrant-libvirt\n"
-                 "    sudo virsh net-destroy default && sudo virsh net-start default\n"
-                 "    for b in virbr0 virbr1; do sudo iptables -I DOCKER-USER -i $b -j ACCEPT; sudo iptables -I DOCKER-USER -o $b -j ACCEPT; done\n"
-                 "    sudo firewall-cmd --zone=FedoraWorkstation --add-masquerade")
+            diag = run(["vagrant", "ssh", "-c",
+                        "ip -4 addr show eth0 | grep inet; "
+                        "curl -4 -m 8 -sI https://github.com | head -1; "
+                        "echo curl_exit=$?"], cwd=ENV_DIR, check=False)
+            fail("the VM has no outbound internet after gentle recovery. "
+                 "Guest state:\n    " + (diag.stdout or "unreachable").strip()
+                 .replace("\n", "\n    ") + "\n"
+                 "If the curl exited non-zero with a valid IP, check the host "
+                 "firewall path (DOCKER-USER accepts for virbr* bridges; "
+                 "egress-zone masquerade) — but verify with the SAME https "
+                 "URL from the host first: many networks block specific "
+                 "hosts/ports and the guest merely inherits it.")
     ok("VM has outbound internet")
     if not snapshot_exists():
         run(["vagrant", "snapshot", "save", "clean"], cwd=ENV_DIR)
