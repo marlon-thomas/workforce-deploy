@@ -3,29 +3,24 @@
 deploy_to_test.py — deploy the workforce suite to the TEST appliance,
 from any operating system (Windows, macOS, Linux).
 
-One command that does the whole journey:
-
   STEP 0  host prerequisites, checked per-OS (vagrant, hypervisor, plugins,
-          paramiko; Fedora-specific libxcrypt-compat + libvirt group)
+          paramiko; Fedora-specific libxcrypt-compat + libvirt group +
+          firewalld forwarding; docker↔libvirt coexistence fix)
   STEP 1  boot the bare Ubuntu appliance      (vagrant up + snapshot)
-  STEP 2  install the suite inside it         (bootstrap.py --vagrant --env test,
-          interactive: email, admin password, backup target, GitHub PAT)
-  STEP 3  put the VM on your Tailscale network (tailscale up + tailnet IP)
-  STEP 4  point the DuckDNS records at the VM  (works from the token file or a
-          one-time prompt — no curl needed, this runs on Windows too)
-
-When it finishes, browse from any device on your tailnet, at the hostnames
-derived from deploy/environments/test.env (APP_HOSTNAME / AUTH_HOSTNAME):
-the app, and the authentik sign-in (user: admin).
+  STEP 2  verify the guest has internet       (HTTPS probe; gentle recovery)
+  STEP 3  install the suite inside it         (bootstrap.py --vagrant --env test,
+          interactive: GitHub PAT, email, admin password, backup target)
+  STEP 4  Tailscale + DuckDNS                 (VM joins your tailnet, records
+          point at it — browse from any tailnet device)
 
 Usage:
   python3 deploy_to_test.py                 # full journey
-  python3 deploy_to_test.py --check-only    # STEP 0 only: report and exit
+  python3 deploy_to_test.py --check-only    # STEP 0 only
   python3 deploy_to_test.py --fresh         # destroy + rebuild the VM first
-  python3 deploy_to_test.py --skip-to 3     # resume at tailscale/DuckDNS steps
+  python3 deploy_to_test.py --skip-to N     # resume at step N (runs N..4)
 
-The script only orchestrates — it never edits the VM by hand. Everything the
-VM runs comes from the deployment bundle, exactly like production.
+Everything the VM runs comes from the deployment bundle (cloned fresh from
+origin by bootstrap.py) — nothing is ever hand-edited in the VM.
 """
 
 import argparse
@@ -45,12 +40,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ENV_DIR = os.path.normpath(os.path.join(HERE, "..", "environments"))
 BOOTSTRAP = os.path.join(HERE, "bootstrap.py")
 
-# Hostnames and the token path are NOT hardcoded — they derive from the
-# test environment file (single source of truth, same values the installer
-# uses). Hostnames: APP_HOSTNAME = WF_SUBDOMAIN.BASE_DOMAIN, etc.
-# Token file: host-side convention, overridable via the DUCKDNS_TOKEN_FILE
-# environment variable.
 DUCKDNS_API = "https://www.duckdns.org/update"   # the DuckDNS service endpoint
+
+# Hostnames derive from the test environment file (single source of truth —
+# the same values the installer uses). Token path is a host-side convention,
+# overridable via the DUCKDNS_TOKEN_FILE environment variable.
+DUCKDNS_TOKEN_FILE = os.environ.get("DUCKDNS_TOKEN_FILE") or os.path.expanduser(
+    os.path.join("~", ".config", "workforce-dev", "duckdns.env"))
 
 
 def _load_test_env():
@@ -74,23 +70,18 @@ APP_HOSTNAME = (f"{TEST_ENV['WF_SUBDOMAIN']}.{BASE_DOMAIN}"
 AUTH_HOSTNAME = (f"{TEST_ENV['AUTH_SUBDOMAIN']}.{BASE_DOMAIN}"
                  if BASE_DOMAIN and TEST_ENV.get("AUTH_SUBDOMAIN") else None)
 
-# Names for the DuckDNS update API = hostnames minus the duckdns.org suffix.
-def _duckdns_name(hostname):
+
+def duckdns_name(hostname):
     if hostname and BASE_DOMAIN and hostname.endswith("." + BASE_DOMAIN):
         return hostname[:-(len(BASE_DOMAIN) + 1)]
     return hostname
-
-
-DUCKDNS_NAMES = ",".join(n for n in (_duckdns_name(APP_HOSTNAME),
-                                     _duckdns_name(AUTH_HOSTNAME)) if n)
-DUCKDNS_TOKEN_FILE = os.environ.get("DUCKDNS_TOKEN_FILE") or os.path.expanduser(
-    os.path.join("~", ".config", "workforce-dev", "duckdns.env"))
 
 
 def require_hostnames():
     if not (APP_HOSTNAME and AUTH_HOSTNAME):
         fail(f"hostnames could not be derived from {ENV_DIR}/test.env "
              "(needs BASE_DOMAIN, WF_SUBDOMAIN, AUTH_SUBDOMAIN).")
+
 
 OS = platform.system()          # Windows | Darwin | Linux
 DISTRO = ""
@@ -125,17 +116,28 @@ def fail(msg):
     sys.exit(1)
 
 
-def run(cmd, cwd=None, check=True, capture=False):
-    """Run a command, streaming output (bootstrap's interactive prompts need
-    the real terminal). Returns CompletedProcess."""
+def sh(cmd, cwd=None, check=True):
+    """Run a command, streaming output to the terminal (interactive prompts
+    stay interactive)."""
     printable = " ".join(str(c) for c in cmd[:8])
     note(f"$ {printable}{' …' if len(cmd) > 8 else ''}")
     try:
-        r = subprocess.run(cmd, cwd=cwd, check=False,
-                           capture_output=capture, text=capture)
+        r = subprocess.run(cmd, cwd=cwd, check=False)
         if check and r.returncode != 0:
             fail(f"command failed (exit {r.returncode}): {printable}")
         return r
+    except FileNotFoundError:
+        fail(f"command not found: {cmd[0]}")
+
+
+def sh_out(cmd, cwd=None, check=False):
+    """Run a command CAPTURING output (for probes and value extraction).
+    This is deliberately a separate function from sh() — the original
+    single helper with an optional capture flag caused the probe bug where
+    output printed to the terminal but stdout was None."""
+    try:
+        return subprocess.run(cmd, cwd=cwd, check=False,
+                              capture_output=True, text=True)
     except FileNotFoundError:
         fail(f"command not found: {cmd[0]}")
 
@@ -144,10 +146,20 @@ def have(cmd):
     return shutil.which(cmd) is not None
 
 
+def sudo_run(cmd):
+    """Run a privileged command with sudo prompting in the user's own
+    terminal (inherited TTY) — the user types the password to sudo directly;
+    this script never sees it. Non-interactive contexts (piped stdin) fail
+    and fall back to the manual-instructions path."""
+    if not sys.stdin.isatty():
+        return False
+    try:
+        return subprocess.run(cmd, check=False).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
 def pause_for_manual(instructions):
-    """Print privileged commands the user must run themselves, wait for them
-    to do it, then return so the checks can re-run (step0 re-invokes itself,
-    max 3 rounds). This script never asks for a password."""
     print()
     warn("ACTION NEEDED — run these in a terminal, then come back here:")
     for line in instructions:
@@ -158,29 +170,14 @@ def pause_for_manual(instructions):
         fail("no interactive terminal available — fix the items above and re-run.")
 
 
-def sudo_run(cmd):
-    """Run a privileged command with sudo prompting in the user's own
-    terminal (inherited TTY) — the user types the password to sudo directly;
-    this script never sees or captures it. Returns True only on success.
-    Non-interactive contexts (piped stdin) simply fail and fall back to the
-    manual-instructions path."""
-    if not sys.stdin.isatty():
-        return False
-    try:
-        return subprocess.run(cmd, check=False).returncode == 0
-    except FileNotFoundError:
-        return False
-
-
 # ============================================================ STEP 0
 
 def step0(attempts=0):
     say("\n───────── STEP 0: host prerequisites ─────────")
     MISSING.clear()
 
-    # --- Fedora: libxcrypt-compat BEFORE anything vagrant -------------------
-    # Vagrant ships an embedded Ruby that won't even start without it, so
-    # every `vagrant` invocation below depends on this being in place.
+    # Fedora: libxcrypt-compat BEFORE anything vagrant — Vagrant's embedded
+    # Ruby won't even start without it.
     if OS == "Linux" and DISTRO == "fedora":
         r = subprocess.run(["rpm", "-q", "libxcrypt-compat"],
                            capture_output=True, check=False)
@@ -195,9 +192,17 @@ def step0(attempts=0):
                 MISSING.append("libxcrypt-compat — run:  "
                                "sudo dnf install -y libxcrypt-compat")
 
-    # --- vagrant ----------------------------------------------------------
+    # vagrant: present AND runnable
+    vagrant_ok = False
     if have("vagrant"):
-        ok("vagrant")
+        v = sh_out(["vagrant", "--version"])
+        if v.returncode != 0:
+            tail = (v.stderr or v.stdout or "").strip().splitlines()
+            MISSING.append("vagrant does not run: "
+                           + (tail[-1] if tail else f"exit {v.returncode}"))
+        else:
+            ok(f"vagrant runs ({(v.stdout or '').strip() or 'version probe ok'})")
+            vagrant_ok = True
     else:
         for p in (os.path.expanduser(os.path.join("~", ".local", "bin")),
                   os.path.join(os.environ.get("LOCALAPPDATA", ""),
@@ -208,31 +213,18 @@ def step0(attempts=0):
                 break
         if have("vagrant"):
             ok("vagrant (found in a user bin dir)")
-        else:
-            MISSING.append("vagrant — install from https://developer.hashicorp.com/vagrant/install")
-
-    # Sanity probe: the binary exists AND runs (catches embedded-Ruby breakage
-    # that mere presence checks miss).
-    vagrant_ok = False
-    if have("vagrant"):
-        v = subprocess.run(["vagrant", "--version"], capture_output=True,
-                           text=True, check=False)
-        if v.returncode != 0:
-            tail = (v.stderr or v.stdout or "").strip().splitlines()
-            MISSING.append("vagrant does not run: "
-                           + (tail[-1] if tail else f"exit {v.returncode}"))
-        else:
-            ok(f"vagrant runs ({(v.stdout or '').strip() or 'version probe ok'})")
             vagrant_ok = True
-    else:
-        MISSING.append("vagrant — install from https://developer.hashicorp.com/vagrant/install")
+        else:
+            MISSING.append("vagrant — install from "
+                           "https://developer.hashicorp.com/vagrant/install")
 
-    # --- hypervisor / provider (per OS) ------------------------------------
+    # hypervisor / provider
     if OS == "Linux":
         if not have("virsh"):
             pkg = ("sudo dnf install -y @virtualization"
                    if DISTRO == "fedora" else
-                   "sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients")
+                   "sudo apt-get install -y qemu-kvm libvirt-daemon-system "
+                   "libvirt-clients")
             MISSING.append(f"libvirt/KVM — run:  {pkg}")
         elif subprocess.run(["systemctl", "is-active", "--quiet", "libvirtd"],
                             check=False).returncode != 0:
@@ -241,64 +233,43 @@ def step0(attempts=0):
             else:
                 MISSING.append("libvirtd is not running — run:  "
                                "sudo systemctl enable --now libvirtd")
-
-        # Group access to the system libvirt daemon (the real test: can we talk to it?)
         if have("virsh"):
-            r = subprocess.run(["virsh", "-c", "qemu:///system", "list", "--all"],
-                               capture_output=True, text=True, check=False)
+            r = sh_out(["virsh", "-c", "qemu:///system", "list", "--all"])
             if r.returncode == 0:
                 ok("libvirt access (group membership effective)")
             else:
                 user = os.environ.get("USER") or os.environ.get("LOGNAME", "")
                 MISSING.append(
                     f"libvirt group access — run:  sudo usermod -aG libvirt {user}"
-                    "   …then LOG OUT & BACK IN (group changes need a new session)")
-
-        # Guest outbound internet: the default NAT network must be active and
-        # the host firewall must forward virbr0 (Fedora firewalld hands virbr0
-        # to the 'libvirt' zone; if that assignment is missing, guests resolve
-        # DNS but every outbound connection times out).
-        if have("virsh"):
-            ni = subprocess.run(["virsh", "-c", "qemu:///system", "net-info",
-                                 "default"], capture_output=True, text=True,
-                                check=False)
-            # parse robustly — virsh pads the value column variably, so a
-            # literal "Active:      yes" match never fits (the false-negative
-            # that made a running network look inactive).
+                    "   …then LOG OUT & BACK IN")
+            # default NAT network active
+            ni = sh_out(["virsh", "-c", "qemu:///system", "net-info", "default"])
             net_active = any(
                 ln.strip().startswith("Active:")
                 and ln.split(":", 1)[1].strip().lower() == "yes"
                 for ln in (ni.stdout or "").splitlines())
-            if not net_active:
-                if sudo_run(["sudo", "virsh", "-c", "qemu:///system",
-                             "net-start", "default"]):
-                    ok("libvirt default network (started)")
-                else:
-                    MISSING.append("libvirt default network is inactive — run:  "
-                                   "sudo virsh net-start default")
-            else:
+            if net_active:
                 ok("libvirt default network (NAT)")
+            elif sudo_run(["sudo", "virsh", "-c", "qemu:///system",
+                           "net-start", "default"]):
+                ok("libvirt default network (started)")
+            else:
+                MISSING.append("libvirt default network is inactive — run:  "
+                               "sudo virsh net-start default")
+            # firewalld forwards virbr0
             if have("firewall-cmd"):
-                az = subprocess.run(["firewall-cmd", "--get-active-zones"],
-                                    capture_output=True, text=True, check=False)
-                zones = az.stdout or ""
-                if "virbr0" in zones:
+                az = sh_out(["firewall-cmd", "--get-active-zones"])
+                if "virbr0" in (az.stdout or ""):
                     ok("firewalld forwards virbr0 (guest internet)")
-                elif "libvirt" in zones and "virbr0" not in zones:
-                    # libvirt zone active but interface not assigned
-                    if not sudo_run(["sudo", "firewall-cmd", "--zone=libvirt",
-                                     "--add-interface=virbr0"]):
-                        MISSING.append(
-                            "firewalld is not forwarding virbr0 — run:\n"
-                            "      sudo firewall-cmd --zone=libvirt --add-interface=virbr0\n"
-                            "      sudo firewall-cmd --zone=libvirt --add-service=dhcp --add-service=dns --add-service=ssh --add-service=tftp\n"
-                            "      sudo firewall-cmd --zone=libvirt --add-forward")
+                elif sudo_run(["sudo", "firewall-cmd", "--zone=libvirt",
+                               "--add-interface=virbr0"]):
+                    ok("firewalld forwards virbr0 (added just now)")
                 else:
-                    warn("firewalld zones do not mention virbr0 yet — if the VM "
-                         "cannot reach the internet after boot, run:\n"
-                         "      sudo firewall-cmd --zone=libvirt --add-interface=virbr0")
+                    warn("firewalld zones do not mention virbr0 — if the VM "
+                         "cannot reach the internet later, run:\n"
+                         "      sudo firewall-cmd --zone=libvirt "
+                         "--add-interface=virbr0")
     else:
-        # Windows / macOS: VirtualBox (or Hyper-V) — GUI install, can't automate.
         if have("VBoxManage") or have("virtualbox"):
             ok("VirtualBox")
         else:
@@ -308,25 +279,26 @@ def step0(attempts=0):
                     "brew install --cask virtualbox")
             MISSING.append(f"a hypervisor — {hint}")
 
-    # --- vagrant-libvirt plugin (Linux only; needs a working vagrant) ------
+    # vagrant-libvirt plugin (Linux only; needs a working vagrant)
     if OS == "Linux" and vagrant_ok:
-        r = run(["vagrant", "plugin", "list"], capture=True, check=False)
+        r = sh_out(["vagrant", "plugin", "list"])
         if "vagrant-libvirt" in (r.stdout or ""):
             ok("vagrant-libvirt plugin")
         else:
             note("installing the vagrant-libvirt plugin (user-local, no sudo)…")
-            run(["vagrant", "plugin", "install", "vagrant-libvirt"])
+            sh(["vagrant", "plugin", "install", "vagrant-libvirt"])
             ok("vagrant-libvirt plugin (installed just now)")
 
-    # Make the docker-vs-libvirt FORWARD fix permanent: a systemd drop-in
-    # re-applies the DOCKER-USER accepts on every docker start (reboot and
-    # docker restarts). Without it the rules are runtime-only.
-    if have("docker") and have("virsh"):
-        dropin = "/etc/systemd/system/docker.service.d/workforce-libvirt-forward.conf"
-        if os.path.exists(dropin):
-            ok("docker↔libvirt forwarding fix (persistent)")
-        else:
-            helper = """#!/bin/bash
+        # docker↔libvirt coexistence: persistent DOCKER-USER accepts via a
+        # systemd drop-in (docker's FORWARD DROP policy swallows guest
+        # traffic otherwise; the drop-in re-applies on every docker start).
+        if have("docker") and have("virsh"):
+            dropin = ("/etc/systemd/system/docker.service.d/"
+                      "workforce-libvirt-forward.conf")
+            if os.path.exists(dropin):
+                ok("docker↔libvirt forwarding fix (persistent)")
+            else:
+                helper = """#!/bin/bash
 set -u
 command -v iptables >/dev/null 2>&1 || exit 0
 iptables -L DOCKER-USER >/dev/null 2>&1 || exit 0
@@ -340,112 +312,71 @@ for bridge in /sys/class/net/virbr*; do
     done
 done
 """
-            dropin_txt = ("[Service]\n"
-                          "ExecStartPost=/usr/local/lib/"
-                          "workforce-libvirt-forward.sh\n")
-            tmp = tempfile.mkdtemp()
-            try:
-                hp = os.path.join(tmp, "workforce-libvirt-forward.sh")
-                dp = os.path.join(tmp, "workforce-libvirt-forward.conf")
-                with open(hp, "w") as f:
-                    f.write(helper)
-                with open(dp, "w") as f:
-                    f.write(dropin_txt)
-                note("installing the persistent docker↔libvirt forwarding "
-                     "fix (sudo may ask for your password)…")
-                if sudo_run(["sudo", "bash", "-c",
-                             f"install -D -m755 {hp} "
-                             "/usr/local/lib/workforce-libvirt-forward.sh"
-                             " && mkdir -p /etc/systemd/system/docker.service.d"
-                             f" && cp {dp} {dropin}"
-                             " && systemctl daemon-reload"
-                             " && /usr/local/lib/workforce-libvirt-forward.sh"]):
-                    ok("docker↔libvirt forwarding fix (installed, permanent)")
-                else:
-                    MISSING.append(
-                        "docker and libvirt coexist on this host; guest "
-                        "traffic needs DOCKER-USER accepts — install "
-                        "manually by re-running this script in a terminal")
-            finally:
-                shutil.rmtree(tmp, ignore_errors=True)
+                dropin_txt = ("[Service]\n"
+                              "ExecStartPost=/usr/local/lib/"
+                              "workforce-libvirt-forward.sh\n")
+                tmp = tempfile.mkdtemp()
+                try:
+                    hp = os.path.join(tmp, "workforce-libvirt-forward.sh")
+                    dp = os.path.join(tmp, "workforce-libvirt-forward.conf")
+                    with open(hp, "w") as f:
+                        f.write(helper)
+                    with open(dp, "w") as f:
+                        f.write(dropin_txt)
+                    note("installing the persistent docker↔libvirt forwarding "
+                         "fix (sudo may ask for your password)…")
+                    if sudo_run(["sudo", "bash", "-c",
+                                 f"install -D -m755 {hp} "
+                                 "/usr/local/lib/workforce-libvirt-forward.sh"
+                                 " && mkdir -p "
+                                 "/etc/systemd/system/docker.service.d"
+                                 f" && cp {dp} {dropin}"
+                                 " && systemctl daemon-reload"
+                                 " && /usr/local/lib/"
+                                 "workforce-libvirt-forward.sh"]):
+                        ok("docker↔libvirt forwarding fix "
+                           "(installed, permanent)")
+                    else:
+                        MISSING.append(
+                            "docker and libvirt coexist on this host; guest "
+                            "traffic needs DOCKER-USER accepts — install "
+                            "manually by re-running this script in a terminal")
+                finally:
+                    shutil.rmtree(tmp, ignore_errors=True)
 
-    # --- paramiko (bootstrap.py) --------------------------------------------
+    # paramiko
     try:
         import paramiko  # noqa: F401
         ok("paramiko (python SSH)")
     except ImportError:
         note("installing paramiko…")
-        run([sys.executable, "-m", "pip", "install", "--user", "paramiko"])
+        sh([sys.executable, "-m", "pip", "install", "--user", "paramiko"])
         try:
             import paramiko  # noqa: F401
             ok("paramiko (installed just now)")
         except ImportError:
-            MISSING.append(f"paramiko — run:  {sys.executable} -m pip install --user paramiko")
+            MISSING.append(f"paramiko — run:  {sys.executable} "
+                           "-m pip install --user paramiko")
 
     if MISSING:
         if attempts >= 2:
-            fail("prerequisites still missing after 3 rounds — fix manually and re-run.")
+            fail("prerequisites still missing after 3 rounds — fix manually "
+                 "and re-run.")
         pause_for_manual(MISSING)
         return step0(attempts + 1)
 
     say("  All prerequisites satisfied.")
 
 
-# ============================================================ bundle pull
-
-def git_repo_root():
-    """Walk up from this script looking for a git repository root."""
-    root = HERE
-    for _ in range(4):
-        if os.path.isdir(os.path.join(root, ".git")):
-            return root
-        parent = os.path.dirname(root)
-        if parent == root:
-            return None
-        root = parent
-    return None
-
-
-def pull_bundle():
-    """Pull the latest bundle BEFORE deploying, and return the origin URL.
-
-    The VM clones the bundle from GitHub fresh on every run (bootstrap.py),
-    so the deployed code is always origin HEAD. This step keeps the LOCAL
-    copy the same story: if this script lives inside a bundle checkout
-    (bin/ + environments/ at the repo root), fast-forward it first and pass
-    its origin to bootstrap, so everything comes from one place. Running
-    from the development source repo is detected and left alone — the VM
-    must get the public bundle, not the private source.
-    """
-    root = git_repo_root()
-    if not root or not have("git"):
-        return None
-    is_bundle = os.path.isfile(os.path.join(root, "environments", "test.env"))
-    if not is_bundle:
-        return None
-    r = subprocess.run(["git", "-C", root, "remote", "get-url", "origin"],
-                       capture_output=True, text=True, check=False)
-    origin = (r.stdout or "").strip()
-    note("self-update: pulling the latest deployment bundle…")
-    p = subprocess.run(["git", "-C", root, "pull", "--ff-only"], check=False)
-    if p.returncode != 0:
-        warn("bundle could not fast-forward (offline or diverged) — "
-             "continuing with the local copy; the VM still clones origin HEAD.")
-    if origin.startswith("https://"):
-        return origin
-    warn("origin is not an https URL — the VM will clone the public bundle.")
-    return None
-
-
 # ============================================================ STEP 1
 
 def vm_created():
-    r = run(["vagrant", "status"], cwd=ENV_DIR, capture=True, check=False)
+    r = sh_out(["vagrant", "status"], cwd=ENV_DIR)
     return "not created" not in (r.stdout or "")
 
 
 def snapshot_exists():
-    r = run(["vagrant", "snapshot", "list"], cwd=ENV_DIR, capture=True, check=False)
+    r = sh_out(["vagrant", "snapshot", "list"], cwd=ENV_DIR)
     return "clean" in (r.stdout or "")
 
 
@@ -453,77 +384,12 @@ def step1(fresh):
     say("\n───────── STEP 1: boot the appliance ─────────")
     if fresh and vm_created():
         note("destroying the existing VM (--fresh)…")
-        run(["vagrant", "destroy", "-f"], cwd=ENV_DIR)
-    run(["vagrant", "up"], cwd=ENV_DIR)
-    # Fail fast on guest internet problems — with automatic repair, instead
-    # of a confusing apt failure deep inside the installer.
-    def guest_has_internet():
-        # HTTPS deliberately: some networks blackhole plain-HTTP to the
-        # Ubuntu mirrors while everything else works — an HTTP probe would
-        # measure the ISP, not the VM (observed: guest behaved identically
-        # to the host, https fine, http-to-mirror timed out).
-        r = run(["vagrant", "ssh", "-c",
-                 "curl -4 -m 8 -sI https://github.com | head -1"],
-                cwd=ENV_DIR, check=False)
-        out = r.stdout or ""
-        return any(code in out for code in ("200", "301", "302"))
-
-    def repair_guest_nat():
-        """Ordered least-invasive recovery. Lessons from the field:
-        - the historical 'block' on this host was the probe itself (plain
-          HTTP to Ubuntu mirrors blackholed by the network) and stale
-          vagrant-to-libvirt state after the VM was restarted outside
-          vagrant — vagrant ssh then returns nothing and probes capture
-          empty output;
-        - bouncing libvirt networks under a RUNNING VM destroys the
-          guest's DHCP lease. Never net-cycle under a live domain."""
-        r = run(["vagrant", "ssh", "-c", "echo ok"], cwd=ENV_DIR, check=False)
-        if "ok" not in (r.stdout or ""):
-            warn("vagrant cannot reach the VM (likely stale state after an "
-                 "out-of-band restart) — cycling the VM through vagrant…")
-            run(["vagrant", "halt", "--force"], cwd=ENV_DIR, check=False)
-            run(["vagrant", "up"], cwd=ENV_DIR, check=False)
-            time.sleep(3)
-            return
-        warn("renewing the guest's DHCP lease (gentle, no network churn)…")
-        run(["vagrant", "ssh", "-c",
-             "sudo dhclient -r eth0 2>/dev/null; sudo dhclient eth0; sleep 2"],
-            cwd=ENV_DIR, check=False)
-        time.sleep(3)
-
-    for attempt in range(3):
-        if guest_has_internet():
-            ok("VM has outbound internet")
-            break
-        if attempt == 0:
-            warn("VM cannot reach the internet — repairing libvirt NAT "
-                 "(sudo may ask for your password)…")
-            repair_guest_nat()
-        elif attempt == 1:
-            warn("still blocked — docker's FORWARD DROP policy is the prime "
-                 "suspect (it only accepts traffic for its own bridges); "
-                 "allowing the libvirt bridges in DOCKER-USER (sudo may ask)…")
-            for bridge in ("virbr0", "virbr1"):
-                for direction in ("-i", "-o"):
-                    sudo_run(["sudo", "iptables", "-I", "DOCKER-USER",
-                              direction, bridge, "-j", "ACCEPT"])
-        else:
-            diag = run(["vagrant", "ssh", "-c",
-                        "ip -4 addr show eth0 | grep inet; "
-                        "curl -4 -m 8 -sI https://github.com | head -1; "
-                        "echo curl_exit=$?"], cwd=ENV_DIR, check=False)
-            fail("the VM has no outbound internet after gentle recovery. "
-                 "Guest state:\n    " + (diag.stdout or "unreachable").strip()
-                 .replace("\n", "\n    ") + "\n"
-                 "If the curl exited non-zero with a valid IP, check the host "
-                 "firewall path (DOCKER-USER accepts for virbr* bridges; "
-                 "egress-zone masquerade) — but verify with the SAME https "
-                 "URL from the host first: many networks block specific "
-                 "hosts/ports and the guest merely inherits it.")
-    ok("VM has outbound internet")
+        sh(["vagrant", "destroy", "-f"], cwd=ENV_DIR)
+    sh(["vagrant", "up"], cwd=ENV_DIR)
     if not snapshot_exists():
-        run(["vagrant", "snapshot", "save", "clean"], cwd=ENV_DIR)
-        ok("snapshot 'clean' saved — future resets: vagrant snapshot restore clean")
+        sh(["vagrant", "snapshot", "save", "clean"], cwd=ENV_DIR)
+        ok("snapshot 'clean' saved — future resets: "
+           "vagrant snapshot restore clean")
     else:
         ok("snapshot 'clean' exists")
     say("  Appliance is up.")
@@ -531,8 +397,66 @@ def step1(fresh):
 
 # ============================================================ STEP 2
 
+PROBE_CMD = ("curl -4 -m 8 -sI https://github.com | head -1")
+
+
+def guest_internet_ok():
+    """HTTPS deliberately: some networks blackhole plain-HTTP to Ubuntu
+    mirrors while everything else works — an HTTP probe would measure the
+    ISP, not the VM (observed in the field)."""
+    r = sh_out(["vagrant", "ssh", "-c", PROBE_CMD], cwd=ENV_DIR)
+    out = r.stdout or ""
+    return any(code in out for code in ("200", "301", "302")), out
+
+
 def step2():
-    say("\n───────── STEP 2: install the suite (interactive) ─────────")
+    say("\n───────── STEP 2: verify guest internet ─────────")
+    for attempt in range(3):
+        good, out = guest_internet_ok()
+        if good:
+            ok(f"VM has outbound internet ({out.strip().splitlines()[-1] if out.strip() else 'probe'})")
+            return
+        if attempt == 0:
+            # Is ssh itself alive? Stale vagrant↔libvirt state after an
+            # out-of-band VM restart makes vagrant ssh return nothing.
+            r = sh_out(["vagrant", "ssh", "-c", "echo ok"], cwd=ENV_DIR)
+            if "ok" not in (r.stdout or ""):
+                warn("vagrant cannot reach the VM (stale state) — cycling "
+                     "the VM through vagrant…")
+                sh(["vagrant", "halt", "--force"], cwd=ENV_DIR, check=False)
+                sh(["vagrant", "up"], cwd=ENV_DIR, check=False)
+                time.sleep(3)
+            else:
+                warn("guest lease may be stale — renewing gently…")
+                sh(["vagrant", "ssh", "-c",
+                    "sudo dhclient -r eth0 2>/dev/null; sudo dhclient eth0; "
+                    "sleep 2"], cwd=ENV_DIR, check=False)
+                time.sleep(3)
+        elif attempt == 1:
+            warn("still no internet — full vagrant-managed VM cycle…")
+            sh(["vagrant", "halt", "--force"], cwd=ENV_DIR, check=False)
+            sh(["vagrant", "up"], cwd=ENV_DIR, check=False)
+            time.sleep(3)
+        else:
+            diag = sh_out(["vagrant", "ssh", "-c",
+                           "ip -4 addr show eth0 | grep inet; "
+                           + PROBE_CMD + "; echo curl_exit=$?"],
+                          cwd=ENV_DIR)
+            guest = (diag.stdout or "(unreachable)").strip()
+            host_probe = sh_out(["curl", "-4", "-m", "8", "-sI",
+                                 "https://github.com"])
+            fail("the VM has no outbound internet. Guest state:\n    "
+                 + guest.replace("\n", "\n    ")
+                 + "\n  Host probe on the same URL: "
+                 + ((host_probe.stdout or "").strip().splitlines()[-1]
+                    if (host_probe.stdout or "").strip() else "failed")
+                 + "\n  If the host fails too, it is the network, not the VM.")
+
+
+# ============================================================ STEP 3
+
+def step3():
+    say("\n───────── STEP 3: install the suite (interactive) ─────────")
     say("  The installer will ask, here in this terminal:")
     say("    - GitHub username + token with read:packages (private images)")
     say("    - email for certificate notices")
@@ -541,25 +465,7 @@ def step2():
     say("  The DuckDNS token is copied in automatically if present at:")
     say(f"    {DUCKDNS_TOKEN_FILE}")
     cmd = [sys.executable, BOOTSTRAP, "--vagrant", "--env", "test"]
-    if getattr(main, "bundle_repo", None):
-        cmd += ["--repo", main.bundle_repo]
-    run(cmd)
-
-
-# ============================================================ STEP 3
-
-def step3():
-    say("\n───────── STEP 3: put the VM on your tailnet ─────────")
-    say("  A login URL will appear — open it in a browser and approve the device.")
-    run(["vagrant", "ssh", "-c", "sudo tailscale up"], cwd=ENV_DIR, check=False)
-    r = run(["vagrant", "ssh", "-c", "tailscale ip -4"], cwd=ENV_DIR,
-            capture=True)
-    ip = (r.stdout or "").strip().splitlines()[-1].strip() if r.stdout else ""
-    if not ip or not ip.startswith("100."):
-        fail(f"could not read the VM's tailnet IP (got: {ip!r}). Run "
-             "vagrant ssh -c 'tailscale ip -4' manually.")
-    ok(f"VM tailnet IP: {ip}")
-    return ip
+    sh(cmd)
 
 
 # ============================================================ STEP 4
@@ -574,25 +480,34 @@ def read_duckdns_token():
     return getpass.getpass("  DuckDNS token (input hidden): ").strip()
 
 
-def step4(ip):
-    say("\n───────── STEP 4: point DuckDNS at the VM ─────────")
+def step4():
+    say("\n───────── STEP 4: Tailscale + DuckDNS ─────────")
+    require_hostnames()
+    say("  A login URL will appear — open it in a browser and approve "
+        "the device.")
+    sh(["vagrant", "ssh", "-c", "sudo tailscale up"], cwd=ENV_DIR, check=False)
+    r = sh_out(["vagrant", "ssh", "-c", "tailscale ip -4"], cwd=ENV_DIR)
+    ip = (r.stdout or "").strip().splitlines()[-1].strip() if r.stdout else ""
+    if not ip.startswith("100."):
+        fail(f"could not read the VM's tailnet IP (got: {ip!r}). Run "
+             "vagrant ssh -c 'tailscale ip -4' manually.")
+    ok(f"VM tailnet IP: {ip}")
+
     token = read_duckdns_token()
     qs = urllib.parse.urlencode({
-        "domains": DUCKDNS_NAMES, "token": token, "ip": ip, "verbose": "true"})
-    url = f"{DUCKDNS_API}?{qs}"
-    say("  Updating DuckDNS (both hostnames → the tailnet IP)…")
+        "domains": ",".join(n for n in (duckdns_name(APP_HOSTNAME),
+                                        duckdns_name(AUTH_HOSTNAME)) if n),
+        "token": token, "ip": ip, "verbose": "true"})
     try:
-        with urllib.request.urlopen(url, timeout=30) as resp:
+        with urllib.request.urlopen(f"{DUCKDNS_API}?{qs}", timeout=30) as resp:
             body = resp.read().decode().strip()
     except Exception as exc:
         fail(f"DuckDNS update failed: {exc}")
     if not body.upper().startswith("OK"):
         fail(f"DuckDNS rejected the update (response: {body[:200]!r}). "
              "Check the token, then re-run with --skip-to 4.")
-    ok("DuckDNS updated.")
+    ok("DuckDNS records updated.")
 
-    # Confirm the public DNS actually answers with the tailnet IP now.
-    require_hostnames()
     for host in (APP_HOSTNAME, AUTH_HOSTNAME):
         resolved = ""
         for _ in range(6):
@@ -607,21 +522,12 @@ def step4(ip):
             ok(f"{host} → {resolved}")
         else:
             warn(f"{host} → {resolved or 'unresolved'} (expected {ip}); "
-                 "DNS caching — retry in a minute or add a hosts entry:")
-            hosts_hint()
-
-
-def hosts_hint():
-    require_hostnames()
-    if OS == "Windows":
-        say(f"    (admin) Add-Content $env:SystemRoot\\System32\\drivers\\etc\\hosts "
-            f'"<ip> {APP_HOSTNAME}"')
-        say(f"    (admin) Add-Content $env:SystemRoot\\System32\\drivers\\etc\\hosts "
-            f'"<ip> {AUTH_HOSTNAME}"')
-    else:
-        say(f"    (sudo)  echo '<ip> {APP_HOSTNAME}' >> /etc/hosts")
-        say(f"    (sudo)  echo '<ip> {AUTH_HOSTNAME}' >> /etc/hosts")
-
+                 "DNS caching — retry shortly or add a hosts entry:")
+            if OS == "Windows":
+                say(f"    (admin) Add-Content $env:SystemRoot\\System32"
+                    f"\\drivers\\etc\\hosts '\"<ip> {host}\"'")
+            else:
+                say(f"    (sudo)  echo '<ip> {host}' >> /etc/hosts")
 
 
 # ============================================================ main
@@ -633,8 +539,8 @@ def main():
                     help="destroy the existing VM and rebuild from scratch")
     ap.add_argument("--check-only", action="store_true",
                     help="run STEP 0 (prerequisite report) and exit")
-    ap.add_argument("--skip-to", type=int, default=1, choices=[1, 2, 3, 4],
-                    help="resume at a step (e.g. --skip-to 3 after an install)")
+    ap.add_argument("--skip-to", type=int, default=0, choices=[0, 1, 2, 3, 4],
+                    help="resume at a step (runs that step and everything after)")
     args = ap.parse_args()
 
     say("═══════════════════════════════════════════════════════")
@@ -645,7 +551,6 @@ def main():
     if args.check_only:
         say("\nCheck complete — nothing was run.")
         return
-    main.bundle_repo = pull_bundle()
     if not os.path.isdir(ENV_DIR):
         fail(f"environments directory not found: {ENV_DIR}")
 
@@ -654,17 +559,13 @@ def main():
     if args.skip_to <= 2:
         step2()
     if args.skip_to <= 3:
-        ip = step3()
-        step4(ip)
-    else:
-        r = run(["vagrant", "ssh", "-c", "tailscale ip -4"], cwd=ENV_DIR,
-                capture=True, check=False)
-        ip = (r.stdout or "").strip().splitlines()[-1].strip()
-        step4(ip)
+        step3()
+    if args.skip_to <= 4:
+        step4()
 
+    require_hostnames()
     say("\n═══════════════════════════════════════════════════════")
     say("  TEST environment deployed.")
-    require_hostnames()
     say(f"    App:     https://{APP_HOSTNAME}")
     say(f"    Sign-in: https://{AUTH_HOSTNAME}   (user: admin)")
     say("  Reachable from any device on your tailnet.")
