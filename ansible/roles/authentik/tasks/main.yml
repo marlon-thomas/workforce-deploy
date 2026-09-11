@@ -76,6 +76,8 @@
     status_code: 200
     validate_certs: false
   register: discovery
-  retries: 60
+  # Cold first boots take ~10 min to apply the blueprint (worker startup +
+  # blueprint flush) — the observed full window. 90x10s gives headroom.
+  retries: 90
   delay: 10
   until: discovery.status == 200
