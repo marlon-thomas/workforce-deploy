@@ -45,7 +45,11 @@
       changed_when: true
 
   roles:
-    - common
+    # common is root-era work (packages, user, /opt, docker). In the local
+    # model the playbook runs as the service user — install.sh's root phase
+    # already did all of it, so skip the role.
+    - role: common
+      when: run_root_tasks | default(true)
     - authentik
     - workforce
 
