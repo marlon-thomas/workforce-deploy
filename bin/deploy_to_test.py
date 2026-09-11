@@ -3,9 +3,10 @@
 deploy_to_test.py — deploy the workforce suite to the TEST appliance,
 from any operating system (Windows, macOS, Linux).
 
-  STEP 0  host prerequisites, checked per-OS (vagrant, hypervisor, plugins,
-          paramiko; Fedora-specific libxcrypt-compat + libvirt group +
-          firewalld forwarding; docker↔libvirt coexistence fix)
+  STEP 0  host prerequisites, checked per-OS. READ-ONLY: this script never
+          uses sudo. One-time privileged fixes live in
+          ../host-setup/setup-host.py (sudo python3 setup-host.py,
+          idempotent) — missing prerequisites are pointed there.
   STEP 1  boot the bare Ubuntu appliance      (vagrant up + snapshot)
   STEP 2  verify the guest has internet       (HTTPS probe; gentle recovery)
   STEP 3  install the suite inside it         (bootstrap.py --vagrant --env test,
@@ -146,19 +147,6 @@ def have(cmd):
     return shutil.which(cmd) is not None
 
 
-def sudo_run(cmd):
-    """Run a privileged command with sudo prompting in the user's own
-    terminal (inherited TTY) — the user types the password to sudo directly;
-    this script never sees it. Non-interactive contexts (piped stdin) fail
-    and fall back to the manual-instructions path."""
-    if not sys.stdin.isatty():
-        return False
-    try:
-        return subprocess.run(cmd, check=False).returncode == 0
-    except FileNotFoundError:
-        return False
-
-
 def pause_for_manual(instructions):
     print()
     warn("ACTION NEEDED — run these in a terminal, then come back here:")
@@ -184,13 +172,8 @@ def step0(attempts=0):
         if r.returncode == 0:
             ok("libxcrypt-compat (Fedora)")
         else:
-            note("installing libxcrypt-compat (sudo may ask for your password)…")
-            if sudo_run(["sudo", "dnf", "install", "-y", "-q",
-                         "libxcrypt-compat"]):
-                ok("libxcrypt-compat (Fedora, installed just now)")
-            else:
-                MISSING.append("libxcrypt-compat — run:  "
-                               "sudo dnf install -y libxcrypt-compat")
+            MISSING.append("libxcrypt-compat missing — run once:  "
+                           "sudo python3 deploy/host-setup/setup-host.py")
 
     # vagrant: present AND runnable
     vagrant_ok = False
@@ -228,11 +211,8 @@ def step0(attempts=0):
             MISSING.append(f"libvirt/KVM — run:  {pkg}")
         elif subprocess.run(["systemctl", "is-active", "--quiet", "libvirtd"],
                             check=False).returncode != 0:
-            if sudo_run(["sudo", "systemctl", "enable", "--now", "libvirtd"]):
-                ok("libvirtd (started)")
-            else:
-                MISSING.append("libvirtd is not running — run:  "
-                               "sudo systemctl enable --now libvirtd")
+            MISSING.append("libvirtd is not running — run once:  "
+                           "sudo python3 deploy/host-setup/setup-host.py")
         if have("virsh"):
             r = sh_out(["virsh", "-c", "qemu:///system", "list", "--all"])
             if r.returncode == 0:
@@ -250,25 +230,19 @@ def step0(attempts=0):
                 for ln in (ni.stdout or "").splitlines())
             if net_active:
                 ok("libvirt default network (NAT)")
-            elif sudo_run(["sudo", "virsh", "-c", "qemu:///system",
-                           "net-start", "default"]):
-                ok("libvirt default network (started)")
             else:
-                MISSING.append("libvirt default network is inactive — run:  "
-                               "sudo virsh net-start default")
+                MISSING.append("libvirt default network is inactive — run "
+                               "once:  sudo python3 "
+                               "deploy/host-setup/setup-host.py")
             # firewalld forwards virbr0
             if have("firewall-cmd"):
                 az = sh_out(["firewall-cmd", "--get-active-zones"])
                 if "virbr0" in (az.stdout or ""):
                     ok("firewalld forwards virbr0 (guest internet)")
-                elif sudo_run(["sudo", "firewall-cmd", "--zone=libvirt",
-                               "--add-interface=virbr0"]):
-                    ok("firewalld forwards virbr0 (added just now)")
                 else:
-                    warn("firewalld zones do not mention virbr0 — if the VM "
-                         "cannot reach the internet later, run:\n"
-                         "      sudo firewall-cmd --zone=libvirt "
-                         "--add-interface=virbr0")
+                    MISSING.append("firewalld is not forwarding virbr0 — "
+                                   "run once:  sudo python3 "
+                                   "deploy/host-setup/setup-host.py")
     else:
         if have("VBoxManage") or have("virtualbox"):
             ok("VirtualBox")
@@ -298,51 +272,10 @@ def step0(attempts=0):
             if os.path.exists(dropin):
                 ok("docker↔libvirt forwarding fix (persistent)")
             else:
-                helper = """#!/bin/bash
-set -u
-command -v iptables >/dev/null 2>&1 || exit 0
-iptables -L DOCKER-USER >/dev/null 2>&1 || exit 0
-for bridge in /sys/class/net/virbr*; do
-    [ -e "$bridge" ] || continue
-    b="$(basename "$bridge")"
-    for dir in "-i" "-o"; do
-        if ! iptables -C DOCKER-USER $dir "$b" -j ACCEPT 2>/dev/null; then
-            iptables -I DOCKER-USER 1 $dir "$b" -j ACCEPT
-        fi
-    done
-done
-"""
-                dropin_txt = ("[Service]\n"
-                              "ExecStartPost=/usr/local/lib/"
-                              "workforce-libvirt-forward.sh\n")
-                tmp = tempfile.mkdtemp()
-                try:
-                    hp = os.path.join(tmp, "workforce-libvirt-forward.sh")
-                    dp = os.path.join(tmp, "workforce-libvirt-forward.conf")
-                    with open(hp, "w") as f:
-                        f.write(helper)
-                    with open(dp, "w") as f:
-                        f.write(dropin_txt)
-                    note("installing the persistent docker↔libvirt forwarding "
-                         "fix (sudo may ask for your password)…")
-                    if sudo_run(["sudo", "bash", "-c",
-                                 f"install -D -m755 {hp} "
-                                 "/usr/local/lib/workforce-libvirt-forward.sh"
-                                 " && mkdir -p "
-                                 "/etc/systemd/system/docker.service.d"
-                                 f" && cp {dp} {dropin}"
-                                 " && systemctl daemon-reload"
-                                 " && /usr/local/lib/"
-                                 "workforce-libvirt-forward.sh"]):
-                        ok("docker↔libvirt forwarding fix "
-                           "(installed, permanent)")
-                    else:
-                        MISSING.append(
-                            "docker and libvirt coexist on this host; guest "
-                            "traffic needs DOCKER-USER accepts — install "
-                            "manually by re-running this script in a terminal")
-                finally:
-                    shutil.rmtree(tmp, ignore_errors=True)
+                MISSING.append("docker↔libvirt forwarding fix not installed "
+                               "(docker's FORWARD DROP swallows guest "
+                               "traffic) — run once:  sudo python3 "
+                               "deploy/host-setup/setup-host.py")
 
     # paramiko
     try:
