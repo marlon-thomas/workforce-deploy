@@ -110,6 +110,26 @@ services:
       init:
         condition: service_completed_successfully
     logging: *default-logging
+  # One-shot gate: the api must not start until authentik serves the OIDC
+  # discovery document. A startup fetch against the 404 window (authentik
+  # healthy, blueprint not yet applied) builds a permanently broken client
+  # registration — every token exchange then fails with /login?error.
+  # Checked on the docker network directly: no gateway/tailnet dependency.
+  discovery-gate:
+    image: curlimages/curl:8.10.1
+    restart: "no"
+    networks: [back]
+    entrypoint: >
+      sh -c 'for i in $$(seq 1 90); do
+        code=$$(curl -s -o /dev/null -w "%{http_code}" http://authentik-server:9000/application/o/workforce/.well-known/openid-configuration || true);
+        if [ "$$code" = "200" ]; then echo "discovery ready (attempt $$i)"; exit 0; fi;
+        echo "waiting for discovery (attempt $$i): $${code:-000}";
+        sleep 10;
+      done;
+      echo "discovery never became ready"; exit 1'
+    depends_on:
+      authentik-server:
+        condition: service_healthy
 
   api:
     # Pulled by default (deployment-spec §B1: orgs run published images, pinned by
@@ -181,6 +201,11 @@ services:
         # (and its applied blueprint) must precede it, or the api's context init
         # fails. It retries via restart policy regardless; this removes the wait.
         condition: service_healthy
+      discovery-gate:
+        # A healthy authentik is not enough: the blueprint may still be
+        # pending (404). Without this gate the api caches a broken client
+        # registration for its whole lifetime.
+        condition: service_completed_successfully
     # No dependency on the gateway: api retries its OIDC discovery fetch until
     # authentik is up; the gateway in turn waits for api (started) and authentik
     # (healthy) so the whole graph resolves without a cycle.
