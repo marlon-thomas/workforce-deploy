@@ -14,9 +14,9 @@ One command that does the whole journey:
   STEP 4  point the DuckDNS records at the VM  (works from the token file or a
           one-time prompt — no curl needed, this runs on Windows too)
 
-When it finishes, browse from any device on your tailnet:
-  https://workforce-test.duckdns.org        (the app)
-  https://workforce-test-auth.duckdns.org   (sign-in, user: admin)
+When it finishes, browse from any device on your tailnet, at the hostnames
+derived from deploy/environments/test.env (APP_HOSTNAME / AUTH_HOSTNAME):
+the app, and the authentik sign-in (user: admin).
 
 Usage:
   python3 deploy_to_test.py                 # full journey
@@ -43,11 +43,53 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENV_DIR = os.path.normpath(os.path.join(HERE, "..", "environments"))
 BOOTSTRAP = os.path.join(HERE, "bootstrap.py")
-DUCKDNS_TOKEN_FILE = os.path.expanduser(
+
+# Hostnames and the token path are NOT hardcoded — they derive from the
+# test environment file (single source of truth, same values the installer
+# uses). Hostnames: APP_HOSTNAME = WF_SUBDOMAIN.BASE_DOMAIN, etc.
+# Token file: host-side convention, overridable via the DUCKDNS_TOKEN_FILE
+# environment variable.
+DUCKDNS_API = "https://www.duckdns.org/update"   # the DuckDNS service endpoint
+
+
+def _load_test_env():
+    env = {}
+    path = os.path.join(ENV_DIR, "test.env")
+    if os.path.isfile(path):
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                env[key.strip()] = val.strip()
+    return env
+
+
+TEST_ENV = _load_test_env()
+BASE_DOMAIN = TEST_ENV.get("BASE_DOMAIN")
+APP_HOSTNAME = (f"{TEST_ENV['WF_SUBDOMAIN']}.{BASE_DOMAIN}"
+                if BASE_DOMAIN and TEST_ENV.get("WF_SUBDOMAIN") else None)
+AUTH_HOSTNAME = (f"{TEST_ENV['AUTH_SUBDOMAIN']}.{BASE_DOMAIN}"
+                 if BASE_DOMAIN and TEST_ENV.get("AUTH_SUBDOMAIN") else None)
+
+# Names for the DuckDNS update API = hostnames minus the duckdns.org suffix.
+def _duckdns_name(hostname):
+    if hostname and BASE_DOMAIN and hostname.endswith("." + BASE_DOMAIN):
+        return hostname[:-(len(BASE_DOMAIN) + 1)]
+    return hostname
+
+
+DUCKDNS_NAMES = ",".join(n for n in (_duckdns_name(APP_HOSTNAME),
+                                     _duckdns_name(AUTH_HOSTNAME)) if n)
+DUCKDNS_TOKEN_FILE = os.environ.get("DUCKDNS_TOKEN_FILE") or os.path.expanduser(
     os.path.join("~", ".config", "workforce-dev", "duckdns.env"))
-DUCKDNS_NAMES = "workforce-test,workforce-test-auth"
-APP_URL = "https://workforce-test.duckdns.org"
-AUTH_URL = "https://workforce-test-auth.duckdns.org"
+
+
+def require_hostnames():
+    if not (APP_HOSTNAME and AUTH_HOSTNAME):
+        fail(f"hostnames could not be derived from {ENV_DIR}/test.env "
+             "(needs BASE_DOMAIN, WF_SUBDOMAIN, AUTH_SUBDOMAIN).")
 
 OS = platform.system()          # Windows | Darwin | Linux
 DISTRO = ""
@@ -326,7 +368,7 @@ def step4(ip):
     token = read_duckdns_token()
     qs = urllib.parse.urlencode({
         "domains": DUCKDNS_NAMES, "token": token, "ip": ip, "verbose": "true"})
-    url = f"https://www.duckdns.org/update?{qs}"
+    url = f"{DUCKDNS_API}?{qs}"
     say("  Updating DuckDNS (both hostnames → the tailnet IP)…")
     try:
         with urllib.request.urlopen(url, timeout=30) as resp:
@@ -339,30 +381,36 @@ def step4(ip):
     ok("DuckDNS updated.")
 
     # Confirm the public DNS actually answers with the tailnet IP now.
-    for host in DUCKDNS_NAMES.split(","):
+    require_hostnames()
+    for host in (APP_HOSTNAME, AUTH_HOSTNAME):
         resolved = ""
         for _ in range(6):
             try:
-                resolved = socket.gethostbyname(f"{host}.duckdns.org")
+                resolved = socket.gethostbyname(host)
                 if resolved == ip:
                     break
             except socket.gaierror:
                 pass
             time.sleep(5)
         if resolved == ip:
-            ok(f"{host}.duckdns.org → {resolved}")
+            ok(f"{host} → {resolved}")
         else:
-            warn(f"{host}.duckdns.org → {resolved or 'unresolved'} (expected {ip}); "
+            warn(f"{host} → {resolved or 'unresolved'} (expected {ip}); "
                  "DNS caching — retry in a minute or add a hosts entry:")
             hosts_hint()
 
 
 def hosts_hint():
+    require_hostnames()
     if OS == "Windows":
         say(f"    (admin) Add-Content $env:SystemRoot\\System32\\drivers\\etc\\hosts "
-            f'"<ip> workforce-test.duckdns.org"')
+            f'"<ip> {APP_HOSTNAME}"')
+        say(f"    (admin) Add-Content $env:SystemRoot\\System32\\drivers\\etc\\hosts "
+            f'"<ip> {AUTH_HOSTNAME}"')
     else:
-        say("    (sudo)  echo '<ip> workforce-test.duckdns.org' >> /etc/hosts")
+        say(f"    (sudo)  echo '<ip> {APP_HOSTNAME}' >> /etc/hosts")
+        say(f"    (sudo)  echo '<ip> {AUTH_HOSTNAME}' >> /etc/hosts")
+
 
 
 # ============================================================ main
@@ -404,8 +452,9 @@ def main():
 
     say("\n═══════════════════════════════════════════════════════")
     say("  TEST environment deployed.")
-    say(f"    App:     {APP_URL}")
-    say(f"    Sign-in: {AUTH_URL}   (user: admin)")
+    require_hostnames()
+    say(f"    App:     https://{APP_HOSTNAME}")
+    say(f"    Sign-in: https://{AUTH_HOSTNAME}   (user: admin)")
     say("  Reachable from any device on your tailnet.")
     say("  Reset anytime:  vagrant snapshot restore clean && vagrant up")
     say("═══════════════════════════════════════════════════════")
