@@ -141,11 +141,18 @@ run_ansible_site() {
 
   say "Installing Ansible (one-time)…"
   if ! command -v ansible-playbook >/dev/null 2>&1; then
-    pip3 install --quiet ansible-core 2>/dev/null \
-      || python3 -m pip install --quiet ansible-core \
-      || pip install --user --quiet ansible-core
+    # No pip on Ubuntu 24.04 by default, and PEP 668 blocks even --user
+    # installs — the primary path is the root-phase ansible-core install;
+    # these fallbacks cover exotic systems.
+    python3 -m ensurepip --user >/dev/null 2>&1 || true
+    python3 -m pip install --user --break-system-packages --quiet ansible-core 2>/dev/null \
+      || python3 -m pip install --user --quiet ansible-core 2>/dev/null \
+      || pip3 install --break-system-packages --quiet ansible-core 2>/dev/null \
+      || true
     export PATH="$HOME/.local/bin:$PATH"
   fi
+  command -v ansible-playbook >/dev/null 2>&1 \
+    || fail "ansible-playbook is not available and could not be installed."
   export ANSIBLE_COLLECTIONS_PATH="${HOME}/.ansible/collections"
   if ! ansible-galaxy collection list community.docker >/dev/null 2>&1; then
     ansible-galaxy collection install community.general community.docker ansible.posix --quiet
@@ -281,6 +288,18 @@ PROF
   fi
 
   echo ""
+  # Ansible for the service-user phase: Ubuntu/Debian ship no pip and the
+  # service user cannot apt-install (PEP 668). Root installs ansible-core
+  # once here — covers both the fresh-install and already-active paths.
+  if ! command -v ansible-playbook >/dev/null 2>&1; then
+    echo "Installing ansible-core (one-time, via the system package manager)…"
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get install -y -qq ansible-core >/dev/null 2>&1 || true
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf install -y -q ansible-core >/dev/null 2>&1 || true
+    fi
+  fi
+
   echo "Bootstrap complete. Continuing as '$SERVICE_USER' from $TARGET…"
   # Forward the environment selection — without it the service-user phase
   # loses the env-file prefill (domain, subdomains, TLS mode) entirely.

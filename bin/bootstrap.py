@@ -290,7 +290,10 @@ def main():
                 sftp = client.open_sftp()
                 try:
                     sftp.put(tok, "/home/vagrant/duckdns.env")
-                    run_quiet(client, "chmod 600 /home/vagrant/duckdns.env")
+                    # 644: the DNS-01 branch reads it as the SERVICE user
+                    # (workforce_app_sa), not vagrant — 0600 is unreadable
+                    # to it and the installer falls back to prompting.
+                    run_quiet(client, "chmod 644 /home/vagrant/duckdns.env")
                     print("DuckDNS token file copied into the VM.")
                 except Exception as exc:
                     print(f"WARN: could not copy DuckDNS token ({exc}); "
