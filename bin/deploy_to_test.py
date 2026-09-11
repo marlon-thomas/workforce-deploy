@@ -261,7 +261,14 @@ def step0(attempts=0):
             ni = subprocess.run(["virsh", "-c", "qemu:///system", "net-info",
                                  "default"], capture_output=True, text=True,
                                 check=False)
-            if "Active:      yes" not in (ni.stdout or "")                     and "Active: yes" not in (ni.stdout or ""):
+            # parse robustly — virsh pads the value column variably, so a
+            # literal "Active:      yes" match never fits (the false-negative
+            # that made a running network look inactive).
+            net_active = any(
+                ln.strip().startswith("Active:")
+                and ln.split(":", 1)[1].strip().lower() == "yes"
+                for ln in (ni.stdout or "").splitlines())
+            if not net_active:
                 if sudo_run(["sudo", "virsh", "-c", "qemu:///system",
                              "net-start", "default"]):
                     ok("libvirt default network (started)")
