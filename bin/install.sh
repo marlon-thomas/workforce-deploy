@@ -347,11 +347,14 @@ PROF
   if [ -d secrets/api-truststore.jks ]; then rm -rf secrets/api-truststore.jks; fi
   if [ ! -f secrets/api-truststore.jks ]; then
     echo "Creating the JVM truststore (secrets/api-truststore.jks)…"
+    # Root phase: API_IMAGE/APP_VERSION are not defined yet — use the
+    # literal published reference (same image the .env will pin).
+    SUITE_IMAGE="ghcr.io/marlon-thomas/workforce-suite:${APP_VERSION:-0.2.2}"
     DSU="sudo -u $SERVICE_USER env HOME=/home/$SERVICE_USER \
       XDG_RUNTIME_DIR=/run/user/$(id -u $SERVICE_USER) \
       DOCKER_HOST=unix:///run/user/$(id -u $SERVICE_USER)/docker.sock"
-    $DSU docker pull "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1 || true
-    CID=$($DSU docker create --entrypoint sh "${API_IMAGE}:${APP_VERSION}" 2>/dev/null || true)
+    $DSU docker pull "${SUITE_IMAGE}" >/dev/null 2>&1 || true
+    CID=$($DSU docker create --entrypoint sh "${SUITE_IMAGE}" 2>/dev/null || true)
     if [ -n "${CID}" ]; then
       $DSU docker cp "${CID}:/opt/java/openjdk/lib/security/cacerts" \
         secrets/api-truststore.jks >/dev/null 2>&1 \
