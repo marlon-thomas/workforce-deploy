@@ -532,6 +532,10 @@ gen ak_db_password; gen ak_secret
 } > secrets/ak_config.yml
 OIDC_CLIENT_ID="workforce-$(openssl rand -hex 4)"
 echo "$OIDC_CLIENT_ID" > secrets/oidc_client_id
+# The api validates id_tokens against the JWKS over the INTERNAL docker
+# network (authentik-server:9000) — the public tailnet route proved
+# flaky for the JVM's JWKS fetch (read timeouts mid-hairpin).
+printf 'http://authentik-server:9000/application/o/workforce/jwks/' > secrets/oidc_jwks_uri
 # Hex-only secret: base64 secrets contain + and = which some HTTP client
 # layers URL-encode in transit — authentik then compares the encoded value
 # against the raw stored one and rejects every token exchange (observed:

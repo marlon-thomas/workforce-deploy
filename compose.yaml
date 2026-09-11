@@ -177,6 +177,9 @@ services:
       - source: oidc_client_secret
         target: spring.security.oauth2.client.registration.oidc.client-secret
         mode: 0444
+      - source: oidc_jwks_uri
+        target: spring.security.oauth2.client.provider.authentik.jwk-set-uri
+        mode: 0444
       - source: minio_access
         target: workforce.evidence.s3-access-key
         mode: 0444
@@ -465,6 +468,8 @@ secrets:
     file: ./secrets/minio_secret
   oidc_client_id:
     file: ./secrets/oidc_client_id
+  oidc_jwks_uri:
+    file: ./secrets/oidc_jwks_uri
   oidc_client_secret:
     file: ./secrets/oidc_client_secret
   ak_db_password:
