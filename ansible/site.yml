@@ -28,7 +28,7 @@
         docker manifest inspect ghcr.io/marlon-thomas/workforce-suite:0.2.2 >/dev/null 2>&1 && echo ALREADY-AUTHED
       args:
         executable: /bin/bash
-      become: true
+      become: "{{ ansible_user_id != service_user }}"
       become_user: "{{ service_user }}"
       register: authed
       changed_when: false
@@ -39,7 +39,7 @@
         echo '{{ github_token }}' | docker login ghcr.io -u {{ gh_user | default('marlon-thomas') }} --password-stdin
       args:
         executable: /bin/bash
-      become: true
+      become: "{{ ansible_user_id != service_user }}"
       become_user: "{{ service_user }}"
       when: "'ALREADY-AUTHED' not in authed.stdout"
       changed_when: true

@@ -158,8 +158,24 @@ run_ansible_site() {
     ansible-galaxy collection install community.general community.docker ansible.posix --quiet
   fi
 
+  # Inventory generated from THIS deployment's values (works for test and
+  # prod alike — the checked-in inventories describe remote hosts and would
+  # converge the wrong hostnames). Connection is local: the playbook runs
+  # as the invoking user, which IS the service user in this phase.
+  say "Generating the local inventory from this deployment's values…"
+  mkdir -p inventories/local
+  cat > inventories/local/hosts.yml <<INV
+all:
+  hosts:
+    workforce-local:
+      ansible_host: localhost
+      ansible_connection: local
+      service_user: ${SERVICE_USER:-workforce_app_sa}
+      env_name: ${ENV_NAME:-prod}
+      tls_mode: ${TLS_MODE:-production}
+INV
   say "Converging the platform (ansible playbook — identity plane, blueprint, app plane)…"
-  ansible-playbook -i inventories/prod/hosts.yml ansible/site.yml \
+  ansible-playbook -i inventories/local/hosts.yml ansible/site.yml \
     --connection=local -e "ansible_connection=local" \
     -e "app_hostname=${APP_HOSTNAME}" \
     -e "auth_hostname=${AUTH_HOSTNAME}" \
