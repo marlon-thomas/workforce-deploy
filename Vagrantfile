@@ -59,8 +59,12 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   config.vm.network "forwarded_port", guest: 80,  host: 8080
   config.vm.network "forwarded_port", guest: 443, host: 8443
 
-  # Shared folder: none needed — the bundle is cloned ON the VM by bootstrap.py
+  # Shared folder: none — the bundle is cloned ON the VM by bootstrap.py
   # (avoids host-guest sync quirks across Windows/macOS/Linux filesystems).
+  # The default /vagrant share MUST be explicitly disabled, otherwise
+  # vagrant-libvirt falls back to NFS and tries to apt-install nfs-common
+  # in the guest before the guest has working internet.
+  config.vm.synced_folder ".", "/vagrant", disabled: true
 
   config.vm.provider PROVIDER do |pv|
     pv.memory = MEM
@@ -78,16 +82,8 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     end
   end
 
-  # Bare-box provisioning ONLY: OS-level basics the installer assumes
-  # (identical on every host OS — it runs inside the Ubuntu guest).
-  config.vm.provision "shell", inline: <<-'SHELL'
-    set -e
-    apt-get update -qq
-    apt-get install -y -qq git curl ca-certificates python3 >/dev/null
-    # Tailscale (test TLS_MODE=tailscale: the VM joins the tailnet so the
-    # developer's browser and bootstrap.py reach it directly).
-    curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1 || true
-    echo "Bare box ready. Run from the host:"
-    echo "  python3 ../bin/bootstrap.py --vagrant --env test"
-  SHELL
+  # Bare-box provisioning: NONE. `vagrant up` is boot-only and offline-safe;
+  # everything guest-side (git/curl/tailscale, bundle, installer) is done by
+  # bootstrap.py over SSH, which can retry and diagnose. A vagrant provisioner
+  # that apt-installs would fail confusingly when guest internet is flaky.
 end

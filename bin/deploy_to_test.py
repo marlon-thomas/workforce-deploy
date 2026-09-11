@@ -252,6 +252,43 @@ def step0(attempts=0):
                 MISSING.append(
                     f"libvirt group access — run:  sudo usermod -aG libvirt {user}"
                     "   …then LOG OUT & BACK IN (group changes need a new session)")
+
+        # Guest outbound internet: the default NAT network must be active and
+        # the host firewall must forward virbr0 (Fedora firewalld hands virbr0
+        # to the 'libvirt' zone; if that assignment is missing, guests resolve
+        # DNS but every outbound connection times out).
+        if have("virsh"):
+            ni = subprocess.run(["virsh", "-c", "qemu:///system", "net-info",
+                                 "default"], capture_output=True, text=True,
+                                check=False)
+            if "Active:      yes" not in (ni.stdout or "")                     and "Active: yes" not in (ni.stdout or ""):
+                if sudo_run(["sudo", "virsh", "-c", "qemu:///system",
+                             "net-start", "default"]):
+                    ok("libvirt default network (started)")
+                else:
+                    MISSING.append("libvirt default network is inactive — run:  "
+                                   "sudo virsh net-start default")
+            else:
+                ok("libvirt default network (NAT)")
+            if have("firewall-cmd"):
+                az = subprocess.run(["firewall-cmd", "--get-active-zones"],
+                                    capture_output=True, text=True, check=False)
+                zones = az.stdout or ""
+                if "virbr0" in zones:
+                    ok("firewalld forwards virbr0 (guest internet)")
+                elif "libvirt" in zones and "virbr0" not in zones:
+                    # libvirt zone active but interface not assigned
+                    if not sudo_run(["sudo", "firewall-cmd", "--zone=libvirt",
+                                     "--add-interface=virbr0"]):
+                        MISSING.append(
+                            "firewalld is not forwarding virbr0 — run:\n"
+                            "      sudo firewall-cmd --zone=libvirt --add-interface=virbr0\n"
+                            "      sudo firewall-cmd --zone=libvirt --add-service=dhcp --add-service=dns --add-service=ssh --add-service=tftp\n"
+                            "      sudo firewall-cmd --zone=libvirt --add-forward")
+                else:
+                    warn("firewalld zones do not mention virbr0 yet — if the VM "
+                         "cannot reach the internet after boot, run:\n"
+                         "      sudo firewall-cmd --zone=libvirt --add-interface=virbr0")
     else:
         # Windows / macOS: VirtualBox (or Hyper-V) — GUI install, can't automate.
         if have("VBoxManage") or have("virtualbox"):
@@ -359,6 +396,19 @@ def step1(fresh):
         note("destroying the existing VM (--fresh)…")
         run(["vagrant", "destroy", "-f"], cwd=ENV_DIR)
     run(["vagrant", "up"], cwd=ENV_DIR)
+    # Fail fast on guest internet problems with actionable output, instead
+    # of a confusing apt failure deep inside the installer.
+    r = run(["vagrant", "ssh", "-c",
+             "curl -4 -m 8 -sI http://archive.ubuntu.com | head -1"],
+            cwd=ENV_DIR, check=False)
+    if "200" not in (r.stdout or "") and "301" not in (r.stdout or "")             and "302" not in (r.stdout or ""):
+        fail("the VM has no outbound internet (DNS may resolve but TCP is "
+             "blocked). On Fedora, fix the forwarding then re-run:\n"
+             "    sudo firewall-cmd --zone=libvirt --add-interface=virbr0\n"
+             "    sudo firewall-cmd --zone=libvirt --add-forward\n"
+             "  …or restart the libvirt network so it re-registers:\n"
+             "    sudo virsh net-destroy default && sudo virsh net-start default")
+    ok("VM has outbound internet")
     if not snapshot_exists():
         run(["vagrant", "snapshot", "save", "clean"], cwd=ENV_DIR)
         ok("snapshot 'clean' saved — future resets: vagrant snapshot restore clean")
