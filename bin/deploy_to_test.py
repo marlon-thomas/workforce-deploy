@@ -318,15 +318,15 @@ def step0(attempts=0):
             run(["vagrant", "plugin", "install", "vagrant-libvirt"])
             ok("vagrant-libvirt plugin (installed just now)")
 
-        # Make the docker-vs-libvirt FORWARD fix permanent: a systemd drop-in
-        # re-applies the DOCKER-USER accepts on every docker start (reboot and
-        # docker restarts). Without it the rules are runtime-only.
-        if have("docker") and have("virsh"):
-            dropin = "/etc/systemd/system/docker.service.d/workforce-libvirt-forward.conf"
-            if os.path.exists(dropin):
-                ok("docker↔libvirt forwarding fix (persistent)")
-            else:
-                helper = """#!/bin/bash
+    # Make the docker-vs-libvirt FORWARD fix permanent: a systemd drop-in
+    # re-applies the DOCKER-USER accepts on every docker start (reboot and
+    # docker restarts). Without it the rules are runtime-only.
+    if have("docker") and have("virsh"):
+        dropin = "/etc/systemd/system/docker.service.d/workforce-libvirt-forward.conf"
+        if os.path.exists(dropin):
+            ok("docker↔libvirt forwarding fix (persistent)")
+        else:
+            helper = """#!/bin/bash
 set -u
 command -v iptables >/dev/null 2>&1 || exit 0
 iptables -L DOCKER-USER >/dev/null 2>&1 || exit 0
@@ -340,34 +340,34 @@ for bridge in /sys/class/net/virbr*; do
     done
 done
 """
-                dropin_txt = ("[Service]\n"
-                              "ExecStartPost=/usr/local/lib/"
-                              "workforce-libvirt-forward.sh\n")
-                tmp = tempfile.mkdtemp()
-                try:
-                    hp = os.path.join(tmp, "workforce-libvirt-forward.sh")
-                    dp = os.path.join(tmp, "workforce-libvirt-forward.conf")
-                    with open(hp, "w") as f:
-                        f.write(helper)
-                    with open(dp, "w") as f:
-                        f.write(dropin_txt.replace("\\n", chr(10)))
-                    note("installing the persistent docker↔libvirt forwarding "
-                         "fix (sudo may ask for your password)…")
-                    if sudo_run(["sudo", "bash", "-c",
-                                 f"install -D -m755 {hp} "
-                                 "/usr/local/lib/workforce-libvirt-forward.sh"
-                                 f" && mkdir -p /etc/systemd/system/docker.service.d"
-                                 f" && cp {dp} {dropin}"
-                                 " && systemctl daemon-reload"
-                                 " && /usr/local/lib/workforce-libvirt-forward.sh"]):
-                        ok("docker↔libvirt forwarding fix (installed, permanent)")
-                    else:
-                        MISSING.append(
-                            "docker and libvirt coexist on this host; guest "
-                            "traffic needs DOCKER-USER accepts — install "
-                            "manually by re-running this script in a terminal")
-                finally:
-                    shutil.rmtree(tmp, ignore_errors=True)
+            dropin_txt = ("[Service]\n"
+                          "ExecStartPost=/usr/local/lib/"
+                          "workforce-libvirt-forward.sh\n")
+            tmp = tempfile.mkdtemp()
+            try:
+                hp = os.path.join(tmp, "workforce-libvirt-forward.sh")
+                dp = os.path.join(tmp, "workforce-libvirt-forward.conf")
+                with open(hp, "w") as f:
+                    f.write(helper)
+                with open(dp, "w") as f:
+                    f.write(dropin_txt)
+                note("installing the persistent docker↔libvirt forwarding "
+                     "fix (sudo may ask for your password)…")
+                if sudo_run(["sudo", "bash", "-c",
+                             f"install -D -m755 {hp} "
+                             "/usr/local/lib/workforce-libvirt-forward.sh"
+                             " && mkdir -p /etc/systemd/system/docker.service.d"
+                             f" && cp {dp} {dropin}"
+                             " && systemctl daemon-reload"
+                             " && /usr/local/lib/workforce-libvirt-forward.sh"]):
+                    ok("docker↔libvirt forwarding fix (installed, permanent)")
+                else:
+                    MISSING.append(
+                        "docker and libvirt coexist on this host; guest "
+                        "traffic needs DOCKER-USER accepts — install "
+                        "manually by re-running this script in a terminal")
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
 
     # --- paramiko (bootstrap.py) --------------------------------------------
     try:
