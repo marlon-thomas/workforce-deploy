@@ -33,3 +33,16 @@ python3 bootstrap.py --vagrant --env test
 The suite runs identically on Linux, Windows, and macOS development machines.
 See **docs/architecture/first-deployment-runbook.md** for the production (VPS)
 deployment runbook.
+
+## Day-2 commands
+
+| Command | Purpose |
+|---|---|
+| `./bin/doctor.sh` | 18-point health check — paste to support when something looks wrong |
+| `./bin/update.sh <version>` | backup-first upgrade with automatic rollback |
+| `./bin/backup.sh` | manual backup (nightly cron already runs) |
+| `./bin/restore.sh <archive>` | restore a backup (verified into a scratch DB first) |
+| `./bin/reset-admin.sh` | administrator password reset (support-verified phrase) |
+| `./bin/uninstall.sh` | stop everything; data kept unless DELETE-DATA |
+
+See RUNBOOK.md for the full step-by-step guide.
