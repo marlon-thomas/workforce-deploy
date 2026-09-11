@@ -158,6 +158,13 @@ run_ansible_site() {
     ansible-galaxy collection install community.general community.docker ansible.posix --quiet
   fi
 
+  # Pull ALL stack images here, with live progress bars in the terminal —
+  # the ansible compose tasks then start containers from local images with
+  # no silent multi-minute downloads hidden inside a single task.
+  # Idempotent: pulls are near-instant when everything is already local.
+  say "Pulling all stack images (live progress — authentik ~1.6 GB, ClamAV ~1 GB; fast when already local)…"
+  docker compose -f compose.yaml pull || warn "some images failed to pull — the playbook will retry"
+
   # Inventory generated from THIS deployment's values (works for test and
   # prod alike — the checked-in inventories describe remote hosts and would
   # converge the wrong hostnames). Connection is local: the playbook runs
