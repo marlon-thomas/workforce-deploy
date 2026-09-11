@@ -27,8 +27,8 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-[ -n "${ENV_NAME_ARG}" ] && { [ "${ENV_NAME_ARG}" = "development" ] || [ "${ENV_NAME_ARG}" = "test" ] || [ "${ENV_NAME_ARG}" = "prod" ] \
-  || { echo "Unknown environment: ${ENV_NAME_ARG} (development|test|prod)"; exit 1; }; }
+[ -n "${ENV_NAME_ARG}" ] && { [ "${ENV_NAME_ARG}" = "test" ] || [ "${ENV_NAME_ARG}" = "prod" ] \
+  || { echo "Unknown environment: ${ENV_NAME_ARG} (test|prod)"; exit 1; }; }
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m ->\033[0m %s\n' "$*"; }
@@ -240,6 +240,9 @@ MOVED
       fail "Rootless Docker setup failed. If this kernel lacks unprivileged user
      namespaces (some OpenVZ/LXC images), re-run with --system-docker."
     fi
+    # Fedora: Vagrant's embedded Ruby needs libxcrypt-compat (not shipped by default)
+    command -v dnf >/dev/null 2>&1 && rpm -q libxcrypt-compat >/dev/null 2>&1 \
+      || (command -v dnf >/dev/null 2>&1 && dnf install -y -q libxcrypt-compat) || true
     sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
       XDG_RUNTIME_DIR="/run/user/$(id -u "$SERVICE_USER")" \
       systemctl --user enable --now docker

@@ -193,7 +193,7 @@ def main():
     ap.add_argument("--port", type=int, default=22)
     ap.add_argument("--user", default="root")
     ap.add_argument("--password", help="root password (prompted if omitted)")
-    ap.add_argument("--env", default="prod", choices=["development", "test", "prod"],
+    ap.add_argument("--env", default="prod", choices=["test", "prod"],
                     help="deployment environment (test = Ubuntu appliance, prod = live VPS)")
     ap.add_argument("--vagrant", action="store_true",
                     help="target the TEST Vagrant VM (uses 'vagrant ssh-config' for "
@@ -202,8 +202,13 @@ def main():
 
     if args.vagrant:
         import subprocess
-        cfg = subprocess.run(["vagrant", "ssh-config"],
-                             capture_output=True, text=True, check=True).stdout
+        # Work regardless of caller's cwd: 'vagrant ssh-config' needs the
+        # Vagrantfile directory (deploy/environments, sibling of this script).
+        env_dir = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "environments"))
+        cfg = subprocess.run(["vagrant", "ssh-config"], capture_output=True,
+                             text=True, check=True,
+                             cwd=env_dir if os.path.isdir(env_dir) else None).stdout
         params = {}
         for line in cfg.splitlines():
             if " " in line:
