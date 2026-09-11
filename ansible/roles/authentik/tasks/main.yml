@@ -58,6 +58,7 @@
       - ak-redis
       - authentik-server
       - authentik-worker
+      - gateway
       - postgres
       - object-storage
       - clamav
