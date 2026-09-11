@@ -155,6 +155,16 @@ run_ansible_site() {
   # fresh and resumed installs.
   GITHUB_TOKEN="$(grep -o '"auth": "[^"]*"' "/home/${SERVICE_USER:-workforce_app_sa}/.docker/config.json" 2>/dev/null | cut -d'"' -f4 | base64 -d 2>/dev/null | cut -d: -f2 || echo "")"
 
+  # Migration: base64 OIDC client secrets break the token exchange (some
+  # HTTP client layers URL-encode +/= in transit; authentik compares raw).
+  # Rotate legacy base64 secrets to hex — idempotent, hex secrets pass.
+  if ! grep -qE '^[0-9a-f]{64}$' secrets/oidc_client_secret 2>/dev/null; then
+    say "Rotating the OIDC client secret to the hex format (legacy base64 detected)…"
+    openssl rand -hex 32 > secrets/oidc_client_secret
+    chmod 600 secrets/oidc_client_secret
+    chown "$SERVICE_USER:$SERVICE_USER" secrets/oidc_client_secret 2>/dev/null || true
+  fi
+
   say "Installing Ansible (one-time)…"
   if ! command -v ansible-playbook >/dev/null 2>&1; then
     # No pip on Ubuntu 24.04 by default, and PEP 668 blocks even --user
@@ -522,7 +532,11 @@ gen ak_db_password; gen ak_secret
 } > secrets/ak_config.yml
 OIDC_CLIENT_ID="workforce-$(openssl rand -hex 4)"
 echo "$OIDC_CLIENT_ID" > secrets/oidc_client_id
-openssl rand -base64 32 | tr -d '\n' > secrets/oidc_client_secret
+# Hex-only secret: base64 secrets contain + and = which some HTTP client
+# layers URL-encode in transit — authentik then compares the encoded value
+# against the raw stored one and rejects every token exchange (observed:
+# presented '...%2B...%3D' vs stored '...+...='). Hex has nothing to encode.
+openssl rand -hex 32 > secrets/oidc_client_secret
 chmod 600 secrets/*
 chmod 444 secrets/ak_config.yml   # bind-mounted into authentik (rootless uid mapping)
 
