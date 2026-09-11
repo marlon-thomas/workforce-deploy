@@ -204,7 +204,9 @@ def terminal_width():
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--host", required=True, help="server IP or hostname")
+    ap.add_argument("--host", help="server IP or hostname "
+                    "(not needed with --vagrant: resolved from "
+                    "'vagrant ssh-config')")
     ap.add_argument("--port", type=int, default=22)
     ap.add_argument("--user", default="root")
     ap.add_argument("--password", help="root password (prompted if omitted)")
@@ -247,7 +249,14 @@ def main():
         args.keyfile = kf
         print(f"Vagrant VM: {args.host}:{args.port} (user {args.user}, key auth)")
 
-    password = args.password or getpass.getpass(f"Password for {args.user}@{args.host}: ")
+    if args.keyfile:
+        # Vagrant mode: key auth — no password needed or wanted.
+        password = args.password
+    else:
+        if not args.host:
+            sys.exit("error: --host is required (unless --vagrant)")
+        password = args.password or getpass.getpass(
+            f"Password for {args.user}@{args.host}: ")
 
     client = connect(args.host, args.port, args.user, password,
                      keyfile=getattr(args, "keyfile", None))
