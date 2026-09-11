@@ -1,3 +1,1 @@
 Warning: Permanently added '192.168.121.164' (ED25519) to the list of known hosts.
-Read from remote host 192.168.121.164: Connection reset by peer
-client_loop: send disconnect: Broken pipe
