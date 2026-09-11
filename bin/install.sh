@@ -339,6 +339,29 @@ PROF
       dnf install -y -q ansible-core >/dev/null 2>&1 || true
     fi
   fi
+  # Truststore for the api/worker JVMs: without this file docker creates a
+  # DIRECTORY at the bind-mount source (classic bind-mount behaviour) and
+  # the container entrypoint skips its -Djavax.net.ssl.trustStore wiring.
+  # Content = the api image's own default cacerts (identical to what the JVM
+  # would use anyway; exists so the mount is a real file).
+  if [ -d secrets/api-truststore.jks ]; then rm -rf secrets/api-truststore.jks; fi
+  if [ ! -f secrets/api-truststore.jks ]; then
+    echo "Creating the JVM truststore (secrets/api-truststore.jks)…"
+    DSU="sudo -u $SERVICE_USER env HOME=/home/$SERVICE_USER \
+      XDG_RUNTIME_DIR=/run/user/$(id -u $SERVICE_USER) \
+      DOCKER_HOST=unix:///run/user/$(id -u $SERVICE_USER)/docker.sock"
+    $DSU docker pull "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1 || true
+    CID=$($DSU docker create --entrypoint sh "${API_IMAGE}:${APP_VERSION}" 2>/dev/null || true)
+    if [ -n "${CID}" ]; then
+      $DSU docker cp "${CID}:/opt/java/openjdk/lib/security/cacerts" \
+        secrets/api-truststore.jks >/dev/null 2>&1 \
+        || echo "  (cacerts copy failed — the api keeps its default trust store)"
+      $DSU docker rm "${CID}" >/dev/null 2>&1 || true
+    fi
+    chown "$SERVICE_USER:$SERVICE_USER" secrets/api-truststore.jks 2>/dev/null || true
+    chmod 644 secrets/api-truststore.jks 2>/dev/null || true
+  fi
+
   # Base packages the playbook's common role would install in the
   # root-driven model — the local model skips that role, so root does it.
   echo "Ensuring base packages (git, curl, tar, unzip, ca-certificates, openssl)…"
