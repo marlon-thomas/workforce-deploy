@@ -39,6 +39,22 @@ say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m ->\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mXX\033[0m %s\n' "$*"; exit 1; }
 
+# read_mandatory VAR "prompt" [silent] — repeat until non-empty. Empty input
+# on a mandatory value is usually an accidental Enter; never accept it.
+# Ctrl+C is the way out (SIGINT terminates the script).
+read_mandatory() {
+  local __var="$1" __prompt="$2" __silent="${3:-}" __val=""
+  while :; do
+    if [ "$__silent" = "silent" ]; then
+      read -rs -r -p "$__prompt" __val; echo >&2
+    else
+      read -r -p "$__prompt" __val
+    fi
+    if [ -n "$__val" ]; then printf -v "$__var" '%s' "$__val"; return 0; fi
+    printf '     (required — Enter to retry, Ctrl+C to exit)\n' >&2
+  done
+}
+
 # ============================================================ helpers
 
 open_port() {
@@ -302,13 +318,13 @@ PROF
     printf "GitHub username [marlon-thomas]: "
     read -r GH_USER
     GH_USER="${GH_USER:-marlon-thomas}"
-    echo -n "GitHub token (read:packages): "
-    read -rs GH_TOKEN
-    echo ""
-    sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
-      GH_USER="$GH_USER" GH_TOKEN="$GH_TOKEN" \
-      sh -c 'echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin' \
-      || fail "Registry login failed — the token needs read:packages scope."
+    read_mandatory GH_TOKEN "GitHub token (read:packages): " silent
+    until sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
+        GH_USER="$GH_USER" GH_TOKEN="$GH_TOKEN" \
+        sh -c 'echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin'; do
+      echo "   Login failed — the token needs read:packages scope."
+      read_mandatory GH_TOKEN "GitHub token (read:packages): " silent
+    done
   fi
 
   echo ""
@@ -391,9 +407,7 @@ PUBLIC_IP="$(curl -4 -fsS --max-time 8 https://ifconfig.me 2>/dev/null || hostna
 if [ -n "${BASE_DOMAIN:-}" ]; then
   echo "1/4  Organisation web domain (from environment file): ${BASE_DOMAIN}"
 else
-  printf "1/4  What is your organisation's web domain? (e.g. carehome.org.uk): "
-  read -r BASE_DOMAIN
-  [ -n "${BASE_DOMAIN}" ] || fail "A domain is required."
+  read_mandatory BASE_DOMAIN "1/4  What is your organisation's web domain? (e.g. carehome.org.uk): "
 fi
 BASE_DOMAIN="${BASE_DOMAIN#http://}"; BASE_DOMAIN="${BASE_DOMAIN#https://}"
 BASE_DOMAIN="${BASE_DOMAIN%/}"
@@ -428,11 +442,9 @@ if [ "${SMOKE}" -eq 0 ]; then
       [ -n "${DUCKDNS_API_TOKEN}" ] && say "DuckDNS token loaded from ${TOKEN_FILE}."
     fi
     if [ -z "${DUCKDNS_API_TOKEN}" ]; then
-      printf "     DuckDNS API token (for certificate issuance): "
-      read -rs DUCKDNS_API_TOKEN
-      echo
+      read_mandatory DUCKDNS_API_TOKEN \
+        "     DuckDNS API token (for certificate issuance): " silent
     fi
-    [ -n "${DUCKDNS_API_TOKEN}" ] || fail "A DuckDNS API token is required for TLS_MODE=dns01."
   else
     say "Checking that both addresses point at this machine (this can take a few minutes
       on a fresh domain — create TWO 'A' records: ${APP_HOSTNAME} and ${AUTH_HOSTNAME}
@@ -449,9 +461,7 @@ else
   warn "--smoke: DNS verification skipped."
 fi
 
-printf '2/4  Email for security-certificate notices: '
-read -r ACME_EMAIL
-[ -n "${ACME_EMAIL}" ] || fail "An email is required (certificate expiry notices)."
+read_mandatory ACME_EMAIL "2/4  Email for security-certificate notices: "
 
 printf '3/4  Pick a password for the first administrator (Enter = generate a strong one): '
 read -rs ADMIN_PASSWORD
@@ -461,10 +471,13 @@ if [ -z "${ADMIN_PASSWORD}" ]; then
   GENERATED_ADMIN=1
 else
   GENERATED_ADMIN=0
-  printf '     Confirm the administrator password: '
-  read -rs ADMIN_PASSWORD2
-  echo ""
-  [ "${ADMIN_PASSWORD}" = "${ADMIN_PASSWORD2}" ] || fail "The administrator passwords did not match — re-run me."
+  while :; do
+    printf '     Confirm the administrator password: '
+    read -rs ADMIN_PASSWORD2
+    echo ""
+    [ "${ADMIN_PASSWORD}" = "${ADMIN_PASSWORD2}" ] && break
+    printf '     Passwords did not match — enter again (Ctrl+C to exit).\n'
+  done
 fi
 
 printf '4/4  Off-site backups — paste a target (rsync host:path or s3://bucket) or press Enter for local-only: '
