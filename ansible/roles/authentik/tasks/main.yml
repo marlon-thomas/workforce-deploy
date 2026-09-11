@@ -43,6 +43,11 @@
     path: /opt/workforce-deploy/blueprints/workforce-app.yaml
     mode: "0644"
 
+- name: Service user uid (rootless docker socket lives in their runtime dir)
+  ansible.builtin.command: id -u {{ service_user }}
+  register: ak_su_uid
+  changed_when: false
+
 - name: compose project up (identity plane first — sequenced start)
   community.docker.docker_compose_v2:
     project_src: /opt/workforce-deploy
@@ -58,6 +63,11 @@
       - clamav
       - gotenberg
     state: present
+  environment:
+    # Rootless docker: the daemon's socket is the service user's runtime
+    # socket, never /var/run/docker.sock (permission denied as the service
+    # user — and wrong even for root on a rootless-only host).
+    DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
 
 - name: OIDC discovery answers 200 (blueprint applied) — identity plane converged
   ansible.builtin.uri:
