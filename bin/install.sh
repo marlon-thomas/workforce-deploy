@@ -155,6 +155,15 @@ run_ansible_site() {
   # fresh and resumed installs.
   GITHUB_TOKEN="$(grep -o '"auth": "[^"]*"' "/home/${SERVICE_USER:-workforce_app_sa}/.docker/config.json" 2>/dev/null | cut -d'"' -f4 | base64 -d 2>/dev/null | cut -d: -f2 || echo "")"
 
+  # The JWKS-URI secret (internal docker-network JWKS endpoint for the
+  # api's id_token validation) must exist in EVERY path — fresh and resume —
+  # compose recreates the api with a bind mount to it.
+  if [ ! -f secrets/oidc_jwks_uri ]; then
+    printf 'http://authentik-server:9000/application/o/workforce/jwks/' > secrets/oidc_jwks_uri
+    chown "$SERVICE_USER:$SERVICE_USER" secrets/oidc_jwks_uri 2>/dev/null || true
+    chmod 644 secrets/oidc_jwks_uri 2>/dev/null || true
+  fi
+
   # Migration: base64 OIDC client secrets break the token exchange (some
   # HTTP client layers URL-encode +/= in transit; authentik compares raw).
   # Rotate legacy base64 secrets to hex — idempotent, hex secrets pass.
