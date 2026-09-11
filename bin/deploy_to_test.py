@@ -301,6 +301,24 @@ def step0(attempts=0):
     say("  All prerequisites satisfied.")
 
 
+# ============================================================ teardown
+
+def teardown():
+    """Destroy the appliance. Everything inside it (deployment, database,
+    certs, /opt state) dies with it. External state that survives is
+    cosmetic and re-pointed automatically on the next deploy."""
+    say("\n───────── TEARDOWN ─────────")
+    if vm_created():
+        sh(["vagrant", "destroy", "-f"], cwd=ENV_DIR)
+        ok("VM destroyed — deployment, data, certs and snapshot all gone")
+    else:
+        note("no VM exists — nothing to destroy")
+    say("  Remaining external state (cosmetic):")
+    say("    - an offline Tailscale device in your tailnet admin list")
+    say("    - DuckDNS records still aimed at the old tailnet IP")
+    say("  Both are re-pointed/cleaned by the next deploy (STEP 4).")
+
+
 # ============================================================ STEP 1
 
 def vm_created():
@@ -467,7 +485,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--fresh", action="store_true",
-                    help="destroy the existing VM and rebuild from scratch")
+                    help="tear down the VM and redeploy from scratch "
+                         "(full journey)")
+    ap.add_argument("--teardown", action="store_true",
+                    help="destroy the VM and stop (no redeploy)")
     ap.add_argument("--check-only", action="store_true",
                     help="run STEP 0 (prerequisite report) and exit")
     ap.add_argument("--skip-to", type=int, default=0, choices=[0, 1, 2, 3, 4],
@@ -478,6 +499,9 @@ def main():
     say("  Workforce Suite → TEST environment (any OS)")
     say("═══════════════════════════════════════════════════════")
 
+    if args.teardown:
+        teardown()
+        return
     step0()
     if args.check_only:
         say("\nCheck complete — nothing was run.")
@@ -500,7 +524,8 @@ def main():
     say(f"    App:     https://{APP_HOSTNAME}")
     say(f"    Sign-in: https://{AUTH_HOSTNAME}   (user: admin)")
     say("  Reachable from any device on your tailnet.")
-    say("  Reset anytime:  vagrant snapshot restore clean && vagrant up")
+    say("  Reset anytime:   vagrant snapshot restore clean && vagrant up")
+    say("  Full tear-down + redeploy:  deploy_to_test.py --fresh")
     say("═══════════════════════════════════════════════════════")
 
 
