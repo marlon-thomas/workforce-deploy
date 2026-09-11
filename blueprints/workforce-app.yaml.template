@@ -40,6 +40,10 @@ entries:
   - attrs:
       name: Workforce
       slug: workforce
+      # The portal tile must take the user INTO the app (which starts the
+      # OIDC flow properly) — a bare tile otherwise lands on the provider's
+      # authorize endpoint without parameters: "Invalid credentials".
+      launch_url: https://${APP_HOSTNAME}
       provider: !KeyOf workforce-provider
     identifiers:
       slug: workforce
