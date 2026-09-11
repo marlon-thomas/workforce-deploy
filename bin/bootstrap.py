@@ -191,6 +191,16 @@ def interactive_shell(client, cmd):
         print("\n(bootstrap interrupted — the remote installer may still be running)")
     finally:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_attrs)
+    # Propagate the remote exit status — a silent installer failure must
+    # never look like success (the banner below is printed by the caller).
+    try:
+        rc = chan.recv_exit_status()
+    except Exception:
+        rc = -1
+    if rc != 0:
+        sys.exit(f"\nXX remote installer FAILED (exit {rc}) — see its output "
+                 "above; fix and re-run (the installer resumes safely).")
+    return rc
 
 
 def terminal_width():
