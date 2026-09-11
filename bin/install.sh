@@ -173,6 +173,7 @@ all:
       service_user: ${SERVICE_USER:-workforce_app_sa}
       env_name: ${ENV_NAME:-prod}
       tls_mode: ${TLS_MODE:-production}
+      run_root_tasks: false
 INV
   say "Converging the platform (ansible playbook — identity plane, blueprint, app plane)…"
   ansible-playbook -i inventories/local/hosts.yml ansible/site.yml \
@@ -314,6 +315,14 @@ PROF
     elif command -v dnf >/dev/null 2>&1; then
       dnf install -y -q ansible-core >/dev/null 2>&1 || true
     fi
+  fi
+  # Base packages the playbook's common role would install in the
+  # root-driven model — the local model skips that role, so root does it.
+  echo "Ensuring base packages (git, curl, tar, unzip, ca-certificates, openssl)…"
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get install -y -qq git curl tar unzip ca-certificates openssl >/dev/null 2>&1 || true
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y -q git curl tar unzip ca-certificates openssl >/dev/null 2>&1 || true
   fi
 
   echo "Bootstrap complete. Continuing as '$SERVICE_USER' from $TARGET…"
