@@ -20,12 +20,17 @@ SYSTEM_DOCKER=0
 ENV_NAME_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --smoke) SMOKE=1 ;;
-    --system-docker) SYSTEM_DOCKER=1 ;;
-    --env) ENV_NAME_ARG="$2"; shift 2 ;;
+    --smoke) SMOKE=1; shift ;;
+    --system-docker) SYSTEM_DOCKER=1; shift ;;
+    --env)
+      if [ $# -lt 2 ]; then echo "--env needs a value (test|prod)"; exit 1; fi
+      ENV_NAME_ARG="$2"; shift 2 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
-  shift
+  # No trailing shift here: each branch consumes exactly what it needs. A
+  # bare `shift` after `--env X` had already exhausted $#, and under
+  # `set -e` it exited the script silently (exit 1, no output) — the
+  # installer died before printing anything at all.
 done
 [ -n "${ENV_NAME_ARG}" ] && { [ "${ENV_NAME_ARG}" = "test" ] || [ "${ENV_NAME_ARG}" = "prod" ] \
   || { echo "Unknown environment: ${ENV_NAME_ARG} (test|prod)"; exit 1; }; }
