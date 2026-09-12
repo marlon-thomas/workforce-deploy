@@ -44,7 +44,10 @@ def detect_provider
     "virtualbox"   # QEMU plugin is an alternative (VAGRANT_PROVIDER=qemu)
   else
     # Linux: libvirt when the daemon is around, else VirtualBox.
-    system("systemctl is-active libvirtd >/dev/null 2>&1") ? "libvirt" : "virtualbox"
+    # Modern distros (Fedora 40+) use modular daemons: virtqemud is active
+    # while libvirtd stays inactive/socket-activated — accept either.
+    libvirt_active = system("systemctl is-active libvirtd virtqemud 2>/dev/null | grep -E -q '^(active|[a-zA-Z0-9@._-]+: active)$'")
+    libvirt_active ? "libvirt" : "virtualbox"
   end
 end
 
