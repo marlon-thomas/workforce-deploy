@@ -383,7 +383,14 @@ services:
   authentik-server:
     image: ghcr.io/goauthentik/server:2024.12
     restart: unless-stopped
-    networks: [back, data]
+    networks:
+      # Alias pinned to the BACK network only: containers on both networks
+      # otherwise resolve authentik-server to the data-network IP first, and
+      # the JVM's single-address HTTP fetch (JWKS) hangs on that route
+      # (multi-bridge rootless quirk). Aliases keep one working address.
+      back:
+        aliases: [authentik-internal]
+      data: {}
     command: server
     environment:
       TZ: Europe/London

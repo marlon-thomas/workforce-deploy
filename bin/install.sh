@@ -159,7 +159,7 @@ run_ansible_site() {
   # api's id_token validation) must exist in EVERY path — fresh and resume —
   # compose recreates the api with a bind mount to it.
   if [ ! -f secrets/oidc_jwks_uri ]; then
-    printf 'http://authentik-server:9000/application/o/workforce/jwks/' > secrets/oidc_jwks_uri
+    printf 'http://authentik-internal:9000/application/o/workforce/jwks/' > secrets/oidc_jwks_uri
     chown "$SERVICE_USER:$SERVICE_USER" secrets/oidc_jwks_uri 2>/dev/null || true
     chmod 644 secrets/oidc_jwks_uri 2>/dev/null || true
   fi
@@ -544,7 +544,7 @@ echo "$OIDC_CLIENT_ID" > secrets/oidc_client_id
 # The api validates id_tokens against the JWKS over the INTERNAL docker
 # network (authentik-server:9000) — the public tailnet route proved
 # flaky for the JVM's JWKS fetch (read timeouts mid-hairpin).
-printf 'http://authentik-server:9000/application/o/workforce/jwks/' > secrets/oidc_jwks_uri
+printf 'http://authentik-internal:9000/application/o/workforce/jwks/' > secrets/oidc_jwks_uri
 # Hex-only secret: base64 secrets contain + and = which some HTTP client
 # layers URL-encode in transit — authentik then compares the encoded value
 # against the raw stored one and rejects every token exchange (observed:
