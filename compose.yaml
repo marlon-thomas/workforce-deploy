@@ -51,6 +51,9 @@ services:
         condition: service_started
       authentik-server:
         condition: service_healthy
+        # Dev overlay moves authentik behind the "auth" profile; production
+        # always defines it, so this never relaxes the real dependency order.
+        required: false
 
   # One-shot: validate object storage, create the evidence bucket if missing,
   # and lock it down to authenticated access (spec §10.2 init requirements).
@@ -122,14 +125,16 @@ services:
     entrypoint: >
       sh -c 'for i in $$(seq 1 90); do
         code=$$(curl -s -o /dev/null -w "%{http_code}" http://authentik-server:9000/application/o/workforce/.well-known/openid-configuration || true);
-        if [ "$$code" = "200" ]; then echo "discovery ready (attempt $$i)"; exit 0; fi;
-        echo "waiting for discovery (attempt $$i): $${code:-000}";
+        jwks=$$(curl -s -o /dev/null -w "%{http_code}" http://authentik-server:9000/application/o/workforce/jwks/ || true);
+        if [ "$$code" = "200" ] && [ "$$jwks" = "200" ]; then echo "discovery+jwks ready (attempt $$i)"; exit 0; fi;
+        echo "waiting for discovery/jwks (attempt $$i): $${code:-000}/$${jwks:-000}";
         sleep 10;
       done;
-      echo "discovery never became ready"; exit 1'
+      echo "discovery/jwks never became ready"; exit 1'
     depends_on:
       authentik-server:
         condition: service_healthy
+        required: false  # see gateway.depends_on note (dev "auth" profile)
 
   api:
     # Pulled by default (deployment-spec §B1: orgs run published images, pinned by
@@ -210,6 +215,7 @@ services:
         # (and its applied blueprint) must precede it, or the api's context init
         # fails. It retries via restart policy regardless; this removes the wait.
         condition: service_healthy
+        required: false  # see gateway.depends_on note (dev "auth" profile)
       discovery-gate:
         # A healthy authentik is not enough: the blueprint may still be
         # pending (404). Without this gate the api caches a broken client

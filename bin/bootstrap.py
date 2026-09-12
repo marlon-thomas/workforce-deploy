@@ -33,9 +33,9 @@ except ImportError:
     sys.exit("paramiko is required:  pip install paramiko")
 
 BUNDLE_REPO = "https://github.com/marlon-thomas/workforce-deploy.git"
-INSTALL_CMD = "cd /root/workforce-deploy && ./bin/install.sh --env {env}"
+INSTALL_CMD = "cd /opt/workforce-deploy && ./bin/install.sh --env {env}"
 
-# Vagrant mode: the bundle lands in /home/vagrant (not /root), and sudo is NOPASSWD.
+# Vagrant mode: bundle lands at /opt (via sudo); sudo is NOPASSWD.
 VAGRANT_PREP = r"""
 set -e
 echo "==> Installing host prerequisites (git, curl, tailscale)…"
@@ -52,13 +52,17 @@ if ! command -v tailscale >/dev/null 2>&1; then
     echo "WARN: tailscale install failed — install it manually inside the VM."
 fi
 sudo systemctl enable --now tailscaled >/dev/null 2>&1 || true
-echo "==> Fetching the deployment bundle…"
-# sudo: a previous install may have left a root-owned pointer file here
-# (bundle relocated to /opt, 'README-MOVED.txt' left behind) — the vagrant
-# user cannot remove it. The real deployment lives in /opt and is untouched.
-sudo rm -rf /home/vagrant/workforce-deploy
-git clone -q {repo} /home/vagrant/workforce-deploy
-sudo chown -R vagrant:vagrant /home/vagrant/workforce-deploy
+echo "==> Fetching the deployment bundle straight to its final home…"
+# No staging copy: the bundle lands at /opt/workforce-deploy (where the
+# installer wants to live) and later runs just `git pull` it. Untracked
+# state there (.env, secrets/) is never touched by a pull.
+if [ -d /opt/workforce-deploy/.git ]; then
+  sudo git -C /opt/workforce-deploy pull -q --ff-only
+else
+  # Old installs left a staged/pointer clone under the vagrant home — drop it.
+  sudo rm -rf /home/vagrant/workforce-deploy
+  sudo git clone -q {repo} /opt/workforce-deploy
+fi
 echo "==> Bundle ready. Handing over to the installer (answer its prompts below)."
 """
 
@@ -87,9 +91,13 @@ sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; \
     /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
 apt-get update -qq >/dev/null
 apt-get install -y -qq git curl ca-certificates >/dev/null
-echo "==> Fetching the deployment bundle…"
-rm -rf /root/workforce-deploy
-git clone -q {repo} /root/workforce-deploy
+echo "==> Fetching the deployment bundle straight to its final home…"
+if [ -d /opt/workforce-deploy/.git ]; then
+  git -C /opt/workforce-deploy pull -q --ff-only
+else
+  rm -rf /root/workforce-deploy
+  git clone -q {repo} /opt/workforce-deploy
+fi
 echo "==> Bundle ready. Handing over to the installer (answer its prompts below)."
 """
 
@@ -304,7 +312,7 @@ def main():
                           "the installer will prompt for it.")
                 finally:
                     sftp.close()
-            install_cmd = ("cd /home/vagrant/workforce-deploy && "
+            install_cmd = ("cd /opt/workforce-deploy && "
                            "sudo -E bash ./bin/install.sh --env " + args.env
                            + (" --smoke" if args.smoke else ""))
             interactive_shell(client, install_cmd)
