@@ -146,6 +146,9 @@ services:
       # unavailable. Absent in normal operation (compose tolerates a missing file
       # only if declared with the file existing — install.sh always creates it).
       - ./secrets/api-truststore.jks:/app/api-truststore.jks:ro
+      # Static authentik signing key: id_tokens are validated against this
+      # pinned public key — no JWKS network fetch from the api at all.
+      - ./secrets/oidc_signing_pub.pem:/run/oidc/signing-pub.pem:ro
     networks: [back, data]
     environment:
       TZ: Europe/London
@@ -163,12 +166,7 @@ services:
       WORKFORCE_REPORTS_GOTENBERG_URL: http://gotenberg:3000
       BRAND_DATA_DIR: /app/data/branding
       WORKFORCE_TLS_TRUSTSTORE: /app/api-truststore.jks
-      # TEMPORARY diagnostics: OAuth2 token-exchange failures are silent at
-      # INFO; remove once the sign-in issue is closed.
-      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY: TRACE
-      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_WEB: DEBUG
-      # JVM networking guard for rootless/container networks
-      JAVA_TOOL_OPTIONS: "-Djava.net.preferIPv4Stack=true"
+      WORKFORCE_OIDC_SIGNING_KEY_PEM: /run/oidc/signing-pub.pem
     secrets:
       - source: db_password
         target: spring.datasource.password
