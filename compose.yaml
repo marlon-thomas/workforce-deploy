@@ -167,6 +167,8 @@ services:
       BRAND_DATA_DIR: /app/data/branding
       WORKFORCE_TLS_TRUSTSTORE: /app/api-truststore.jks
       WORKFORCE_OIDC_SIGNING_KEY_PEM: /run/oidc/signing-pub.pem
+      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY: TRACE
+      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_WEB: DEBUG
     secrets:
       - source: db_password
         target: spring.datasource.password
