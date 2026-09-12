@@ -167,6 +167,8 @@ services:
       # INFO; remove once the sign-in issue is closed.
       LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY: TRACE
       LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_WEB: DEBUG
+      # JVM networking guard for rootless/container networks
+      JAVA_TOOL_OPTIONS: "-Djava.net.preferIPv4Stack=true"
     secrets:
       - source: db_password
         target: spring.datasource.password
