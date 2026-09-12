@@ -125,11 +125,12 @@ services:
     entrypoint: >
       sh -c 'for i in $$(seq 1 90); do
         code=$$(curl -s -o /dev/null -w "%{http_code}" http://authentik-server:9000/application/o/workforce/.well-known/openid-configuration || true);
-        if [ "$$code" = "200" ]; then echo "discovery ready (attempt $$i)"; exit 0; fi;
-        echo "waiting for discovery (attempt $$i): $${code:-000}";
+        jwks=$$(curl -s -o /dev/null -w "%{http_code}" http://authentik-server:9000/application/o/workforce/jwks/ || true);
+        if [ "$$code" = "200" ] && [ "$$jwks" = "200" ]; then echo "discovery+jwks ready (attempt $$i)"; exit 0; fi;
+        echo "waiting for discovery/jwks (attempt $$i): $${code:-000}/$${jwks:-000}";
         sleep 10;
       done;
-      echo "discovery never became ready"; exit 1'
+      echo "discovery/jwks never became ready"; exit 1'
     depends_on:
       authentik-server:
         condition: service_healthy

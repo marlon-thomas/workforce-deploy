@@ -254,34 +254,14 @@ bootstrap() {
   TARGET="/opt/workforce-deploy"
   CURRENT="$(cd "$(dirname "$0")/.." && pwd)"
   if [ "$CURRENT" != "$TARGET" ]; then
-    echo "Moving the deployment bundle to $TARGET (the service user cannot live under /root)…"
-    mkdir -p "$(dirname "$TARGET")"
-    if [ -d "$TARGET" ] && [ -f "$TARGET/.env" ]; then
-      # Full-tree sync: newly added bundle directories (the ansible/ lesson)
-      # can never be missed by an itemised copy. Generated state survives
-      # because .env/secrets/backups are only present in $TARGET.
-      cp -a "$CURRENT/." "$TARGET/"
-    else
-      rm -rf "$TARGET"
-      mkdir -p "$TARGET"
-      cp -a "$CURRENT/." "$TARGET/"
-    fi
+    # Legacy migration path: bootstrap now clones STRAIGHT to $TARGET, so this
+    # only fires when an old staged clone (e.g. /root/workforce-deploy) runs me.
+    # Sync the code (never lose a directory the old itemised copy missed);
+    # untracked state (.env, secrets/, backups/) in $TARGET always survives.
+    echo "Relocating the deployment bundle to $TARGET…"
+    mkdir -p "$TARGET"
+    cp -a "$CURRENT/." "$TARGET/"
     cd "$TARGET"
-    rm -rf "$CURRENT"
-    mkdir -p "$CURRENT"
-    cat > "$CURRENT/README-MOVED.txt" <<MOVED
-The Care Angels Workforce deployment bundle has moved to:
-
-    $TARGET
-
-All commands run there (as the $SERVICE_USER user), e.g.:
-
-    cd $TARGET && ./bin/doctor.sh
-
-This directory is only a pointer — the real deployment (including .env
-and secrets) lives at the path above.
-MOVED
-    echo "   (the original clone at $CURRENT is now a pointer to $TARGET)"
   fi
   chown -R "$SERVICE_USER:$SERVICE_USER" "$TARGET"
 
