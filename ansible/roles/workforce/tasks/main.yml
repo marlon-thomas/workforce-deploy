@@ -23,6 +23,17 @@
     executable: /bin/bash
   changed_when: true
 
+- name: Export authentik's JWT signing public key (static-key id_token validation)
+  ansible.builtin.shell: |
+    set -o pipefail
+    docker exec workforce-deploy-authentik-postgres-1 psql -U authentik -d authentik -t -A -c \
+      "SELECT certificate_data FROM authentik_crypto_certificatekeypair WHERE name = 'authentik Self-signed Certificate'" \
+      | openssl x509 -pubkey -noout > /opt/workforce-deploy/secrets/oidc_signing_pub.pem
+    chmod 644 /opt/workforce-deploy/secrets/oidc_signing_pub.pem
+  args:
+    executable: /bin/bash
+  changed_when: true
+
 - name: Service user uid
   ansible.builtin.command: id -u {{ service_user }}
   register: su_uid
