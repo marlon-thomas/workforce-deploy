@@ -5,13 +5,13 @@
 #   docker compose -f compose.yaml -f compose.dev.yaml up -d postgres object-storage clamav gotenberg init migrate
 #
 # NOTE: host ports avoid clashes with other local containers:
-#   postgres 5432, minio 9100/9101, gotenberg 3100, clamd 3310.
+#   postgres 5434, minio 9100/9101, gotenberg 3100, clamd 3310.
 # The `auth` profile adds a local authentik for realistic OIDC testing:
 #   docker compose -f compose.yaml -f compose.dev.yaml --profile auth up -d authentik-postgres authentik-server authentik-worker
 
 services:
   postgres:
-    ports: ["5432:5432"]
+    ports: ["5434:5432"]
 
   object-storage:
     ports: ["9100:9000", "9101:9001"]
