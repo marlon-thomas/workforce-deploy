@@ -33,6 +33,10 @@ services:
       DUCKDNS_API_TOKEN: ${DUCKDNS_API_TOKEN:-}
     volumes:
       - ${GATEWAY_CADDYFILE:-./gateway/Caddyfile}:/etc/caddy/Caddyfile:ro
+      # Leaf cert dir for TLS_MODE=certs (test env, private CA). Empty under
+      # HTTP-01/DNS-01 and simply unused there; install.sh always creates it so
+      # this read-only bind never trips Docker's "create missing dir as root".
+      - ./secrets/tls:/etc/caddy/tls:ro
       - caddy_data:/data
       - caddy_config:/config
     networks: [front, back]
