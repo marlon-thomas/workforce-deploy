@@ -130,6 +130,63 @@ def scrub_known_hosts(host):
         print(f"Cleared known_hosts entries for: {', '.join(sorted(names))}")
 
 
+def read_env_file(env_name):
+    """Parse deploy/environments/<env>.env (KEY=VALUE lines). The env FILE is
+    the single source of truth for what out-of-band material a deployment
+    needs — bootstrap.py itself never branches on test-vs-prod."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "environments", env_name + ".env")
+    kv = {}
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    kv[k.strip()] = v.strip()
+    return kv
+
+
+def ship_env_files(client, env_name, remote_home):
+    """Copy host-side secret material into the target VM per the env file's
+    declarations (sftp cannot reach /opt before the service user exists, and
+    these files must never enter the PUBLIC git bundle):
+      TLS_MODE=dns01  -> DuckDNS token file (installer also prompts as fallback)
+      TLS_MODE=certs  -> private-CA leaf (tls.crt/tls.key/ca.crt) into
+                         <home>/tls-upload/, which install.sh's root phase
+                         moves into secrets/tls (prod declares neither → no-op).
+    """
+    kv = read_env_file(env_name)
+    sftp = client.open_sftp()
+    try:
+        if kv.get("TLS_MODE", "http01") == "dns01":
+            tok = os.path.expanduser("~/.config/workforce-dev/duckdns.env")
+            if os.path.isfile(tok):
+                sftp.put(tok, f"{remote_home}/duckdns.env")
+                # 644: the DNS-01 branch reads it as the SERVICE user
+                # (workforce_app_sa), not vagrant — 0600 is unreadable
+                # to it and the installer falls back to prompting.
+                run_quiet(client, f"chmod 644 {remote_home}/duckdns.env")
+                print("DuckDNS token file copied into the VM.")
+        if kv.get("TLS_MODE") == "certs":
+            ca_dir = os.path.expanduser(
+                kv.get("TLS_CA_DIR", "~/.config/workforce-dev/testca"))
+            names = ("tls.crt", "tls.key", "ca.crt")
+            have = [n for n in names if os.path.isfile(os.path.join(ca_dir, n))]
+            if have == list(names):
+                run_quiet(client, f"mkdir -p {remote_home}/tls-upload")
+                for n in names:
+                    sftp.put(os.path.join(ca_dir, n), f"{remote_home}/tls-upload/{n}")
+                print("Test-CA leaf shipped to tls-upload/ "
+                      "(installer moves it into secrets/tls).")
+            else:
+                print(f"WARN: TLS_MODE=certs but no leaf in {ca_dir} — run "
+                      f"'./bin/gen-test-ca.sh {env_name}' on the workstation; "
+                      "the installer will fail with the same guidance.")
+    finally:
+        sftp.close()
+
+
 def connect(host, port, user, password, keyfile=None):
     scrub_known_hosts(host)
     client = paramiko.SSHClient()
@@ -294,24 +351,10 @@ def main():
             rc = run_quiet(client, VAGRANT_PREP.format(repo=args.repo))
             if rc != 0:
                 sys.exit(f"Host preparation failed (exit {rc}).")
-            # Drop the host's DuckDNS token file into the VM so the installer
-            # can pick it up for DNS-01 certificate issuance (silent if absent;
-            # the installer will prompt instead).
-            tok = os.path.expanduser("~/.config/workforce-dev/duckdns.env")
-            if os.path.isfile(tok):
-                sftp = client.open_sftp()
-                try:
-                    sftp.put(tok, "/home/vagrant/duckdns.env")
-                    # 644: the DNS-01 branch reads it as the SERVICE user
-                    # (workforce_app_sa), not vagrant — 0600 is unreadable
-                    # to it and the installer falls back to prompting.
-                    run_quiet(client, "chmod 644 /home/vagrant/duckdns.env")
-                    print("DuckDNS token file copied into the VM.")
-                except Exception as exc:
-                    print(f"WARN: could not copy DuckDNS token ({exc}); "
-                          "the installer will prompt for it.")
-                finally:
-                    sftp.close()
+            # Env-declared out-of-band material (DuckDNS token, test-CA leaf).
+            # Nothing here is test-vs-prod specific — ship_env_files reads the
+            # env file and ships what it names (prod names none -> no-op).
+            ship_env_files(client, args.env, "/home/vagrant")
             install_cmd = ("cd /opt/workforce-deploy && "
                            "sudo -E bash ./bin/install.sh --env " + args.env
                            + (" --smoke" if args.smoke else ""))
@@ -330,6 +373,7 @@ def main():
         rc = run_quiet(client, prep_cmd.format(repo=args.repo))
         if rc != 0:
             sys.exit(f"Host preparation failed (exit {rc}).")
+        ship_env_files(client, args.env, "/root")
         print("")
         print("=" * 72)
         print(" Interactive installer starting. Answer its prompts here:")

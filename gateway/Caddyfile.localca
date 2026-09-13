@@ -1,0 +1,30 @@
+# --- Local-CA Caddyfile (TLS_MODE=certs, test environment ONLY) ---
+# Same routing and security headers as the production/duckdns Caddyfiles, but
+# TLS terminates on a leaf certificate placed by bootstrap.py — issued by the
+# workstation's private CA (bin/gen-test-ca.sh), NOT by a public CA. No ACME,
+# no rate limits, no inbound reachability, works entirely on the tailnet.
+# Production must never use this file (it uses real Let's Encrypt).
+
+{$APP_HOSTNAME} {
+	tls /etc/caddy/tls/tls.crt /etc/caddy/tls/tls.key
+	reverse_proxy api:8080 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+		-Server
+	}
+}
+
+{$AUTH_HOSTNAME} {
+	tls /etc/caddy/tls/tls.crt /etc/caddy/tls/tls.key
+	reverse_proxy authentik-server:9000
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}

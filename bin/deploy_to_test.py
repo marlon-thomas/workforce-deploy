@@ -210,7 +210,11 @@ def step0(attempts=0):
                    "libvirt-clients")
             MISSING.append(f"libvirt/KVM — run:  {pkg}")
         elif subprocess.run(["systemctl", "is-active", "--quiet", "libvirtd"],
-                            check=False).returncode != 0:
+                            check=False).returncode != 0 and \
+                subprocess.run(["systemctl", "is-active", "--quiet", "virtqemud"],
+                               check=False).returncode != 0:
+            # Fedora 40+ runs the modular daemons: virtqemud is active while
+            # libvirtd stays inactive/socket-activated — accept either.
             MISSING.append("libvirtd is not running — run once:  "
                            "sudo python3 deploy/host-setup/setup-host.py")
         if have("virsh"):
@@ -290,6 +294,21 @@ def step0(attempts=0):
         except ImportError:
             MISSING.append(f"paramiko — run:  {sys.executable} "
                            "-m pip install --user paramiko")
+
+    # TLS material for the test environment's mode (env file decides; we just
+    # honour it): certs mode needs the workstation private CA to exist.
+    tenv = _load_test_env()
+    if tenv.get("TLS_MODE") == "certs":
+        ca_dir = os.path.expanduser(
+            tenv.get("TLS_CA_DIR", "~/.config/workforce-dev/testca"))
+        missing = [n for n in ("tls.crt", "tls.key", "ca.crt")
+                   if not os.path.isfile(os.path.join(ca_dir, n))]
+        if missing:
+            MISSING.append(f"test CA leaf incomplete in {ca_dir} ({', '.join(missing)})"
+                           " — run once:  deploy/bin/gen-test-ca.sh test"
+                           "   …then import ca.crt into this machine's trust store")
+        else:
+            ok(f"test CA leaf present ({ca_dir})")
 
     if MISSING:
         if attempts >= 2:
@@ -411,8 +430,9 @@ def step4():
     say("  First run: the installer asks for a GitHub PAT (read:packages),")
     say("  email, admin password and backup directory, here in this terminal.")
     say("  An existing deployment resumes with no prompts at all.")
-    say("  The DuckDNS token is copied in automatically if present at:")
-    say(f"    {DUCKDNS_TOKEN_FILE}")
+    say("  Out-of-band files are copied in automatically per the env file")
+    say(f"  (DuckDNS token at {DUCKDNS_TOKEN_FILE}, test CA leaf at")
+    say("   ~/.config/workforce-dev/testca) — the installer consumes both.")
     cmd = [sys.executable, BOOTSTRAP, "--vagrant", "--env", "test"]
     try:
         sh(cmd)

@@ -263,6 +263,18 @@ bootstrap() {
     cp -a "$CURRENT/." "$TARGET/"
     cd "$TARGET"
   fi
+  # Out-of-band host files staged by bootstrap.py into the LOGIN user's home
+  # (TLS_MODE=certs ships tls.crt/tls.key/ca.crt there; sftp cannot write to
+  # /opt before the service user exists). Moved in BEFORE the ownership pass
+  # below, so the tree ends up owned by $SERVICE_USER in one place. Absent
+  # directory (prod / plain runs) is a no-op.
+  mkdir -p secrets/tls
+  if [ -d "${HOME}/tls-upload" ]; then
+    mv -f "${HOME}"/tls-upload/tls.crt "${HOME}"/tls-upload/tls.key \
+          "${HOME}"/tls-upload/ca.crt secrets/tls/ 2>/dev/null || true
+    rmdir "${HOME}/tls-upload" 2>/dev/null || true
+    echo "Staged TLS files moved into secrets/tls."
+  fi
   chown -R "$SERVICE_USER:$SERVICE_USER" "$TARGET"
 
   if [ "${SYSTEM_DOCKER}" -eq 1 ]; then
@@ -450,43 +462,64 @@ if [ "${SMOKE}" -eq 0 ]; then
   say "Opening the firewall for the web (80/tcp, 443/tcp)…"
   open_port 80
   open_port 443
-  if [ "${TLS_MODE:-http01}" = "dns01" ]; then
-    # Certificates come via the DuckDNS API (DNS-01): no A records are needed
-    # for issuance, and reachability is provided by Tailscale rather than a
-    # public IP. The hostname may legitimately resolve to a 100.x tailnet
-    # address, so the HTTP-01 DNS check would be wrong here — skip it.
-    say "TLS_MODE=dns01: certificates will be issued via the DuckDNS API —
-      no A records needed. Reachability comes from Tailscale (the VM's
-      tailnet address must be in the DuckDNS A record for the hostnames
-      you will browse from)."
-    DUCKDNS_API_TOKEN=""
-    TOKEN_FILE="${DUCKDNS_TOKEN_FILE:-}"
-    if [ -n "${TOKEN_FILE}" ] && [ -f "${TOKEN_FILE/#\~/$HOME}" ]; then
-      . "${TOKEN_FILE/#\~/$HOME}"
-      DUCKDNS_API_TOKEN="${DUCKDNS_TOKEN:-}"
-      [ -n "${DUCKDNS_API_TOKEN}" ] && say "DuckDNS token loaded from ${TOKEN_FILE}."
-    fi
-    if [ -z "${DUCKDNS_API_TOKEN}" ]; then
-      read_mandatory DUCKDNS_API_TOKEN \
-        "     DuckDNS API token (for certificate issuance): " silent
-    fi
-  else
-    say "Checking that both addresses point at this machine (this can take a few minutes
+  case "${TLS_MODE:-http01}" in
+    dns01)
+      # Certificates come via the DuckDNS API (DNS-01): no A records are needed
+      # for issuance, and reachability is provided by Tailscale rather than a
+      # public IP. The hostname may legitimately resolve to a 100.x tailnet
+      # address, so the HTTP-01 DNS check would be wrong here — skip it.
+      say "TLS_MODE=dns01: certificates will be issued via the DuckDNS API —
+        no A records needed. Reachability comes from Tailscale (the VM's
+        tailnet address must be in the DuckDNS A record for the hostnames
+        you will browse from)."
+      DUCKDNS_API_TOKEN=""
+      TOKEN_FILE="${DUCKDNS_TOKEN_FILE:-}"
+      if [ -n "${TOKEN_FILE}" ] && [ -f "${TOKEN_FILE/#\~/$HOME}" ]; then
+        . "${TOKEN_FILE/#\~/$HOME}"
+        DUCKDNS_API_TOKEN="${DUCKDNS_TOKEN:-}"
+        [ -n "${DUCKDNS_API_TOKEN}" ] && say "DuckDNS token loaded from ${TOKEN_FILE}."
+      fi
+      if [ -z "${DUCKDNS_API_TOKEN}" ]; then
+        read_mandatory DUCKDNS_API_TOKEN \
+          "     DuckDNS API token (for certificate issuance): " silent
+      fi ;;
+    certs)
+      # TEST ENVIRONMENT ONLY: TLS terminates on a leaf issued by the
+      # workstation's private CA (bin/gen-test-ca.sh). No public CA, no ACME,
+      # no rate limits, no A records — browsers trust it once the root is
+      # imported on each machine. Production never reaches this branch.
+      # (The root phase already moved tls.crt/tls.key from the bootstrap
+      # upload dir into secrets/tls, or they survive there from a resume.)
+      say "TLS_MODE=certs: using a locally-issued certificate (private test CA)."
+      if [ ! -s secrets/tls/tls.crt ] || [ ! -s secrets/tls/tls.key ]; then
+        fail "secrets/tls/tls.crt|key not found — bootstrap.py normally ships them
+       from the workstation's CA dir. Fix: run ./bin/gen-test-ca.sh on the
+       workstation, then re-run bootstrap.py --env <name> (it uploads to
+       \$HOME/tls-upload and the installer moves them into place)."
+      fi ;;
+    *)
+      say "Checking that both addresses point at this machine (this can take a few minutes
       on a fresh domain — create TWO 'A' records: ${APP_HOSTNAME} and ${AUTH_HOSTNAME}
       -> ${PUBLIC_IP})…"
-    for i in $(seq 1 60); do
-      verify_dns && break
-      [ "$i" = 60 ] && fail "DNS still not pointing here. At your domain provider create
+      for i in $(seq 1 60); do
+        verify_dns && break
+        [ "$i" = 60 ] && fail "DNS still not pointing here. At your domain provider create
        two 'A' records: ${APP_HOSTNAME} -> ${PUBLIC_IP} and ${AUTH_HOSTNAME} -> ${PUBLIC_IP},
        then re-run me."
-      sleep 15
-    done
-  fi
+        sleep 15
+      done ;;
+  esac
 else
   warn "--smoke: DNS verification skipped."
 fi
 
-read_mandatory ACME_EMAIL "2/4  Email for security-certificate notices: "
+if [ "${TLS_MODE:-http01}" = "certs" ]; then
+  # No ACME account exists in local-CA mode — the notice email is unused.
+  ACME_EMAIL="local-ca@invalid"
+  say "2/4  Email for certificate notices — skipped (no public CA in test mode)."
+else
+  read_mandatory ACME_EMAIL "2/4  Email for security-certificate notices: "
+fi
 
 printf '3/4  Pick a password for the first administrator (Enter = generate a strong one): '
 read -rs ADMIN_PASSWORD
@@ -536,10 +569,19 @@ chmod 444 secrets/ak_config.yml   # bind-mounted into authentik (rootless uid ma
 say "Writing configuration…"
 GATEWAY_IMAGE_DEFAULT="caddy:2.8.4"
 GATEWAY_CADDYFILE_DEFAULT="./gateway/Caddyfile"
-if [ "${TLS_MODE:-http01}" = "dns01" ] && [ "${SMOKE}" -eq 0 ]; then
-  GATEWAY_IMAGE_DEFAULT="ghcr.io/marlon-thomas/workforce-gateway:latest"
-  GATEWAY_CADDYFILE_DEFAULT="./gateway/Caddyfile.duckdns"
-fi
+case "${TLS_MODE:-http01}" in
+  dns01)
+    if [ "${SMOKE}" -eq 0 ]; then
+      GATEWAY_IMAGE_DEFAULT="ghcr.io/marlon-thomas/workforce-gateway:latest"
+      GATEWAY_CADDYFILE_DEFAULT="./gateway/Caddyfile.duckdns"
+    fi ;;
+  certs)
+    if [ "${SMOKE}" -eq 0 ]; then
+      # Local-CA TLS needs no ACME DNS plugin — the stock image is enough.
+      GATEWAY_IMAGE_DEFAULT="caddy:2.8.4"
+      GATEWAY_CADDYFILE_DEFAULT="./gateway/Caddyfile.localca"
+    fi ;;
+esac
 cat > .env <<ENV
 ENV_NAME=${ENV_NAME:-prod}
 APP_HOSTNAME=${APP_HOSTNAME}
