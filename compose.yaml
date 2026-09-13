@@ -62,7 +62,7 @@ services:
   # One-shot: validate object storage, create the evidence bucket if missing,
   # and lock it down to authenticated access (spec §10.2 init requirements).
   init:
-    image: minio/mc:RELEASE.2024-11-17T19-35-25Z
+    image: quay.io/minio/mc:RELEASE.2024-11-17T19-35-25Z  # MinIO left Docker Hub — quay is their registry now
     restart: "no"
     networks: [data]
     environment:
@@ -310,7 +310,7 @@ services:
       retries: 6
 
   object-storage:
-    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    image: quay.io/minio/minio:RELEASE.2024-10-13T13-34-11Z  # (verified: exact tags exist there)
     restart: unless-stopped
     command: server /data --console-address ":9001"
     networks: [data]
