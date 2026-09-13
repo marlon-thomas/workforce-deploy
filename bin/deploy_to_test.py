@@ -5,7 +5,9 @@ from any operating system (Windows, macOS, Linux).
 
   STEP 0  host prerequisites, checked per-OS. READ-ONLY: this script never
           uses sudo. One-time privileged fixes live in
-          ../host-setup/setup-host.py (sudo python3 setup-host.py,
+          ../host-setup/setup-host.py — invoked AUTOMATICALLY via sudo
+          when it detects something it fixes, so the human is only asked for
+          what genuinely cannot be scripted (re-login, browser auth);
           idempotent) — missing prerequisites are pointed there.
   STEP 1  boot the bare Ubuntu appliance      (vagrant up + snapshot)
   STEP 2  verify the guest has internet       (HTTPS probe; gentle recovery)
@@ -96,6 +98,27 @@ if OS == "Linux":
 
 MISSING = []
 
+# Privileged fixes the script CAN run itself via sudo (the sudo prompt lands
+# on the user's TTY). "The deploy script never runs as root" is about its own
+# privileges — it must not offload known, idempotent, one-command fixes to the
+# human. Genuinely human-only items (re-login for group membership, browser
+# auth at the DNS/tailscale providers, the service-user password) stay in
+# MISSING + pause_for_manual.
+PRIV_TASKS = []
+SETUP_HOST = os.path.normpath(
+    os.path.join(HERE, "..", "host-setup", "setup-host.py"))
+
+
+def priv(why, cmds):
+    """Register an idempotent privileged fix (deduped by first command)."""
+    key = " ".join(map(str, cmds[0]))
+    for t in PRIV_TASKS:
+        if t["key"] == key:
+            if why not in t["whys"]:
+                t["whys"].append(why)
+            return
+    PRIV_TASKS.append({"key": key, "whys": [why], "cmds": cmds})
+
 
 def say(msg=""):
     print(msg, flush=True)
@@ -164,6 +187,7 @@ def pause_for_manual(instructions):
 def step0(attempts=0):
     say("\n───────── STEP 0: host prerequisites ─────────")
     MISSING.clear()
+    PRIV_TASKS.clear()
 
     # Fedora: libxcrypt-compat BEFORE anything vagrant — Vagrant's embedded
     # Ruby won't even start without it.
@@ -173,8 +197,8 @@ def step0(attempts=0):
         if r.returncode == 0:
             ok("libxcrypt-compat (Fedora)")
         else:
-            MISSING.append("libxcrypt-compat missing — run once:  "
-                           "sudo python3 deploy/host-setup/setup-host.py")
+            priv("libxcrypt-compat missing (Vagrant's Ruby needs it)",
+                 [["sudo", "python3", SETUP_HOST]])
 
     # vagrant: present AND runnable
     vagrant_ok = False
@@ -216,8 +240,8 @@ def step0(attempts=0):
                                check=False).returncode != 0:
             # Fedora 40+ runs the modular daemons: virtqemud is active while
             # libvirtd stays inactive/socket-activated — accept either.
-            MISSING.append("libvirtd is not running — run once:  "
-                           "sudo python3 deploy/host-setup/setup-host.py")
+            priv("libvirt daemons not running (libvirtd and virtqemud "
+                 "both inactive)", [["sudo", "python3", SETUP_HOST]])
         if have("virsh"):
             r = sh_out(["virsh", "-c", "qemu:///system", "list", "--all"])
             if r.returncode == 0:
@@ -236,18 +260,16 @@ def step0(attempts=0):
             if net_active:
                 ok("libvirt default network (NAT)")
             else:
-                MISSING.append("libvirt default network is inactive — run "
-                               "once:  sudo python3 "
-                               "deploy/host-setup/setup-host.py")
+                priv("libvirt default network inactive",
+                     [["sudo", "python3", SETUP_HOST]])
             # firewalld forwards virbr0
             if have("firewall-cmd"):
                 az = sh_out(["firewall-cmd", "--get-active-zones"])
                 if "virbr0" in (az.stdout or ""):
                     ok("firewalld forwards virbr0 (guest internet)")
                 else:
-                    MISSING.append("firewalld is not forwarding virbr0 — "
-                                   "run once:  sudo python3 "
-                                   "deploy/host-setup/setup-host.py")
+                    priv("firewalld not forwarding virbr0",
+                     [["sudo", "python3", SETUP_HOST]])
     else:
         if have("VBoxManage") or have("virtualbox"):
             ok("VirtualBox")
@@ -277,10 +299,9 @@ def step0(attempts=0):
             if os.path.exists(dropin):
                 ok("docker↔libvirt forwarding fix (persistent)")
             else:
-                MISSING.append("docker↔libvirt forwarding fix not installed "
-                               "(docker's FORWARD DROP swallows guest "
-                               "traffic) — run once:  sudo python3 "
-                               "deploy/host-setup/setup-host.py")
+                priv("docker↔libvirt forwarding drop-in missing "
+                     "(docker's FORWARD DROP swallows guest traffic)",
+                     [["sudo", "python3", SETUP_HOST]])
 
     # paramiko
     try:
@@ -349,11 +370,44 @@ def step0(attempts=0):
                     anchor = ("/etc/pki/ca-trust/source/anchors/care-angels-testca.crt"
                               if DISTRO == "fedora" else
                               "/usr/local/share/ca-certificates/care-angels-testca.crt")
-                    refresh = ("sudo update-ca-trust" if DISTRO == "fedora"
-                               else "sudo update-ca-certificates")
-                    MISSING.append(
-                        "test root CA not yet trusted HERE (one-time) — run:  "
-                        f"sudo cp '{os.path.join(ca_dir, 'ca.crt')}' {anchor} && {refresh}")
+                    refresh = ("update-ca-trust" if DISTRO == "fedora"
+                               else "update-ca-certificates")
+                    priv("import the test root CA into this machine's "
+                         "trust store",
+                         [["sudo", "cp", os.path.join(ca_dir, "ca.crt"), anchor],
+                          ["sudo", refresh]])
+
+    # Privileged fixes we CAN take ourselves: run them via sudo now (the
+    # password prompt lands on this TTY) and re-probe, instead of pushing a
+    # "run this in another terminal" errand on the human. If sudo fails or
+    # there is no TTY, the item degrades to the manual list.
+    if PRIV_TASKS:
+        if attempts >= 2:
+            for t in PRIV_TASKS:
+                MISSING.append(t["whys"][0] + " — manual:  "
+                               + " &&  ".join(" ".join(c) for c in t["cmds"]))
+            PRIV_TASKS.clear()
+        else:
+            say("Privileged host fixes available — running them now via "
+                "sudo (a password prompt may appear):")
+            for t in PRIV_TASKS:
+                for w in t["whys"]:
+                    print(f"    - {w}")
+            failed = []
+            for t in PRIV_TASKS:
+                for c in t["cmds"]:
+                    try:
+                        rc = subprocess.run(c).returncode
+                    except Exception:
+                        rc = 127
+                    if rc != 0:
+                        failed.append((t, c))
+                        break
+            PRIV_TASKS.clear()
+            for t, c in failed:
+                MISSING.append(t["whys"][0] + " — auto-fix failed; run:  "
+                               + " ".join(map(str, c)))
+            return step0(attempts + 1)
 
     if MISSING:
         if attempts >= 2:
