@@ -28,6 +28,7 @@ import argparse
 import getpass
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -295,20 +296,64 @@ def step0(attempts=0):
             MISSING.append(f"paramiko — run:  {sys.executable} "
                            "-m pip install --user paramiko")
 
-    # TLS material for the test environment's mode (env file decides; we just
-    # honour it): certs mode needs the workstation private CA to exist.
+    # TLS material for the test environment's mode (the env file decides; we
+    # just honour it). certs mode: a workstation private CA must exist AND be
+    # trusted here. Fully idempotent — "already done" states are detected and
+    # skipped; only the one-time sudo trust import is ever escalated.
     tenv = _load_test_env()
     if tenv.get("TLS_MODE") == "certs":
-        ca_dir = os.path.expanduser(
-            tenv.get("TLS_CA_DIR", "~/.config/workforce-dev/testca"))
-        missing = [n for n in ("tls.crt", "tls.key", "ca.crt")
-                   if not os.path.isfile(os.path.join(ca_dir, n))]
-        if missing:
-            MISSING.append(f"test CA leaf incomplete in {ca_dir} ({', '.join(missing)})"
-                           " — run once:  deploy/bin/gen-test-ca.sh test"
-                           "   …then import ca.crt into this machine's trust store")
+        if not have("openssl"):
+            MISSING.append("openssl — needed for the private test CA "
+                           "(dnf/apt install openssl)")
         else:
-            ok(f"test CA leaf present ({ca_dir})")
+            ca_dir = os.path.expanduser(
+                tenv.get("TLS_CA_DIR", "~/.config/workforce-dev/testca"))
+            want_hosts = {f"{tenv.get('WF_SUBDOMAIN')}.{tenv.get('BASE_DOMAIN')}",
+                          f"{tenv.get('AUTH_SUBDOMAIN')}.{tenv.get('BASE_DOMAIN')}"}
+            leaf = os.path.join(ca_dir, "tls.crt")
+
+            def _san_hosts():
+                """DNS names on the leaf's SAN (set), or None when unreadable."""
+                r = sh_out(["openssl", "x509", "-in", leaf, "-noout",
+                            "-ext", "subjectAltName"])
+                if r.returncode != 0:
+                    return None
+                return set(re.findall(r"DNS:([^,\s]+)", r.stdout or ""))
+
+            def _ready():
+                return all(os.path.isfile(os.path.join(ca_dir, n))
+                           for n in ("tls.crt", "tls.key", "ca.crt")) \
+                    and _san_hosts() == want_hosts
+
+            if _ready():
+                ok(f"test CA leaf matches this environment's hostnames ({ca_dir})")
+            else:
+                note("private test CA missing or stale for these hostnames — "
+                     "generating (root reused if it already exists)…")
+                try:
+                    sh(["bash", os.path.join(HERE, "gen-test-ca.sh"), "test"])
+                except SystemExit:
+                    pass
+                ok("test CA + leaf generated") if _ready() else MISSING.append(
+                    "gen-test-ca.sh failed — run manually:  "
+                    "bash deploy/bin/gen-test-ca.sh test")
+
+            if _ready():
+                # Is the root ACTUALLY trusted on this machine? The definitive
+                # check verifies the leaf against the system default store
+                # (distro-agnostic; 'OK' only after a real import).
+                v = sh_out(["openssl", "verify", leaf])
+                if v.returncode == 0:
+                    ok("test root CA trusted by this machine (system store)")
+                else:
+                    anchor = ("/etc/pki/ca-trust/source/anchors/care-angels-testca.crt"
+                              if DISTRO == "fedora" else
+                              "/usr/local/share/ca-certificates/care-angels-testca.crt")
+                    refresh = ("sudo update-ca-trust" if DISTRO == "fedora"
+                               else "sudo update-ca-certificates")
+                    MISSING.append(
+                        "test root CA not yet trusted HERE (one-time) — run:  "
+                        f"sudo cp '{os.path.join(ca_dir, 'ca.crt')}' {anchor} && {refresh}")
 
     if MISSING:
         if attempts >= 2:
