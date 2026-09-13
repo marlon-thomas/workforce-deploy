@@ -231,14 +231,29 @@ def interactive_shell(client, cmd):
     chan.get_pty(term="xterm", width=terminal_width(), height=40)
     chan.invoke_shell() if not cmd else chan.exec_command(cmd)
     import select
-    import tty
-    import termios
 
-    old_attrs = termios.tcgetattr(sys.stdin)
-    tty.setraw(sys.stdin.fileno())
+    # Raw-mode keyboard forwarding needs a real local TTY. Without one
+    # (CI, agents, nohup) fall back to a pure output pump: the remote PTY
+    # still renders the installer live, but nothing can be typed — a run
+    # that needs prompt answers must happen from a real terminal. A
+    # resumed install (.env present) never prompts and works here.
+    interactive = sys.stdin.isatty()
+    old_attrs = None
+    if interactive:
+        import tty
+        import termios
+        try:
+            old_attrs = termios.tcgetattr(sys.stdin)
+            tty.setraw(sys.stdin.fileno())
+        except Exception:
+            interactive, old_attrs = False, None
+    if not interactive:
+        print("(no local TTY: forwarding installer output only — if it "
+              "prompts for input it will block; resumed installs do not)")
     try:
         while True:
-            r, _, _ = select.select([chan, sys.stdin], [], [], 0.05)
+            r, _, _ = select.select([chan] + ([sys.stdin] if interactive else []),
+                                    [], [], 0.05)
             if chan in r:
                 try:
                     data = chan.recv(4096)
@@ -248,7 +263,7 @@ def interactive_shell(client, cmd):
                     break
                 sys.stdout.write(data.decode(errors="replace"))
                 sys.stdout.flush()
-            if sys.stdin in r:
+            if interactive and sys.stdin in r:
                 data = sys.stdin.read(1)
                 if not data:
                     break
@@ -258,7 +273,8 @@ def interactive_shell(client, cmd):
     except KeyboardInterrupt:
         print("\n(bootstrap interrupted — the remote installer may still be running)")
     finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_attrs)
+        if old_attrs is not None:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_attrs)
     # Propagate the remote exit status — a silent installer failure must
     # never look like success (the banner below is printed by the caller).
     try:
