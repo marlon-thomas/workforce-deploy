@@ -356,14 +356,14 @@ PROF
   # Content = the api image's own default cacerts (identical to what the JVM
   # would use anyway; exists so the mount is a real file).
   if [ -d secrets/api-truststore.jks ]; then rm -rf secrets/api-truststore.jks; fi
+  # Root phase: API_IMAGE/APP_VERSION are not defined yet — use the
+  # literal published reference (same image the .env will pin).
+  SUITE_IMAGE="ghcr.io/marlon-thomas/workforce-suite:${APP_VERSION:-0.2.2}"
+  DSU="sudo -u $SERVICE_USER env HOME=/home/$SERVICE_USER \
+    XDG_RUNTIME_DIR=/run/user/$(id -u $SERVICE_USER) \
+    DOCKER_HOST=unix:///run/user/$(id -u $SERVICE_USER)/docker.sock"
   if [ ! -f secrets/api-truststore.jks ]; then
     echo "Creating the JVM truststore (secrets/api-truststore.jks)…"
-    # Root phase: API_IMAGE/APP_VERSION are not defined yet — use the
-    # literal published reference (same image the .env will pin).
-    SUITE_IMAGE="ghcr.io/marlon-thomas/workforce-suite:${APP_VERSION:-0.2.2}"
-    DSU="sudo -u $SERVICE_USER env HOME=/home/$SERVICE_USER \
-      XDG_RUNTIME_DIR=/run/user/$(id -u $SERVICE_USER) \
-      DOCKER_HOST=unix:///run/user/$(id -u $SERVICE_USER)/docker.sock"
     $DSU docker pull "${SUITE_IMAGE}" >/dev/null 2>&1 || true
     CID=$($DSU docker create --entrypoint sh "${SUITE_IMAGE}" 2>/dev/null || true)
     if [ -n "${CID}" ]; then
@@ -374,6 +374,25 @@ PROF
     fi
     chown "$SERVICE_USER:$SERVICE_USER" secrets/api-truststore.jks 2>/dev/null || true
     chmod 644 secrets/api-truststore.jks 2>/dev/null || true
+  fi
+  # TLS_MODE=certs: the api JVM fetches OIDC discovery over HTTPS from the
+  # PUBLIC issuer URL (it is baked into tokens and must match the browser's
+  # view), so the gateway presents the local test CA — import its root into
+  # the JVM truststore. Idempotent: "alias exists" counts as done. Recreate
+  # api/worker only on a fresh import (bind-mounted file changes do not reach
+  # a running container's inode, and `restart` is not enough).
+  if [ -s secrets/tls/ca.crt ] && [ -f secrets/api-truststore.jks ]; then
+    if $DSU docker run --rm --entrypoint sh \
+        -v "$PWD/secrets:/s:Z" "${SUITE_IMAGE}" \
+        -c 'keytool -importcert -noprompt -alias care-angels-test-ca \
+            -file /s/tls/ca.crt -keystore /s/api-truststore.jks \
+            -storepass changeit' >/dev/null 2>&1; then
+      echo "Imported the test root CA into the JVM truststore; recreating api/worker…"
+      chown "$SERVICE_USER:$SERVICE_USER" secrets/api-truststore.jks 2>/dev/null || true
+      chmod 644 secrets/api-truststore.jks 2>/dev/null || true
+      $DSU docker compose -f compose.yaml --env-file .env \
+        up -d --force-recreate api worker >/dev/null 2>&1 || true
+    fi
   fi
 
   # Base packages the playbook's common role would install in the
