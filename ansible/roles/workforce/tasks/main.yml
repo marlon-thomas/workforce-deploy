@@ -27,9 +27,10 @@
   ansible.builtin.shell: |
     set -o pipefail
     docker exec workforce-deploy-authentik-postgres-1 psql -U authentik -d authentik -t -A -c \
-      "SELECT c.certificate_data FROM authentik_providers_oauth2_oauth2provider p \
+      "SELECT c.certificate_data FROM authentik_core_application a \
+         JOIN authentik_providers_oauth2_oauth2provider p ON p.provider_ptr_id = a.provider_id \
          JOIN authentik_crypto_certificatekeypair c ON c.kp_uuid = p.signing_key_id \
-        WHERE p.name = 'workforce'" \
+        WHERE a.name = 'Workforce'" \
       | openssl x509 -pubkey -noout > /opt/workforce-deploy/secrets/oidc_signing_pub.pem
     chmod 644 /opt/workforce-deploy/secrets/oidc_signing_pub.pem
   args:
