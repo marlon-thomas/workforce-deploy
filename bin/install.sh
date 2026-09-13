@@ -358,7 +358,7 @@ PROF
   if [ -d secrets/api-truststore.jks ]; then rm -rf secrets/api-truststore.jks; fi
   # Root phase: API_IMAGE/APP_VERSION are not defined yet — use the
   # literal published reference (same image the .env will pin).
-  SUITE_IMAGE="ghcr.io/marlon-thomas/workforce-suite:${APP_VERSION:-0.2.2}"
+  SUITE_IMAGE="ghcr.io/marlon-thomas/workforce-suite:${APP_VERSION:-0.2.9}"
   DSU="sudo -u $SERVICE_USER env HOME=/home/$SERVICE_USER \
     XDG_RUNTIME_DIR=/run/user/$(id -u $SERVICE_USER) \
     DOCKER_HOST=unix:///run/user/$(id -u $SERVICE_USER)/docker.sock"
@@ -621,7 +621,7 @@ AK_DB_USER=authentik
 OIDC_ISSUER=https://${AUTH_HOSTNAME}/application/o/workforce/
 
 API_IMAGE=ghcr.io/marlon-thomas/workforce-suite
-APP_VERSION=${APP_VERSION:-0.2.2}
+APP_VERSION=${APP_VERSION:-0.2.9}
 
 BACKUP_TARGET=${BACKUP_TARGET}
 ENV
