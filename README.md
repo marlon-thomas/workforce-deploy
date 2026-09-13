@@ -1,3 +1,15 @@
+# Care Angels Workforce Platform — Deployment Apparatus (public)
+
+**This repository is the single source of truth for all deployment
+apparatus** (ADR-0010 in the private source repo): installers, compose,
+ansible, blueprints, gateway, Vagrant environments and host prep. The
+application source is closed; its **versioned images are published to GHCR
+and require a `read:packages` GitHub PAT** — the same credential
+`install.sh` prompts for, and the licensing gate for future releases.
+Change the apparatus here; do **not** mirror it into the private repo.
+The product documentation below predates the split and is being rewritten
+for operators.
+
 # Care Angels Workforce Platform — Training Matrix (Phase 1)
 
 Secure, multi-tenant workforce training-matrix platform for supported-living and social-care
