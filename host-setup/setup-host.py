@@ -90,6 +90,26 @@ def ensure_libxcrypt():
     done("libxcrypt-compat installed (Fedora)")
 
 
+def ensure_br_netfilter():
+    """Docker's bridge networking wants br_netfilter (bridge-nf sysctls).
+    It is usually loaded incidentally by libvirt's network start — after a
+    reboot/daemon churn the load can be missing and freshly created
+    containers silently lose their ethernet attachment. Load now + persist."""
+    if sh(["lsmod"]).stdout.count("br_netfilter") == 0 and \
+            sh(["modprobe", "br_netfilter"]).returncode != 0:
+        return note("br_netfilter unavailable (custom kernel?) — skipping")
+    if sh(["lsmod"]).stdout.count("br_netfilter"):
+        done("br_netfilter loaded")
+    conf = "/etc/modules-load.d/workforce-br-netfilter.conf"
+    if not os.path.exists(conf):
+        with open(conf, "w") as fh:
+            fh.write("br_netfilter\n")
+        done("br_netfilter persisted (modules-load.d)")
+    else:
+        skipped("br_netfilter already persisted")
+    sh(["sysctl", "-w", "net.bridge.bridge-nf-call-iptables=1"])
+
+
 def ensure_libvirtd():
     if not shutil.which("virsh"):
         note("installing libvirt…")
@@ -102,11 +122,16 @@ def ensure_libvirtd():
         else:
             return
         done("libvirt installed")
-    if sh(["systemctl", "is-active", "--quiet", "libvirtd"]).returncode != 0:
+    # Fedora 40+ ships modular daemons: virtqemud active while libvirtd stays
+    # inactive/socket-activated. Treating that as "not running" wrongly enables
+    # the monolith (today's incident class) — accept either.
+    running = (sh(["systemctl", "is-active", "--quiet", "libvirtd"]).returncode == 0
+               or sh(["systemctl", "is-active", "--quiet", "virtqemud"]).returncode == 0)
+    if running:
+        skipped("libvirt daemon running (libvirtd or virtqemud)")
+    else:
         sh(["systemctl", "enable", "--now", "libvirtd"])
         done("libvirtd enabled + started")
-    else:
-        skipped("libvirtd already running")
 
 
 def ensure_default_net():
@@ -204,6 +229,7 @@ def main():
     print("  Workforce dev host setup (privileged, idempotent)")
     print("═══════════════════════════════════════════════════════")
     ensure_libxcrypt()
+    ensure_br_netfilter()
     ensure_libvirtd()
     ensure_default_net()
     ensure_firewalld_forwarding()
