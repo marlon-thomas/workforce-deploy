@@ -20,7 +20,7 @@ entries:
       client_secret: {{ oidc_client_secret }}
       # Without a signing_key the provider publishes an EMPTY JWKS and
       # every id_token fails validation ("no matching key(s) found").
-      signing_key: !Find [authentik_crypto_certificatekeypair, [name, "authentik Self-signed Certificate"]]
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, "authentik Self-signed Certificate"]]
       sub_mode: user_email
       access_token_validity: hours=1
       refresh_token_validity: days=30
