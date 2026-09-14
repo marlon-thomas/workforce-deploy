@@ -57,7 +57,15 @@ echo "==> Fetching the deployment bundle straight to its final home…"
 # installer wants to live) and later runs just `git pull` it. Untracked
 # state there (.env, secrets/) is never touched by a pull.
 if [ -d /opt/workforce-deploy/.git ]; then
+# Pull as the checkout's OWNER (the installer chowns the bundle to the service
+# user; git refuses cross-owner pulls, and a root pull would litter root-owned
+# files through the service user's working tree).
+OWNER=$(sudo stat -c '%U' /opt/workforce-deploy/.git)
+if [ "$OWNER" = root ]; then
   sudo git -C /opt/workforce-deploy pull -q --ff-only
+else
+  sudo sudo -u "$OWNER" git -C /opt/workforce-deploy pull -q --ff-only
+fi
 else
   # Old installs left a staged/pointer clone under the vagrant home — drop it.
   sudo rm -rf /home/vagrant/workforce-deploy
@@ -93,7 +101,15 @@ apt-get update -qq >/dev/null
 apt-get install -y -qq git curl ca-certificates >/dev/null
 echo "==> Fetching the deployment bundle straight to its final home…"
 if [ -d /opt/workforce-deploy/.git ]; then
+# Pull as the checkout's OWNER (the installer chowns the bundle to the service
+# user; git refuses cross-owner pulls, and a root pull would litter root-owned
+# files through the service user's working tree).
+OWNER=$(stat -c '%U' /opt/workforce-deploy/.git)
+if [ "$OWNER" = root ]; then
   git -C /opt/workforce-deploy pull -q --ff-only
+else
+  sudo -u "$OWNER" git -C /opt/workforce-deploy pull -q --ff-only
+fi
 else
   rm -rf /root/workforce-deploy
   git clone -q {repo} /opt/workforce-deploy
