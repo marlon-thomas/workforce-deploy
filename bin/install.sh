@@ -17,6 +17,9 @@ cd "$(dirname "$0")/.."   # bundle root
 
 SMOKE=0
 SYSTEM_DOCKER=0
+# Default for every phase/root-vs-service path (set -u kills raw $SERVICE_USER
+# reads on a truly fresh service-phase run — the fresh install must work too).
+SERVICE_USER="${SERVICE_USER:-workforce_app_sa}"
 ENV_NAME_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
