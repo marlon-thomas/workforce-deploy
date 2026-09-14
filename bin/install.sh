@@ -591,7 +591,7 @@ GATEWAY_CADDYFILE_DEFAULT="./gateway/Caddyfile"
 case "${TLS_MODE:-http01}" in
   dns01)
     if [ "${SMOKE}" -eq 0 ]; then
-      GATEWAY_IMAGE_DEFAULT="ghcr.io/marlon-thomas/workforce-gateway:latest"
+      GATEWAY_IMAGE_DEFAULT="ghcr.io/marlon-thomas/workforce-deploy-gateway:latest"
       GATEWAY_CADDYFILE_DEFAULT="./gateway/Caddyfile.duckdns"
     fi ;;
   certs)
