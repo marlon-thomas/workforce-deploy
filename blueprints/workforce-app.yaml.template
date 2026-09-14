@@ -24,7 +24,7 @@ entries:
       client_secret: ${OIDC_CLIENT_SECRET}
       # Without a signing_key the provider publishes an EMPTY JWKS and every
       # id_token fails validation ("no matching key(s) found").
-      signing_key: !Find [authentik_crypto_certificatekeypair, [name, "authentik Self-signed Certificate"]]
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, "authentik Self-signed Certificate"]]
       # sub MUST be the immutable uuid: user_email produced EMPTY sub for
       # users without an email (raw ak-shell creations), breaking the
       # app_user link with "principalName cannot be empty" 500s; email is
