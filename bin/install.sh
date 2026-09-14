@@ -221,6 +221,38 @@ all:
       run_root_tasks: false
 INV
   say "Converging the platform (ansible playbook — identity plane, blueprint, app plane)…"
+  # First boots spend minutes inside ONE task with no ansible output (health
+  # waits, blueprint import) — indistinguishable from a hang. This single
+  # status line refreshes in place with the REAL container states, so what it
+  # shows is always the truth of what is still starting. TTY-only: CI/nohup
+  # logs stay clean; kill-on-exit trap keeps an orphaned spinner impossible.
+  ticker_pid=""
+  if [ -t 1 ] || [ "${FORCE_STATUS:-}" = "1" ]; then
+    (
+      frames='|/-\\'; i=0; t0=$SECONDS
+      while :; do
+        sleep 3
+        printf -v spin '%s' "${frames:$((i % 4)):1}"; i=$((i + 1))
+        sum=$(DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock" docker ps -a \
+              --format '{{.Names}} {{.Status}}' 2>/dev/null | awk '
+          { name = $1; sub(/^workforce-deploy-/, "", name); sub(/-[0-9]+$/, "", name)
+            if ($0 ~ /Exited \(0\)/) next
+            total++
+            if ($2 != "Up")         { w = w name " " tolower($2) ", ";  next }
+            if ($0 ~ /health: starting/) { w = w name " starting, "; next }
+            if ($0 ~ /unhealthy/)        { w = w name " unhealthy, "; next }
+            ready++ }
+          END { gsub(/, $/, "", w)
+                out = ready + 0 "/" total + 0 " containers"
+                if (w != "") out = out " — waiting: " w
+                print out }')
+        printf '\r\033[K  %s [%ds] converging — %s' "$spin" $((SECONDS - t0)) "${sum:-waiting for docker…}"
+      done
+    ) &
+    ticker_pid=$!
+    trap '[ -n "${ticker_pid:-}" ] && kill "$ticker_pid" 2>/dev/null' EXIT
+  fi
+
   ansible-playbook -i inventories/local/hosts.yml ansible/site.yml \
     --connection=local -e "ansible_connection=local" \
     -e "app_hostname=${APP_HOSTNAME}" \
@@ -230,6 +262,12 @@ INV
     -e "github_token=${GITHUB_TOKEN}" \
     -e "ak_admin_password=${ADMIN_PASSWORD}" \
     -e "acme_email=${ACME_EMAIL}"
+
+  if [ -n "$ticker_pid" ]; then
+    kill "$ticker_pid" 2>/dev/null; wait "$ticker_pid" 2>/dev/null || true
+    printf '\r\033[K'
+    trap - EXIT
+  fi
 }
 
 bootstrap() {
