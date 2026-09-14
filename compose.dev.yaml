@@ -1,0 +1,43 @@
+# Local development overrides (spec §10.2).
+# Runs ONLY the supporting infrastructure with host-mapped ports so you can run
+# the API locally with `mvn spring-boot:run` (no need to build the image).
+#
+#   docker compose -f compose.yaml -f compose.dev.yaml up -d postgres object-storage clamav gotenberg init migrate
+#
+# NOTE: host ports avoid clashes with other local containers:
+#   postgres 5434, minio 9100/9101, gotenberg 3100, clamd 3310.
+# The `auth` profile adds a local authentik for realistic OIDC testing:
+#   docker compose -f compose.yaml -f compose.dev.yaml --profile auth up -d authentik-postgres authentik-server authentik-worker
+
+services:
+  postgres:
+    ports: ["5434:5432"]
+
+  object-storage:
+    ports: ["9100:9000", "9101:9001"]
+
+  clamav:
+    ports: ["3310:3310"]
+
+  gotenberg:
+    ports: ["3100:3000"]
+
+  authentik-postgres:
+    ports: ["5433:5432"]
+    profiles: ["auth"]
+
+  authentik-server:
+    profiles: ["auth"]
+    ports: ["9029:9000", "9444:9443"]
+
+  authentik-worker:
+    profiles: ["auth"]
+
+  # Local runs keep Flyway embedded in the app; skip the one-shot services.
+  migrate:
+    command: ["true"]
+    image: busybox:1.36
+
+  init:
+    command: ["true"]
+    image: busybox:1.36
