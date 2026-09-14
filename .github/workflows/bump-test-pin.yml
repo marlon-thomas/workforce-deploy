@@ -1,0 +1,26 @@
+# bump-test-pin — called by the PRIVATE source repo after each release-image
+# publish (ADR-0010): pin environments/test.env to the newly released version
+# so fresh test installs run the latest good build. Prod pins are never touched
+# here — those are human decisions.
+name: bump-test-pin
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: suite version released in the private source repo
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin test env to ${{ inputs.version }}
+        run: |
+          sed -i "s/^APP_VERSION=.*/APP_VERSION=${{ inputs.version }}/" environments/test.env
+          git config user.name "bump-test-pin[bot]"
+          git config user.email "1000+marlon-thomas@users.noreply.github.com"
+          git commit -am "chore(ci): test env pins suite ${{ inputs.version }} (published from private source)" --allow-empty
+          git push
