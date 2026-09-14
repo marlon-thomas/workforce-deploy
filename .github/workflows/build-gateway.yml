@@ -2,6 +2,7 @@
 # appliances that cannot do HTTP-01). Machinery, built here since ADR-0010.
 name: build-gateway
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
     paths: [ gateway/**, .github/workflows/build-gateway.yml ]
