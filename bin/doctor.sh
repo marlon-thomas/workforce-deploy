@@ -116,12 +116,12 @@ esac
 # --- disk + backups
 DISK_PCT=$(df --output=pcent /var/lib/docker 2>/dev/null | tail -1 | tr -dc '0-9' || df / | tail -1 | tr -dc '0-9')
 [ "${DISK_PCT:-0}" -lt 85 ] && row "disk space" ok "${DISK_PCT}% used" || row "disk space" warn "${DISK_PCT}% used — consider archiving"
-LATEST=$(ls -1t backups/*.tar.gz 2>/dev/null | head -1)
+LATEST=$( { ls -1t backups/*.tar.gz 2>/dev/null || true; } | head -1 )
 if [ -n "$LATEST" ]; then
   AGE_H=$(( ( $(date +%s) - $(stat -c %Y "$LATEST") ) / 3600 ))
   [ "$AGE_H" -lt 26 ] && row "last backup" ok "$AGE_H h ago" || row "last backup" warn "$AGE_H h old — run ./bin/backup.sh"
 else
-  row "last backup" fail "no backups found"
+  row "last backup" warn "none yet — ./bin/backup.sh after your first data entry"
 fi
 
 # --- license (slot; populated when licensing ships)

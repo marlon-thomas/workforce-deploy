@@ -507,7 +507,9 @@ if [ -f .env ]; then
     # and never reverts an existing admin password.
     ADMIN_PASSWORD="$(openssl rand -base64 18)"
     run_ansible_site
-    ./bin/doctor.sh
+    # informational report — the playbook already gated on health; never let
+    # a warn row abort a converged resume
+    ./bin/doctor.sh || true
     echo ""
     echo "Re-run ./bin/update.sh <version> to change versions."
     exit 0
