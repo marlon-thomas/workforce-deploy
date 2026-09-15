@@ -253,6 +253,26 @@ INV
     trap '[ -n "${ticker_pid:-}" ] && kill "$ticker_pid" 2>/dev/null' EXIT
   fi
 
+  # Gateway config fallbacks for boxes whose .env predates (or whose template
+  # dropped) the GATEWAY_* keys — TLS_MODE from the environment file is the
+  # authority; without this, compose silently falls back to the Let's Encrypt
+  # Caddyfile, which can never self-issue for tailnet-only test domains.
+  GW_CADDYFILE="${GATEWAY_CADDYFILE:-}"
+  if [ -z "$GW_CADDYFILE" ]; then
+    case "${TLS_MODE:-http01}" in
+      certs) GW_CADDYFILE="./gateway/Caddyfile.localca" ;;
+      dns01) GW_CADDYFILE="./gateway/Caddyfile.duckdns" ;;
+      *)     GW_CADDYFILE="./gateway/Caddyfile" ;;
+    esac
+  fi
+  GW_IMAGE="${GATEWAY_IMAGE:-}"
+  if [ -z "$GW_IMAGE" ]; then
+    if [ "${TLS_MODE:-http01}" = "dns01" ] && [ "${SMOKE:-0}" = "0" ]; then
+      GW_IMAGE="ghcr.io/marlon-thomas/workforce-deploy-gateway:latest"
+    else
+      GW_IMAGE="caddy:2.8.4"
+    fi
+  fi
   ansible-playbook -i inventories/local/hosts.yml ansible/site.yml \
     --connection=local -e "ansible_connection=local" \
     -e "app_hostname=${APP_HOSTNAME}" \
@@ -261,7 +281,11 @@ INV
     -e "service_user=${SERVICE_USER:-workforce_app_sa}" \
     -e "github_token=${GITHUB_TOKEN}" \
     -e "ak_admin_password=${ADMIN_PASSWORD}" \
-    -e "acme_email=${ACME_EMAIL}"
+    -e "acme_email=${ACME_EMAIL}" \
+    -e "app_version=${APP_VERSION:-0.2.9}" \
+    -e "gateway_image=${GW_IMAGE}" \
+    -e "gateway_caddyfile=${GW_CADDYFILE}" \
+    -e "duckdns_api_token=${DUCKDNS_API_TOKEN:-}"
 
   if [ -n "$ticker_pid" ]; then
     kill "$ticker_pid" 2>/dev/null; wait "$ticker_pid" 2>/dev/null || true
