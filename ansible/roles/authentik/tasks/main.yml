@@ -91,7 +91,7 @@
     periodic scan — observed to silently stop scheduling, and an 'error'
     instance persists until force-reapplied)
   community.docker.docker_container_exec:
-    container: workforce-deploy-authentik-server-1
+    container_name: workforce-deploy-authentik-server-1
     command: python
     arguments:
       - /manage.py
@@ -99,7 +99,7 @@
       - /blueprints/workforce-app.yaml
     working_directory: /
   register: ak_bp
-  until: ak_bp.rc == 0 and 'Blueprint invalid' not in (ak_bp.stdout | default(''))
+  until: (ak_bp.rc | default(1)) == 0 and 'Blueprint invalid' not in (ak_bp.stdout | default(''))
   retries: 12
   delay: 10
   environment:
@@ -111,14 +111,14 @@
     public path via its build-meta check). A public probe here can only
     fail or burn 900s by design.
   community.docker.docker_container_exec:
-    container: workforce-deploy-authentik-server-1
+    container_name: workforce-deploy-authentik-server-1
     command: python
     arguments:
       - -c
       - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9000/application/o/workforce/.well-known/openid-configuration', timeout=5).status == 200 else 1)"
     working_directory: /
   register: ak_disc
-  until: ak_disc.rc == 0
+  until: (ak_disc.rc | default(1)) == 0
   retries: 18
   delay: 10
   environment:
