@@ -58,7 +58,11 @@
       - ak-redis
       - authentik-server
       - authentik-worker
-      - gateway
+      # NOTE: gateway deliberately NOT here — it hard-depends on api, whose
+      # discovery-gate sidecar can only turn healthy after the blueprint
+      # import tasks below finish. Including it deadlocks this call (api sits
+      # Created, gateway waits, forever). The workforce role's full-stack up
+      # starts gateway once the app plane is admissible.
       - postgres
       - object-storage
       - clamav
