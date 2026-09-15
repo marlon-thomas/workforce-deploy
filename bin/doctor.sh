@@ -91,8 +91,6 @@ case "$FW" in
 esac
 
 # --- storage
-ST="$(docker compose exec -T -w /tmp object-storage sh -c \
-  'mc alias set local "$($$ 2>/dev/null; echo)"' 2>/dev/null; echo "")"
 if docker compose exec -T object-storage mc ready local >/dev/null 2>&1; then
   row "object storage" ok "ready"
 else
