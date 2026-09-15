@@ -55,7 +55,10 @@ entries:
       name: Administrator
       type: internal
       is_active: true
-      email: {{ acme_email }}
+      # NOT acme_email: in certs-mode test installs that is the placeholder
+      # 'local-ca@invalid', which authentik's serializer rejects — a rejected
+      # entry aborts the whole blueprint import (provider never created).
+      email: admin@{{ auth_hostname }}
       password: {{ ak_admin_password }}
     identifiers:
       username: admin
