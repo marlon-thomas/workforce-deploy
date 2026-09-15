@@ -10,11 +10,18 @@
     group: "{{ service_user }}"
     mode: "0600"
 
-- name: api JVM truststore from the gateway chain (staging-TLS support; harmless in prod)
+- name: api JVM truststore — local test-CA file in certs mode (deterministic,
+    network-free, no race with the gateway's own cert rotation), presented
+    chain via s_client otherwise
   ansible.builtin.shell: |
     set -o pipefail
-    echo | openssl s_client -connect {{ auth_hostname }}:443 -servername {{ auth_hostname }} 2>/dev/null \
-      | openssl x509 -outform DER > /tmp/auth-cert.der
+    if [ -f /opt/workforce-deploy/secrets/tls/ca.crt ]; then
+      openssl x509 -in /opt/workforce-deploy/secrets/tls/ca.crt -outform DER \
+        > /tmp/auth-cert.der
+    else
+      echo | openssl s_client -connect {{ auth_hostname }}:443 -servername {{ auth_hostname }} 2>/dev/null \
+        | openssl x509 -outform DER > /tmp/auth-cert.der
+    fi
     docker run --rm -v /opt/workforce-deploy/secrets:/out eclipse-temurin:25-jre \
       keytool -importcert -noprompt -alias careangels-gateway \
       -file /out/auth-cert.der -keystore /out/api-truststore.jks -storepass changeit
