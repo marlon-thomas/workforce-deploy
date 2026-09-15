@@ -11,9 +11,19 @@ cd "$(dirname "$0")/.."
 
 # Rootless-aware docker context: when run as root on a rootless install, talk to the
 # service user's daemon socket (compose exec etc. need the right socket).
+# When run AS THE SERVICE USER over non-interactive SSH (deploy scripts),
+# .bashrc never ran, so find the rootless socket ourselves.
 resolve_docker_context() {
   if [ "$(id -u)" -eq 0 ] && [ -S "/home/workforce_app_sa/.docker/run/docker.sock" ]; then
     export DOCKER_HOST="unix:///home/workforce_app_sa/.docker/run/docker.sock"
+  elif [ "$(id -u)" -ne 0 ] && [ -z "${DOCKER_HOST:-}" ]; then
+    for s in "$HOME/.docker/run/docker.sock" "/run/user/$(id -u)/docker.sock"; do
+      if [ -S "$s" ]; then
+        export DOCKER_HOST="unix://$s"
+        export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+        break
+      fi
+    done
   fi
 }
 resolve_docker_context

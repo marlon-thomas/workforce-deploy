@@ -15,12 +15,15 @@ from any operating system (Windows, macOS, Linux).
           interactive: GitHub PAT, email, admin password, backup target)
   STEP 4  Tailscale + DuckDNS                 (VM joins your tailnet, records
           point at it — browse from any tailnet device)
+  STEP 5  converge to the pinned version      (deploylib.converge + verify —
+          the SAME shared code deploy_to_prod.py runs; box moves to
+          environments/test.env:APP_VERSION via update.sh)
 
 Usage:
   python3 deploy_to_test.py                 # full journey
   python3 deploy_to_test.py --check-only    # STEP 0 only
   python3 deploy_to_test.py --fresh         # destroy + rebuild the VM first
-  python3 deploy_to_test.py --skip-to N     # resume at step N (runs N..4)
+  python3 deploy_to_test.py --skip-to N     # resume at step N (runs N..5)
 
 Everything the VM runs comes from the deployment bundle (cloned fresh from
 origin by bootstrap.py) — nothing is ever hand-edited in the VM.
@@ -31,6 +34,7 @@ import getpass
 import os
 import platform
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -41,6 +45,8 @@ import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import deploylib                                    # noqa: E402
 ENV_DIR = os.path.normpath(os.path.join(HERE, "..", "environments"))
 BOOTSTRAP = os.path.join(HERE, "bootstrap.py")
 
@@ -544,6 +550,40 @@ def step4():
         restore_terminal()
 
 
+# ============================================================ STEP 5 (version)
+
+def step5_version():
+    """Shared converge+verify: identical code path to deploy_to_prod's.
+    Only the transport differs — here a vagrant ssh as the service user."""
+    say("\n───────── STEP 5: converge to pinned version + verify ─────────")
+    target = TEST_ENV.get("APP_VERSION")
+    if not target:
+        fail("environments/test.env has no APP_VERSION pin")
+
+    def run(cmd):
+        full = ["vagrant", "ssh", "-c",
+                "sudo -n -iu workforce_app_sa bash -lc " + shlex.quote(cmd)]
+        r = sh_out(full, cwd=ENV_DIR)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0:
+            say(out)                       # show what went wrong, not just rc
+        return r.returncode, out
+
+    current = deploylib.box_version(run)
+    if not current:
+        fail("cannot read APP_VERSION from /opt/workforce-deploy/.env on the VM "
+             "(install failed?)")
+    if current == target:
+        ok(f"VM already on the pinned version {target}")
+    else:
+        deploylib.converge(run, target)
+    ca = os.path.expanduser(
+        TEST_ENV.get("TLS_CA_DIR", "~/.config/workforce-dev/testca") + "/ca.crt")
+    require_hostnames()
+    deploylib.verify_buildmeta(f"https://{APP_HOSTNAME}/api/v1/build-meta",
+                               target, cafile=ca, insecure=True)
+
+
 # ============================================================ STEP 3 (tailnet+DNS)
 
 def restore_terminal():
@@ -643,10 +683,10 @@ def main():
                     help="destroy the VM and stop (no redeploy)")
     ap.add_argument("--check-only", action="store_true",
                     help="run STEP 0 (prerequisite report) and exit")
-    ap.add_argument("--skip-to", type=int, default=0, choices=[0, 1, 2, 3, 4],
-                    help="resume at a step (runs that step and everything "
+    ap.add_argument("--skip-to", type=int, default=0, choices=[0, 1, 2, 3, 4, 5],
+                    help="resume at step N (runs that step and everything "
                          "after): 0 prereqs, 1 VM, 2 guest-internet, "
-                         "3 Tailscale+DuckDNS, 4 install")
+                         "3 Tailscale+DuckDNS, 4 install, 5 version converge")
     ap.add_argument("--tailscale-auth-key",
                     help="join the tailnet unattended (else the login URL "
                          "is shown for browser approval)")
@@ -675,6 +715,8 @@ def main():
         step3_tailnet()
     if args.skip_to <= 4:
         step4()
+    if args.skip_to <= 5:
+        step5_version()
 
     require_hostnames()
     say("\n═══════════════════════════════════════════════════════")

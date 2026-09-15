@@ -53,3 +53,30 @@ on the target machine (service user's `~/.docker/config.json`,
 * suite images: `ghcr.io/marlon-thomas/workforce-suite:<semver>` (private; PAT)
 * this repo is tagged `v<major>.<minor>` for apparatus releases; `environments/*.env`
   pins which app version each environment runs
+
+## Operator runbook — build, then deploy
+
+Build and deploy are discrete: the build pipeline only publishes packages to
+GHCR; deploys only pull a published package onto a box. Nobody needs repo
+write access to deploy — the deploy scripts run from a clone of this repo.
+
+**1. Build (publishes to GHCR, touches no machine)**
+   * release: `git tag v0.2.16 && git push --tags` in the private source repo
+   * manual/snapshot: Actions → *publish* → Run workflow (optional `version` input)
+   * the run summary prints the exact version string
+
+**2. Deploy to TEST** — `python3 bin/deploy_to_test.py`
+   boots/checks the appliance, installs or resumes, then CONVERGES it to
+   `environments/test.env:APP_VERSION` (update.sh; backup + health check +
+   auto-rollback) and verifies `/api/v1/build-meta`. The test pin is bumped
+   automatically by release publishes (or `gh workflow run bump-test-pin.yml`).
+
+**3. Deploy to PROD** — `python3 bin/deploy_to_prod.py`
+   same shared converge/verify code (bin/deploylib.py) against the box in
+   `ansible/inventories/prod/hosts.yml`, converging to
+   `environments/prod.env:APP_VERSION`. The only differences are
+   environment-specific (no VM/tailnet; real TLS). Prod deploys always ask
+   you to TYPE the version before changing anything. Bumping prod.env is a
+   deliberate commit — that commit IS the sign-off.
+
+**4. Find versions** — on either box: `./bin/versions.sh` (newest first).
