@@ -222,17 +222,21 @@ all:
 INV
   say "Converging the platform (ansible playbook — identity plane, blueprint, app plane)…"
   # First boots spend minutes inside ONE task with no ansible output (health
-  # waits, blueprint import) — indistinguishable from a hang. This single
-  # status line refreshes in place with the REAL container states, so what it
-  # shows is always the truth of what is still starting. TTY-only: CI/nohup
-  # logs stay clean; kill-on-exit trap keeps an orphaned spinner impossible.
+  # waits, blueprint import) — indistinguishable from a hang, so the loop
+  # below surfaces the REAL container states. TTY-only by default (opt in
+  # with FORCE_STATUS=1); kill-on-exit trap keeps an orphan impossible.
+  # State-change driven, NEWLINE-TERMINATED status lines. The old in-place
+  # \r\033[K spinner shared its line with ansible's output: TASK headers and
+  # FAILED-RETRYING messages interleaved onto it and the next redraw deleted
+  # evidence. A line now appears only when the aggregate container state
+  # changes — quiet in the happy path, informative while converging, and
+  # identical in TTYs and redirected logs.
   ticker_pid=""
   if [ -t 1 ] || [ "${FORCE_STATUS:-}" = "1" ]; then
     (
-      frames='|/-\\'; i=0; t0=$SECONDS
+      t0=$SECONDS; last=""
       while :; do
         sleep 3
-        printf -v spin '%s' "${frames:$((i % 4)):1}"; i=$((i + 1))
         sum=$(DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock" docker ps -a \
               --format '{{.Names}} {{.Status}}' 2>/dev/null | awk '
           { name = $1; sub(/^workforce-deploy-/, "", name); sub(/-[0-9]+$/, "", name)
@@ -246,7 +250,11 @@ INV
                 out = ready + 0 "/" total + 0 " containers"
                 if (w != "") out = out " — waiting: " w
                 print out }')
-        printf '\r\033[K  %s [%ds] converging — %s' "$spin" $((SECONDS - t0)) "${sum:-waiting for docker…}"
+        out="${sum:-waiting for docker…}"
+        if [ "$out" != "$last" ]; then
+          printf '  [status %4ds] %s\n' "$((SECONDS - t0))" "$out"
+          last="$out"
+        fi
       done
     ) &
     ticker_pid=$!
@@ -289,7 +297,6 @@ INV
 
   if [ -n "$ticker_pid" ]; then
     kill "$ticker_pid" 2>/dev/null; wait "$ticker_pid" 2>/dev/null || true
-    printf '\r\033[K'
     trap - EXIT
   fi
 }
