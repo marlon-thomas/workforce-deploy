@@ -91,7 +91,7 @@
     periodic scan — observed to silently stop scheduling, and an 'error'
     instance persists until force-reapplied)
   community.docker.docker_container_exec:
-    container_name: workforce-deploy-authentik-server-1
+    container: workforce-deploy-authentik-server-1
     command: python
     arguments:
       - /manage.py
@@ -100,7 +100,7 @@
     working_directory: /
   register: ak_bp
   until: (ak_bp.rc | default(1)) == 0 and 'Blueprint invalid' not in (ak_bp.stdout | default(''))
-  retries: 12
+  retries: 18
   delay: 10
   environment:
     DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
@@ -111,7 +111,7 @@
     public path via its build-meta check). A public probe here can only
     fail or burn 900s by design.
   community.docker.docker_container_exec:
-    container_name: workforce-deploy-authentik-server-1
+    container: workforce-deploy-authentik-server-1
     command: python
     arguments:
       - -c
