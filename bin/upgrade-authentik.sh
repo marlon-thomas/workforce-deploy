@@ -59,17 +59,18 @@ say "authentik ladder: $CURRENT_TAG -> ${STEPS[*]}"
 say "Backing up BEFORE anything (authentik does not support downgrades)…"
 ./bin/backup.sh --tag pre-authentik-upgrade || fail "backup failed — upgrade aborted, nothing touched."
 
-AK_HTTP="http://localhost:9000/-/health/ready/"
-
-step_ok() { # $1 = tag
+step_ok() { # $1 = tag — gates on the signals that actually exist on this
+  # topology: the images' own healthchecks (9000 is never published to the
+  # host on a rootless daemon, so a host-side curl can only ever fail — the
+  # first ladder run learned that the hard way) + OIDC discovery through the
+  # edge, which proves gateway, TLS and issuer scheme end to end.
   local tries=0
   while true; do
     sleep 10
     tries=$((tries + 1))
     local up
-    up="$(docker ps --filter name=workforce-deploy-authentik-server --filter health=healthy --format '{{.Names}}' | wc -l)"
-    if [ "$up" -ge 1 ] && curl -fsS -o /dev/null "$AK_HTTP" 2>/dev/null; then
-      # discovery through the edge proves the proxy + issuer scheme too
+    up="$(docker ps --filter name=workforce-deploy-authentik-server --filter name=workforce-deploy-authentik-worker --filter health=healthy --format '{{.Names}}' | wc -l)"
+    if [ "$up" -ge 2 ]; then
       local code
       code="$(curl -sk -o /dev/null -w '%{http_code}' "https://${AUTH_HOSTNAME}/application/o/workforce/.well-known/openid-configuration" || echo 0)"
       [ "$code" = "200" ] && return 0
