@@ -82,7 +82,7 @@ for VER in "${STEPS[@]}"; do
   say "Step: $CURRENT_TAG -> $VER"
   sed -i "s|image: ghcr.io/goauthentik/server:[0-9.]*|image: ghcr.io/goauthentik/server:$VER|g" compose.yaml
   docker compose pull authentik-server authentik-worker >/dev/null 2>&1 || true
-  docker compose up -d authentik-postgres authentik-redis >/dev/null
+  docker compose up -d authentik-postgres ak-redis >/dev/null
   docker compose up -d authentik-server authentik-worker
   if step_ok "$VER"; then
     say "  $VER healthy + discovery OK through the edge."
