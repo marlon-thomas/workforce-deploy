@@ -409,6 +409,13 @@ services:
       AUTHENTIK_POSTGRESQL__NAME: ${AK_DB_NAME}
       AUTHENTIK_REDIS__HOST: ak-redis
       AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+      # 2026.8: forwarded headers are honoured ONLY from trusted CIDRs — without
+      # the compose networks listed here authentik sees TLS-terminated requests
+      # as plain HTTP (issuer flips to http://, mixed-content blocks, login
+      # breaks). Gateway container IPs live in the compose bridge ranges.
+      AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS: "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12"
+      # Becomes MANDATORY in 2026.11 — set now (docs recommendation).
+      AUTHENTIK_WEB__BASE_URL: "https://${AUTH_HOSTNAME}"
     secrets: [ak_db_password, ak_secret]
     volumes:
       - ak_media:/media
@@ -440,6 +447,10 @@ services:
       AUTHENTIK_POSTGRESQL__NAME: ${AK_DB_NAME}
       AUTHENTIK_REDIS__HOST: ak-redis
       AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+      # Worker applies blueprints/flows that render absolute URLs — same
+      # trusted-proxy + base-url posture as the server.
+      AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS: "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12"
+      AUTHENTIK_WEB__BASE_URL: "https://${AUTH_HOSTNAME}"
     secrets: [ak_db_password, ak_secret]
     volumes:
       - ak_media:/media
