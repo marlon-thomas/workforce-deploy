@@ -27,6 +27,12 @@ entries:
       redirect_uris:
         - matching_mode: strict
           url: https://{{ app_hostname }}/login/oauth2/code/oidc
+      # RP-Initiated Logout (#14): where authentik may return the browser after
+      # end-session. Spring's OidcClientInitiatedLogoutSuccessHandler sends
+      # {baseUrl}/ — the app root, which re-arms the login entry point.
+      post_logout_redirect_uris:
+        - matching_mode: strict
+          url: https://{{ app_hostname }}/
       property_mappings:
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
