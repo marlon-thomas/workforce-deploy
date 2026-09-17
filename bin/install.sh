@@ -752,6 +752,10 @@ if [ "${GENERATED_ADMIN}" -eq 1 ]; then
   mkdir -p secrets
   printf '%s\n' "$ADMIN_PASSWORD" > secrets/initial-admin-password
   chmod 400 secrets/initial-admin-password
+  # Never write silently-garbage records: one cold-boot run left a 2-byte
+  # literal backslash-n here (cause not identified). Fail LOUD instead.
+  [ "${#ADMIN_PASSWORD}" -ge 16 ] || { echo "WARNING: generated admin password looks wrong (len=${#ADMIN_PASSWORD}) — run ./bin/reset-admin.sh after install" >&2; }
+  [ "$(wc -c < secrets/initial-admin-password)" -ge 16 ] || echo "WARNING: initial-admin-password record looks wrong — run ./bin/reset-admin.sh" >&2
   echo "  Also saved to ./secrets/initial-admin-password — move it somewhere safe"
   echo "  and DELETE the file. deploy_to_test reprints it after the final update."
   echo ""

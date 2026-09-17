@@ -589,7 +589,9 @@ def step5_version():
                 "sudo -n cat /opt/workforce-deploy/secrets/initial-admin-password 2>/dev/null || true"],
                cwd=ENV_DIR)
     initial = (r.stdout or "").strip()
-    if initial:
+    # Guard against a corrupt record printing as the "password" (observed once:
+    # 2-byte literal \n). Short/escaped content is treated as absent.
+    if initial and len(initial) >= 8 and "\\" not in initial and initial != "\\n":
         warn("initial admin password (auto-generated at install): " + initial)
         say("  (on the box: /opt/workforce-deploy/secrets/initial-admin-password —"
             " move it to your password manager, then delete the file)")
