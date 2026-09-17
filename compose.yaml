@@ -140,6 +140,21 @@ services:
         condition: service_healthy
         required: false  # see gateway.depends_on note (dev "auth" profile)
 
+  # Local catch-all mail server for appliances without a real relay (COMPOSE_PROFILES=mail).
+  # Loopback UI only: http://127.0.0.1:8025 on the box. Never a public service.
+  mailpit:
+    image: axllent/mailpit:v1.31.1
+    restart: unless-stopped
+    profiles: ["mail"]
+    networks: [data]
+    ports:
+      - "127.0.0.1:8025:8025"
+    environment:
+      MP_MAX_MESSAGES: "5000"
+      MP_DATABASE: /data/mailpit.db
+    volumes:
+      - mailpit_data:/data
+
   api:
     # Pulled by default (deployment-spec §B1: orgs run published images, pinned by
     # APP_VERSION). Building from source is a dev override:
@@ -176,6 +191,15 @@ services:
       BRAND_DATA_DIR: /app/data/branding
       WORKFORCE_TLS_TRUSTSTORE: /app/api-truststore.jks
       WORKFORCE_OIDC_SIGNING_KEY_PEM: /run/oidc/signing-pub.pem
+      # Outbound email (#6): empty SMTP_HOST keeps the ledger in log-only mode.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_FROM: ${SMTP_FROM:-workforce@localhost}
+      NOTIFICATION_BASE_URL: ${NOTIFICATION_BASE_URL:-}
+
     secrets:
       - source: db_password
         target: spring.datasource.password
@@ -244,6 +268,14 @@ services:
       SPRING_PROFILES_ACTIVE: prod
       SPRING_FLYWAY_ENABLED: "false"
       WORKFORCE_SCHEDULER_ENABLED: "true"
+      # Outbound email (#6): empty SMTP_HOST keeps the ledger in log-only mode.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_FROM: ${SMTP_FROM:-workforce@localhost}
+      NOTIFICATION_BASE_URL: ${NOTIFICATION_BASE_URL:-}
       SERVER_FORWARD_HEADERS_STRATEGY: framework
       DB_URL: jdbc:postgresql://postgres:5432/${DB_NAME}
       DB_USER: ${DB_USER}
@@ -516,6 +548,7 @@ volumes:
   ak_certs:
   ak_geoip:
   ak_pg_data:
+  mailpit_data:
 
 networks:
   front:

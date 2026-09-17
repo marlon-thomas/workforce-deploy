@@ -293,7 +293,14 @@ INV
     -e "app_version=${APP_VERSION:-0.2.9}" \
     -e "gateway_image=${GW_IMAGE}" \
     -e "gateway_caddyfile=${GW_CADDYFILE}" \
-    -e "duckdns_api_token=${DUCKDNS_API_TOKEN:-}"
+    -e "duckdns_api_token=${DUCKDNS_API_TOKEN:-}" \
+    -e "smtp_host=${SMTP_HOST:-}" \
+    -e "smtp_port=${SMTP_PORT:-587}" \
+    -e "smtp_username=${SMTP_USERNAME:-}" \
+    -e "smtp_password=${SMTP_PASSWORD:-}" \
+    -e "smtp_starttls=${SMTP_STARTTLS:-false}" \
+    -e "smtp_from=${SMTP_FROM:-}" \
+    -e "compose_profiles=${COMPOSE_PROFILES:-}"
 
   if [ -n "$ticker_pid" ]; then
     kill "$ticker_pid" 2>/dev/null; wait "$ticker_pid" 2>/dev/null || true

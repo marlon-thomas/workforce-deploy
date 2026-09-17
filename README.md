@@ -121,3 +121,19 @@ write access to deploy — the deploy scripts run from a clone of this repo.
    deliberate commit — that commit IS the sign-off.
 
 **4. Find versions** — on either box: `./bin/versions.sh` (newest first).
+
+## Outbound email (#6)
+
+Notifications (expiry reminders, RTW/registration escalations, review decisions,
+contract & onboarding magic links) go through a durable ledger: rows are only
+`SENT` after the SMTP transport accepts them.
+
+- **No SMTP configured (default)**: mails are not delivered; contract/onboarding
+  links remain copyable in the UI, and the Settings → Notifications run says so.
+- **Real relay**: set `SMTP_HOST` (+ port/username/password/starttls) and `SMTP_FROM`
+  in `environments/<env>.env`, then re-run the environment's deployer. Queued
+  notifications are dispatched by the worker's drain automatically — enabling mail
+  is a config change, not a data fix.
+- **Test appliance**: `COMPOSE_PROFILES=mail` runs a local [mailpit](https://mailpit.axllent.org/)
+  catcher (loopback UI at `http://127.0.0.1:8025` on the box; `SMTP_HOST=mailpit`).
+  Nothing leaves the machine.
