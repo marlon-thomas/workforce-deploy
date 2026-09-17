@@ -37,7 +37,11 @@ CURRENT_TAG="$(grep -m1 -oE 'goauthentik/server:[0-9.]+' compose.yaml | cut -d: 
 TARGET="${1:-2026.8.2}"
 
 # The supported ladder: every minor line, latest patch, in order (issue #1).
-LADDER=(2025.2.4 2025.4.4 2025.6.4 2025.8.6 2025.10.4 2025.12.6 2026.2.7 2026.5.7 2026.8.2)
+# 2026.8.0 is NOT optional: 2026.5.7 -> 2026.8.2 hits upstream #25996
+# (InconsistentMigrationHistory 0064-before-0063_actor, crash loop); going
+# through 2026.8.0 applies 0063 first and the history stays consistent.
+# Confirmed workaround in the issue thread; our ladder run reproduced the bug.
+LADDER=(2025.2.4 2025.4.4 2025.6.4 2025.8.6 2025.10.4 2025.12.6 2026.2.7 2026.5.7 2026.8.0 2026.8.2)
 
 # Where do we start? First ladder entry strictly newer than the current pin.
 STEPS=()
@@ -95,10 +99,18 @@ for VER in "${STEPS[@]}"; do
 done
 
 say "Ladder complete at $CURRENT_TAG. Final assertions…"
-# Blueprint must re-apply cleanly on the new engine (managed-flow slugs, scope
-# mappings, provider schema all drift between years — this catches it).
-sleep 60
-BP="$(docker exec workforce-deploy-authentik-worker-1 python /manage.py shell -c "
+# Force-reapply the blueprint: the rendered file is unchanged, so the worker's
+# content-hash discovery would skip it — yet 2026.8 adds provider fields
+# (post_logout_redirect_uris!) the stored blueprint must now actually land.
+APPLIED=0
+for _ in 1 2 3 4 5 6 7 8; do
+  sleep 15
+  if docker exec -w / workforce-deploy-authentik-server-1 python /manage.py apply_blueprint \
+       /blueprints/workforce-app.yaml >/dev/null 2>&1; then APPLIED=1; break; fi
+done
+[ "$APPLIED" = 1 ] || fail "apply_blueprint never succeeded on $CURRENT_TAG — inspect server logs (blueprint schema drift?)."
+sleep 5
+BP="$(docker exec workforce-deploy-authentik-server-1 python /manage.py shell -c "
 from authentik.blueprints.models import BlueprintInstance as B
 print(next(iter(B.objects.filter(path='workforce-app.yaml').values_list('status', flat=True)), 'missing'))" 2>/dev/null | tail -1)"
 if [ "$BP" != "successful" ]; then
@@ -107,4 +119,11 @@ if [ "$BP" != "successful" ]; then
 fi
 
 say "authentik is on $CURRENT_TAG, blueprint applied, discovery live through the edge."
+# Show the 2026.8-only prize: the provider must now carry the post-logout allow-list.
+docker exec workforce-deploy-authentik-server-1 python /manage.py shell -c "
+from authentik.providers.oauth2.models import OAuth2Provider
+p = OAuth2Provider.objects.first()
+print('post_logout_redirect_uris:', [str(u) for u in getattr(p, 'post_logout_redirect_uris', [])])
+" 2>/dev/null | tail -1
 say "Now verify RP-Initiated Logout return-to-app (issue #14/#1): sign out from the app → you should land back at the app root."
+
