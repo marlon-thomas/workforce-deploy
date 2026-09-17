@@ -74,3 +74,10 @@ Done. The administrator password is now:
 Shown once — store it in your password manager now. Sign in at
 https://${AUTH_HOSTNAME} (user: admin).
 EOF
+
+# Same recoverable-record discipline as the installer (#15): the print above
+# scrolls away; the file survives until deliberately removed.
+mkdir -p secrets
+printf '%s\n' "$NEW_PW" > secrets/initial-admin-password
+chmod 400 secrets/initial-admin-password
+echo 'Also saved to ./secrets/initial-admin-password — move it somewhere safe, then delete the file.'
