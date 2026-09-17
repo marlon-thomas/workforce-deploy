@@ -48,6 +48,47 @@ workstation: `~/.config/workforce-dev/duckdns.env` (test DNS records) and
 on the target machine (service user's `~/.docker/config.json`,
 `secrets/`) — never in git.
 
+### The first administrator password (fresh installs)
+
+Installer prompt **3/4** asks you to pick the `admin` password; pressing Enter
+means *generate a strong one*. The prompt itself never echoes it — that would
+defeat `-rs`. The password then surfaces in exactly three places, in order:
+
+1. **End of the installer** — in the closing `---` banner, after the health
+   check: *“Your administrator password (shown once — save it now)”*. This
+   block scrolls away if you started the run via `deploy_to_test.py` (the
+   version-update stage prints minutes of output after it), so don't rely on
+   scrolling back.
+2. **End of `deploy_to_test.py` (STEP 5)** — the full journey reprints it as
+   `initial admin password (auto-generated at install): …` at the very end,
+   when you're actually looking at the terminal.
+3. **On the appliance, durably** — `/opt/workforce-deploy/secrets/initial-admin-password`
+   (mode `0400`, service-user owned). It stays until you delete it. From your
+   workstation (test VM):
+
+   ```bash
+   cd environments && vagrant ssh -c 'sudo -n cat /opt/workforce-deploy/secrets/initial-admin-password'
+   ```
+
+   On any box (as the service user): `cat ./secrets/initial-admin-password`
+
+**Housekeeping:** move the password to your password manager, then delete the
+file (`rm /opt/workforce-deploy/secrets/initial-admin-password`).
+
+**Resumes** (`already configured (.env exists) — resuming…`) never re-prompt
+and never change the admin password; the blueprint's user entry is
+`state: created`, so a running install can't overwrite it. If you picked your
+own password at first install, none of the above files exist — the password is
+whatever you typed then.
+
+**Lost it anyway?** Rotate it deliberately with `./bin/reset-admin.sh`: run it
+bare to get a one-time verification phrase (`care-angels-XXXXXX`), then
+`./bin/reset-admin.sh --confirm <phrase>` to set a fresh password (printed
+once, and also written to the `initial-admin-password` file). The two-step
+phrase gate exists because the script is also the support procedure for
+customer appliances — identity is verified on the call before the phrase is
+accepted.
+
 ## Versioning
 
 * suite images: `ghcr.io/marlon-thomas/workforce-suite:<semver>` (private; PAT)
