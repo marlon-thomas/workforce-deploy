@@ -43,7 +43,17 @@ TARGET="${1:-2026.8.2}"
 # Confirmed workaround in the issue thread; our ladder run reproduced the bug.
 LADDER=(2025.2.4 2025.4.4 2025.6.4 2025.8.6 2025.10.4 2025.12.6 2026.2.7 2026.5.7 2026.8.0 2026.8.2)
 
-# Where do we start? First ladder entry strictly newer than the current pin.
+# Where do we start? The max of the compose PIN and the RUNNING container tag:
+# a step can leave pin-ahead-of-runtime (crash mid-step, failed pull on a full
+# disk) and resuming from the pin alone would skip the un-applied step — the
+# exact #25996 trap. Compare against both, and realign the compose file.
+RUNNING_TAG="$(docker inspect -f '{{.Config.Image}}' workforce-deploy-authentik-server-1 2>/dev/null \
+  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+if [ -n "$RUNNING_TAG" ] && [[ "$(printf '%s\n%s\n' "$CURRENT_TAG" "$RUNNING_TAG" | sort -V | tail -1)" == "$RUNNING_TAG" ]]; then
+  CURRENT_TAG="$RUNNING_TAG"
+fi
+sed -i "s|image: ghcr.io/goauthentik/server:[0-9.]*|image: ghcr.io/goauthentik/server:$CURRENT_TAG|g" compose.yaml
+
 STEPS=()
 for v in "${LADDER[@]}"; do
   if [[ "$(printf '%s\n%s\n' "$CURRENT_TAG" "$v" | sort -V | head -1)" == "$CURRENT_TAG" && "$CURRENT_TAG" != "$v" ]]; then
@@ -91,6 +101,13 @@ for VER in "${STEPS[@]}"; do
   docker compose up -d authentik-server authentik-worker
   if step_ok "$VER"; then
     say "  $VER healthy + discovery OK through the edge."
+    # GC: every authentik/server tag except the just-confirmed one (~1.8GB
+    # each; a 9-step ladder without this filled the rootless disk to 98% and
+    # failed a pull mid-run).
+    for img in $(docker images --format '{{.Repository}}:{{.Tag}}' \
+                 | grep '^ghcr.io/goauthentik/server:' | grep -v ":$VER$"); do
+        docker rmi "$img" >/dev/null 2>&1 || true
+    done
     CURRENT_TAG="$VER"
   else
     docker logs --tail 40 workforce-deploy-authentik-server-1 2>&1 | tail -25 || true
