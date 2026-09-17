@@ -518,6 +518,10 @@ if [ -f .env ]; then
     # a warn row abort a converged resume
     ./bin/doctor.sh || true
     echo ""
+    # Resume never re-prompts and never changes the admin password; if the
+    # original was auto-generated it lives in the recoverable file (#15).
+    [ -f secrets/initial-admin-password ] && \
+      echo "  (initial admin password, unless you changed it: cat ./secrets/initial-admin-password)"
     echo "Re-run ./bin/update.sh <version> to change versions."
     exit 0
   fi
@@ -741,5 +745,14 @@ DONE
 if [ "${GENERATED_ADMIN}" -eq 1 ]; then
   echo "  Your administrator password (shown once — save it now):"
   echo "      ${ADMIN_PASSWORD}"
+  echo ""
+  # Recoverable record (#15): this banner can scroll away under deploy_to_test's
+  # STEP 5 output before an operator ever reads it. Stored 0400; move the
+  # password somewhere safe, then delete the file.
+  mkdir -p secrets
+  printf '%s\n' "$ADMIN_PASSWORD" > secrets/initial-admin-password
+  chmod 400 secrets/initial-admin-password
+  echo "  Also saved to ./secrets/initial-admin-password — move it somewhere safe"
+  echo "  and DELETE the file. deploy_to_test reprints it after the final update."
   echo ""
 fi

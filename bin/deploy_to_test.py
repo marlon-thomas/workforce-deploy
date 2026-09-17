@@ -582,6 +582,17 @@ def step5_version():
     require_hostnames()
     deploylib.verify_buildmeta(f"https://{APP_HOSTNAME}/api/v1/build-meta",
                                target, cafile=ca, insecure=True)
+    # #15: the installer's one-time password banner scrolled away long ago;
+    # reprint the recoverable record HERE, at the moment the operator is
+    # reading this terminal. Only exists for installs that auto-generated it.
+    r = sh_out(["vagrant", "ssh", "-c",
+                "sudo -n cat /opt/workforce-deploy/secrets/initial-admin-password 2>/dev/null || true"],
+               cwd=ENV_DIR)
+    initial = (r.stdout or "").strip()
+    if initial:
+        warn("initial admin password (auto-generated at install): " + initial)
+        say("  (on the box: /opt/workforce-deploy/secrets/initial-admin-password —"
+            " move it to your password manager, then delete the file)")
 
 
 # ============================================================ STEP 3 (tailnet+DNS)
