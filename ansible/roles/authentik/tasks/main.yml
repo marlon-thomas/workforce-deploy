@@ -44,7 +44,10 @@
   register: ak_su_uid
   changed_when: false
 
-- name: compose project up (identity plane first — sequenced start)
+# Identity plane first — sequenced start. gateway is deliberately NOT in the
+# list: it hard-depends on api, whose discovery-gate can only pass after THIS
+# role converges; including it deadlocks the up call (api+gateway Created).
+- name: compose up (identity plane)
   community.docker.docker_compose_v2:
     project_src: /opt/workforce-deploy
     files:
@@ -69,7 +72,10 @@
     # user — and wrong even for root on a rootless-only host).
     DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
 
-- name: authentik pair recreated to rebind the blueprint mount
+# Single-file bind mounts pin the inode from container CREATE time; the
+# template task renames the file, so the running worker would keep reading a
+# deleted blueprint. Recreate on change to rebind.
+- name: rebind blueprint mount
   # Single-file bind mounts pin the inode that existed at container CREATE
   # time. The template task replaces the file (atomic rename = new inode), so
   # a long-running worker keeps reading a deleted old blueprint — the stale
@@ -87,9 +93,9 @@
   environment:
     DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
 
-- name: blueprint applied (deterministic CLI import, not the worker's
-    periodic scan — observed to silently stop scheduling, and an 'error'
-    instance persists until force-reapplied)
+# Deterministic CLI import — not the worker's periodic scan (observed to stop
+# scheduling silently; an 'error' instance persists until force-reapplied).
+- name: blueprint applied
   # plain `docker exec` via command: immune to community.docker collection
   # version drift across installs (older versions lack arguments/working_directory)
   ansible.builtin.command: >-
@@ -97,16 +103,14 @@
     python /manage.py apply_blueprint /blueprints/workforce-app.yaml
   register: ak_bp
   until: (ak_bp.rc | default(1)) == 0 and 'Blueprint invalid' not in (ak_bp.stdout | default(''))
-  retries: 18
+  retries: 40
   delay: 10
   environment:
     DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
 
-- name: OIDC provider answers on the internal network (identity plane
-    converged). Deliberately NOT the public URL — the edge is gateway-served
-    and gateway belongs to the app plane (the workforce role proves the
-    public path via its build-meta check). A public probe here can only
-    fail or burn 900s by design.
+# Internal probe only — the public URL would need the gateway, which belongs
+# to the app plane (workforce role proves the edge via build-meta).
+- name: OIDC provider answers internally
   ansible.builtin.command:
     cmd: >-
       docker exec -w / workforce-deploy-authentik-server-1 python -c
@@ -114,7 +118,7 @@
       sys.exit(0 if urllib.request.urlopen('http://localhost:9000/application/o/workforce/.well-known/openid-configuration', timeout=5).status == 200 else 1)"
   register: ak_disc
   until: (ak_disc.rc | default(1)) == 0
-  retries: 18
+  retries: 40
   delay: 10
   environment:
     DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
