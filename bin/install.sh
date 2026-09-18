@@ -281,6 +281,11 @@ INV
       GW_IMAGE="caddy:2.8.4"
     fi
   fi
+  # Ansible's default callback prints every poll of an `until` wait as an alarming
+  # "FAILED - RETRYING:" line — for the OIDC/blueprint health waits these are routine
+  # progress, not failures. Collapse them to one calm [wait] line per task (then every
+  # 10th poll), keeping the real signal: TASK headers, ok/changed, and anything on
+  # stderr (fatal errors) all pass through untouched. pipefail preserves the exit code.
   ansible-playbook -i inventories/local/hosts.yml ansible/site.yml \
     --connection=local -e "ansible_connection=local" \
     -e "app_hostname=${APP_HOSTNAME}" \
@@ -300,7 +305,23 @@ INV
     -e "smtp_password=${SMTP_PASSWORD:-}" \
     -e "smtp_starttls=${SMTP_STARTTLS:-false}" \
     -e "smtp_from=${SMTP_FROM:-}" \
-    -e "compose_profiles=${COMPOSE_PROFILES:-}"
+    -e "compose_profiles=${COMPOSE_PROFILES:-}" \
+  | awk '
+    {
+      raw = $0; line = raw
+      gsub(/\033\[[0-9;]*m/, "", line)          # tolerate TTY color codes
+      if (line !~ /^FAILED - RETRYING: \[/) { cur = ""; print raw; next }
+      ts = substr(line, index(line, "]: ") + 3)
+      lp = index(ts, " ("); if (lp == 0) { print raw; next }
+      task = substr(ts, 1, lp - 1)
+      rest = substr(ts, lp + 2)
+      left = substr(rest, 1, index(rest, " ") - 1) + 0
+      if (task != cur) { cur = task; seen = 0; start = left }
+      seen++
+      if (seen == 1 || seen % 10 == 0)
+        printf "  [wait] %s — polling (%d/%d)\n", task, seen, start
+      next
+    }'
 
   if [ -n "$ticker_pid" ]; then
     kill "$ticker_pid" 2>/dev/null; wait "$ticker_pid" 2>/dev/null || true
