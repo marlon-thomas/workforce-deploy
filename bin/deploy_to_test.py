@@ -427,20 +427,37 @@ def step0(attempts=0):
 
 # ============================================================ teardown
 
+def tailscale_leave():
+    """Unregister this VM's tailnet node before it dies (best-effort).
+    Without this every reprovision leaves an offline orphan in the tailnet,
+    and Tailscale's name-dedup then registers the next node as
+    workforce-test-2, -3, … instead of the stable hostname the Vagrantfile
+    pins. A powered-off VM can't speak for itself — logged as a note."""
+    if not vm_created():
+        return
+    r = sh_out(["vagrant", "ssh", "-c", "sudo tailscale logout"], cwd=ENV_DIR)
+    if r.returncode == 0:
+        ok("VM logged out of the tailnet — no orphaned node left behind")
+    else:
+        note("tailscale logout skipped (VM powered off, or tailscale absent) "
+             "— clean any stale workforce-test-* device in the tailnet admin")
+
+
 def teardown():
     """Destroy the appliance. Everything inside it (deployment, database,
-    certs, /opt state) dies with it. External state that survives is
-    cosmetic and re-pointed automatically on the next deploy."""
+    certs, /opt state) dies with it, and the node unregisters itself from
+    the tailnet first. External state that survives is cosmetic and
+    re-pointed automatically on the next deploy."""
     say("\n───────── TEARDOWN ─────────")
     if vm_created():
+        tailscale_leave()
         sh(["vagrant", "destroy", "-f"], cwd=ENV_DIR)
         ok("VM destroyed — deployment, data, certs and snapshot all gone")
     else:
         note("no VM exists — nothing to destroy")
     say("  Remaining external state (cosmetic):")
-    say("    - an offline Tailscale device in your tailnet admin list")
     say("    - DuckDNS records still aimed at the old tailnet IP")
-    say("  Both are re-pointed/cleaned by the next deploy (STEP 4).")
+    say("  Re-pointed automatically by the next deploy (STEP 3).")
 
 
 # ============================================================ STEP 1
@@ -459,6 +476,7 @@ def step1(fresh):
     say("\n───────── STEP 1: boot the appliance ─────────")
     if fresh and vm_created():
         note("destroying the existing VM (--fresh)…")
+        tailscale_leave()
         sh(["vagrant", "destroy", "-f"], cwd=ENV_DIR)
     sh(["vagrant", "up"], cwd=ENV_DIR)
     if not snapshot_exists():
