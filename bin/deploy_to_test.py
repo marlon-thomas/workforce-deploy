@@ -502,6 +502,58 @@ def guest_internet_ok():
     return any(code in out for code in ("200", "301", "302")), out
 
 
+def _probe_host_out():
+    h = sh_out(["curl", "-4", "-m", "8", "-sI", "https://github.com"])
+    return (h.stdout or "").upper().lstrip().startswith("HTTP")
+
+
+def heal_host_network():
+    """Host-side self-recovery for the known firewalld/docker/libvirt race over
+    the iptables-nft FORWARD chain (observed 2026-09-19: host fine, guest fine,
+    zero transit — the policy-drop chain quietly lost the zone/libvirt jumps
+    after a network recreation). Ladder runs lightest-first and stops at the
+    first success. The docker step restarts host containers; it is ordered last
+    and only matters when the deploy cannot proceed without forwarding anyway.
+    Requires passwordless sudo; otherwise prints the exact manual commands."""
+    if not _probe_host_out():
+        warn("host itself has no outbound internet — nothing to self-heal here; "
+             "check the host connection first.")
+        return False
+    if sh_out(["sudo", "-n", "true"]).returncode != 0:
+        note("no passwordless sudo on the host — cannot self-heal automatically. Manual ladder:")
+        note("  sudo firewall-cmd --reload                                # 1")
+        note("  sudo systemctl restart firewalld                          # 2")
+        note("  sudo systemctl restart docker                             # 3 (bounces host containers)")
+        note("  sudo virsh net-destroy vagrant-libvirt && sudo virsh net-start vagrant-libvirt  # 4 + vagrant reload")
+        return False
+    if sh_out(["cat", "/proc/sys/net/ipv4/ip_forward"]).stdout.strip() != "1":
+        say("  re-enabling IPv4 forwarding…")
+        sh(["sudo", "-n", "sysctl", "-w", "net.ipv4.ip_forward=1"], check=False)
+    ladder = [
+        ("reload firewall rules",
+         [["sudo", "-n", "firewall-cmd", "--reload"]], False),
+        ("restart firewalld (FORWARD hooks rebuild)",
+         [["sudo", "-n", "systemctl", "restart", "firewalld"]], False),
+        ("restart docker after firewalld (correct chain order; host containers bounce)",
+         [["sudo", "-n", "systemctl", "restart", "docker"]], False),
+        ("recreate the libvirt network + reload the VM",
+         [["sudo", "-n", "virsh", "net-destroy", "vagrant-libvirt"],
+          ["sudo", "-n", "virsh", "net-start", "vagrant-libvirt"]], True),
+    ]
+    for label, cmds, reload_vm in ladder:
+        say("  self-heal: " + label + "…")
+        for c in cmds:
+            sh(c, check=False)
+        if reload_vm:
+            sh(["vagrant", "reload"], cwd=ENV_DIR, check=False)
+        time.sleep(4)
+        good, _ = guest_internet_ok()
+        if good:
+            ok("network self-healed at step: " + label)
+            return True
+    return False
+
+
 def step2():
     say("\n───────── STEP 2: verify guest internet ─────────")
     for attempt in range(3):
@@ -531,19 +583,26 @@ def step2():
             sh(["vagrant", "up"], cwd=ENV_DIR, check=False)
             time.sleep(3)
         else:
-            diag = sh_out(["vagrant", "ssh", "-c",
-                           "ip -4 addr show eth0 | grep inet; "
-                           + PROBE_CMD + "; echo curl_exit=$?"],
-                          cwd=ENV_DIR)
-            guest = (diag.stdout or "(unreachable)").strip()
-            host_probe = sh_out(["curl", "-4", "-m", "8", "-sI",
-                                 "https://github.com"])
-            fail("the VM has no outbound internet. Guest state:\n    "
-                 + guest.replace("\n", "\n    ")
-                 + "\n  Host probe on the same URL: "
-                 + ((host_probe.stdout or "").strip().splitlines()[-1]
-                    if (host_probe.stdout or "").strip() else "failed")
-                 + "\n  If the host fails too, it is the network, not the VM.")
+            # third failure: stop poking the guest (its lease/route/vagrant state
+            # already had two tries) and heal the HOST transit layer instead.
+            if heal_host_network():
+                return
+
+    diag = sh_out(["vagrant", "ssh", "-c",
+                   "ip -4 addr show eth0 | grep inet; "
+                   + PROBE_CMD + "; echo curl_exit=$?"],
+                  cwd=ENV_DIR)
+    guest = (diag.stdout or "(unreachable)").strip()
+    host_line = sh_out(["curl", "-4", "-m", "8", "-sI", "https://github.com"])
+    fail("the VM has no outbound internet, and the host self-heal ladder did not "
+         "restore it. Guest state:\n    "
+         + guest.replace("\n", "\n    ")
+         + "\n  Host probe on the same URL: "
+         + ((host_line.stdout or "").strip().splitlines()[-1]
+            if (host_line.stdout or "").strip() else "failed")
+         + "\n  If the host probe failed, it is the host's own connection. "
+           "Otherwise attach this output plus `sudo nft list chain ip filter FORWARD` "
+           "when reporting.")
 
 
 # ============================================================ STEP 4 (installer)

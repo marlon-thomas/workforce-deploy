@@ -137,3 +137,23 @@ contract & onboarding magic links) go through a durable ledger: rows are only
 - **Test appliance**: `COMPOSE_PROFILES=mail` runs a local [mailpit](https://mailpit.axllent.org/)
   catcher (loopback UI at `http://127.0.0.1:8025` on the box; `SMTP_HOST=mailpit`).
   Nothing leaves the machine.
+
+## If a deploy says "the VM has no outbound internet"
+
+The deployer's STEP 2 now self-heals the known host-side cause before giving
+up: on Fedora hosts, firewalld, Docker and libvirt all write to the same
+iptables-nft `FORWARD` chain, and a restart race can leave it **policy drop**
+with the VM's transit rules gone — host fine, guest fine, nothing forwarded.
+Recovery ladder (lightest first, stops at first success, needs passwordless
+sudo — otherwise the exact manual commands are printed):
+
+1. `firewall-cmd --reload`
+2. `systemctl restart firewalld`
+3. `systemctl restart docker` — *bounces running host containers (dev stacks), last resort*
+4. recreate `vagrant-libvirt` network + `vagrant reload`
+
+Also checked along the way: host outbound itself (if the host is down, no
+ladder will help) and `net.ipv4.ip_forward`. If the deployer still fails
+after the ladder, its final message lists what to capture (`nft list chain ip
+filter FORWARD`) for support. Guest-side flukes (stale DHCP lease, out-of-band
+VM restart) are handled earlier in the same step by gentler retries.
