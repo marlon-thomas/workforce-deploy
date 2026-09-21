@@ -688,6 +688,26 @@ printf 'http://authentik-server:9000/application/o/workforce/jwks/' > secrets/oi
 # against the raw stored one and rejects every token exchange (observed:
 # presented '...%2B...%3D' vs stored '...+...='). Hex has nothing to encode.
 openssl rand -hex 32 > secrets/oidc_client_secret
+# Web push VAPID pair (#30): P-256, stored as b64url raw point (65B) + scalar (32B)
+# exactly as the app's WebPushCrypto reads them. Idempotent like the gen() family —
+# regenerating would orphan every browser subscription, so absence-only.
+if [ ! -s secrets/push_vapid_public ] || [ ! -s secrets/push_vapid_private ]; then
+  VAPID_TMP="$(mktemp)"
+  if openssl ecparam -name prime256v1 -genkey -noout -out "$VAPID_TMP" 2>/dev/null \
+     && openssl pkey -in "$VAPID_TMP" -pubout -outform DER 2>/dev/null | tail -c 65 \
+        | python3 -c 'import sys,base64;sys.stdout.write(base64.urlsafe_b64encode(sys.stdin.buffer.read()).decode().rstrip("="))' > secrets/push_vapid_public \
+     && [ -s secrets/push_vapid_public ] \
+     && openssl pkey -in "$VAPID_TMP" -text -noout 2>/dev/null | awk '/priv:/{f=1;next} /^pub:/{f=0} f' \
+        | tr -d ' :\n' | tail -c 64 \
+        | python3 -c 'import sys,base64;sys.stdout.write(base64.urlsafe_b64encode(bytes.fromhex(sys.stdin.read().strip())).decode().rstrip("="))' > secrets/push_vapid_private \
+     && [ -s secrets/push_vapid_private ]; then
+    echo "  generated web-push VAPID keypair"
+  else
+    rm -f secrets/push_vapid_public secrets/push_vapid_private
+    echo "WARNING: VAPID keypair generation failed - web push stays disabled (email unaffected)" >&2
+  fi
+  rm -f "$VAPID_TMP"
+fi
 chmod 600 secrets/*
 chmod 444 secrets/ak_config.yml   # bind-mounted into authentik (rootless uid mapping)
 

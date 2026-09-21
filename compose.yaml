@@ -111,6 +111,17 @@ services:
       - source: minio_secret
         target: workforce.evidence.s3-secret-key
         mode: 0444
+      # Web push (#30): VAPID pair as dotted-target configtree keys the app imports
+      # (workforce.push.public-key / .private-key). Absent/empty -> app self-disables
+      # push and the UI hides the affordance; email is unaffected. Present on every
+      # service that can run a DeliveryLedger.deliver(): api (user actions) and
+      # worker (expiry job); harmless on the one-shot migrate container.
+      - source: push_vapid_public
+        target: workforce.push.public-key
+        mode: 0444
+      - source: push_vapid_private
+        target: workforce.push.private-key
+        mode: 0444
     depends_on:
       postgres:
         condition: service_healthy
@@ -219,6 +230,17 @@ services:
       - source: minio_secret
         target: workforce.evidence.s3-secret-key
         mode: 0444
+      # Web push (#30): VAPID pair as dotted-target configtree keys the app imports
+      # (workforce.push.public-key / .private-key). Absent/empty -> app self-disables
+      # push and the UI hides the affordance; email is unaffected. Present on every
+      # service that can run a DeliveryLedger.deliver(): api (user actions) and
+      # worker (expiry job); harmless on the one-shot migrate container.
+      - source: push_vapid_public
+        target: workforce.push.public-key
+        mode: 0444
+      - source: push_vapid_private
+        target: workforce.push.private-key
+        mode: 0444
     deploy:
       resources:
         limits: { memory: 1g }
@@ -302,6 +324,17 @@ services:
         mode: 0444
       - source: minio_secret
         target: workforce.evidence.s3-secret-key
+        mode: 0444
+      # Web push (#30): VAPID pair as dotted-target configtree keys the app imports
+      # (workforce.push.public-key / .private-key). Absent/empty -> app self-disables
+      # push and the UI hides the affordance; email is unaffected. Present on every
+      # service that can run a DeliveryLedger.deliver(): api (user actions) and
+      # worker (expiry job); harmless on the one-shot migrate container.
+      - source: push_vapid_public
+        target: workforce.push.public-key
+        mode: 0444
+      - source: push_vapid_private
+        target: workforce.push.private-key
         mode: 0444
     deploy:
       resources:
@@ -536,6 +569,10 @@ secrets:
     file: ./secrets/ak_db_password
   ak_secret:
     file: ./secrets/ak_secret
+  push_vapid_public:
+    file: ./secrets/push_vapid_public
+  push_vapid_private:
+    file: ./secrets/push_vapid_private
 
 volumes:
   caddy_data:
