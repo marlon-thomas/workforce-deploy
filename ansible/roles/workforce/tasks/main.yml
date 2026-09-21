@@ -44,6 +44,37 @@
     executable: /bin/bash
   changed_when: true
 
+# Web-push VAPID keypair (#30). Generate once, never rotate in place (browser
+# subscriptions bind to this key; rotation silently orphans every device). Compose
+# mounts these as configtree secrets (workforce.push.public-key / .private-key), and
+# the compose task below hard-fails if they are absent, so this must run first. The
+# wizard's own copy in install.sh only fires on a true first install; resumed deploys
+# skip it, which is why the guard lives here too. Absence of EITHER regenerates BOTH
+# (a mismatched pair is worse than none).
+- name: Generate the web-push VAPID keypair if absent
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cd /opt/workforce-deploy
+    if [ -s secrets/push_vapid_public ] && [ -s secrets/push_vapid_private ]; then
+      echo "vapid: unchanged"; exit 0
+    fi
+    TMP="$(mktemp)"
+    openssl ecparam -name prime256v1 -genkey -noout -out "$TMP"
+    openssl pkey -in "$TMP" -pubout -outform DER | tail -c 65 \
+      | python3 -c 'import sys,base64;sys.stdout.write(base64.urlsafe_b64encode(sys.stdin.buffer.read()).decode().rstrip("="))' > secrets/push_vapid_public
+    openssl pkey -in "$TMP" -text -noout | awk '/priv:/{f=1;next} /^pub:/{f=0} f' \
+      | tr -d ' :\n' | tail -c 64 \
+      | python3 -c 'import sys,base64;sys.stdout.write(base64.urlsafe_b64encode(bytes.fromhex(sys.stdin.read().strip())).decode().rstrip("="))' > secrets/push_vapid_private
+    rm -f "$TMP"
+    chown {{ service_user }}:{{ service_user }} secrets/push_vapid_public secrets/push_vapid_private
+    chmod 600 secrets/push_vapid_private; chmod 644 secrets/push_vapid_public
+    echo "vapid: generated"
+  args:
+    executable: /bin/bash
+  register: vapid_gen
+  changed_when: "'vapid: generated' in vapid_gen.stdout"
+
+
 - name: Service user uid
   ansible.builtin.command: id -u {{ service_user }}
   register: su_uid
