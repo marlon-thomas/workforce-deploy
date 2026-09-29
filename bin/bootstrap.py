@@ -14,9 +14,13 @@ Usage:
     python3 bootstrap.py --host 203.0.113.7
     python3 bootstrap.py --host 203.0.113.7 --user root --port 22
     python3 bootstrap.py --host vmi.example.com          # password prompted securely
+    python3 bootstrap.py --host 10.230.4.55 --keyfile ~/.ssh/id_ed25519
+                                                       # key auth (root password
+                                                       # locked, e.g. fresh Incus guest)
 
 Root password is prompted with getpass when not supplied (never on the command
-line — it would leak into `ps` on your machine).
+line — it would leak into `ps` on your machine).  When --keyfile is given,
+key auth is used instead and no password is asked for.
 
 Requires: python3 + paramiko  (pip install paramiko)
 """
@@ -319,7 +323,12 @@ def main():
                     "'vagrant ssh-config')")
     ap.add_argument("--port", type=int, default=22)
     ap.add_argument("--user", default="root")
-    ap.add_argument("--password", help="root password (prompted if omitted)")
+    ap.add_argument("--password", help="root password (prompted if omitted, "
+                    "skipped entirely when --keyfile is given)")
+    ap.add_argument("--keyfile", help="private key for SSH auth instead of a "
+                    "password (non-vagrant mode — e.g. a fresh Incus/container "
+                    "guest whose root account has no password). Vagrant mode "
+                    "ignores this: its key comes from 'vagrant ssh-config'.")
     ap.add_argument("--env", default="prod", choices=["test", "prod"],
                     help="deployment environment (test = Ubuntu appliance, prod = live VPS)")
     ap.add_argument("--vagrant", action="store_true",
@@ -359,8 +368,14 @@ def main():
         args.keyfile = kf
         print(f"Vagrant VM: {args.host}:{args.port} (user {args.user}, key auth)")
 
+    if not args.vagrant and args.keyfile:
+        # '~' and relative paths are a human convenience; paramiko wants absolute.
+        args.keyfile = os.path.abspath(os.path.expanduser(args.keyfile))
+        if not os.path.isfile(args.keyfile):
+            sys.exit(f"error: key file not found: {args.keyfile}")
+
     if args.keyfile:
-        # Vagrant mode: key auth — no password needed or wanted.
+        # Key auth (vagrant mode or explicit --keyfile): no password needed or wanted.
         password = args.password
     else:
         if not args.host:
