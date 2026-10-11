@@ -62,7 +62,7 @@ services:
   # One-shot: validate object storage, create the evidence bucket if missing,
   # and lock it down to authenticated access (spec §10.2 init requirements).
   init:
-    image: ghcr.io/marlon-thomas/minio-mc:RELEASE.2024-11-17T19-35-25Z  # rebuilt from pinned source (ADR-0015, build-thirdparty.yml) — upstream quay.io/hub/dl.min.io channels closed for this release
+    image: ghcr.io/marlon-thomas/minio-mc:RELEASE.2024-11-17T19-35-25Z@sha256:963d65f8e752f281f7eb186aba2c491e7cbb882aa121430751d18e5b86f0d99d  # rebuilt from pinned source (ADR-0015, build-thirdparty.yml run 38142432185)
     restart: "no"
     networks: [data]
     environment:
@@ -375,7 +375,7 @@ services:
       retries: 6
 
   object-storage:
-    image: ghcr.io/marlon-thomas/minio:RELEASE.2024-10-13T13-34-11Z  # rebuilt from source (ADR-0015, .github/workflows/build-thirdparty.yml) — upstream quay.io + dl.min.io channels retired; tighten to @sha256 after first CI digest
+    image: ghcr.io/marlon-thomas/minio:RELEASE.2024-10-13T13-34-11Z@sha256:7f87e6b80c424f2047ea7735139a6d3316380be8b68888fd22e75819bfa2c858  # rebuilt from source (ADR-0015, build-thirdparty.yml run 38142432185)
     restart: unless-stopped
     command: server /data --console-address ":9001"
     networks: [data]
