@@ -1,0 +1,63 @@
+# digest-check — CI canary for third-party image pin honesty (ADR-0015).
+#
+# Born from a live incident: a one-hex-char typo in a compose @sha256 pin
+# failed three converge attempts and looked exactly like a registry outage.
+# The daemon was right; CI would have caught it. This workflow re-verifies,
+# against the bytes the registry serves today, that every
+# ghcr.io/marlon-thomas/(minio|minio-mc) digest pinned in compose.yaml is
+# the canonical digest of the manifest its tag points at.
+name: digest-check
+on:
+  schedule:
+    - cron: "0 6 * * *"           # daily — upstream retags surface here, not in an install
+  push:
+    paths: [ compose.yaml, .github/workflows/digest-check.yml ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify compose digest pins against the registry
+        run: |
+          python3 - <<'EOF'
+          import hashlib, json, re, sys, urllib.request
+          TEXT = open("compose.yaml").read()
+          # tag: values are carried in the pin comments ("tag: RELEASE....")
+          pins = []
+          for m in re.finditer(
+              r"image: ghcr\.io/marlon-thomas/(minio(?:-mc)?)@sha256:([0-9a-f]{64})"
+              r"[^\n]*tag:\s*([A-Z0-9.][\w.:T-]*)", TEXT):
+              pins.append(m.groups())
+          if not pins:
+              sys.exit("XX no digest-pinned minio images found in compose.yaml — "
+                       "pins changed shape? update digest-check to match")
+          bad = []
+          for repo, digest, tag in pins:
+              t = json.load(urllib.request.urlopen(
+                  f"https://ghcr.io/token?scope=repository:marlon-thomas/{repo}:pull",
+                  timeout=30))["token"]
+              req = urllib.request.Request(
+                  f"https://ghcr.io/v2/marlon-thomas/{repo}/manifests/{tag}",
+                  headers={"Authorization": f"Bearer {t}",
+                           "Accept": "application/vnd.oci.image.index.v1+json"})
+              body = urllib.request.urlopen(req, timeout=60).read()
+              canonical = hashlib.sha256(body).hexdigest()
+              status = "OK" if canonical == digest else "DRIFT"
+              print(f"{repo}:{tag} pinned sha256:{digest[:16]}… registry sha256:{canonical[:16]}… -> {status}")
+              if canonical != digest:
+                  bad.append(repo)
+          # shape sanity: every image: line pointing at our registry must carry a digest
+          naked = re.findall(r"image: ghcr\.io/marlon-thomas/[\w-]+(?!@sha256)[^\n]*", TEXT)
+          for line in naked:
+              print(f"WARN tag-only pin (allowlisted? our own suite images move by APP_VERSION): {line.strip()}")
+          if bad:
+              sys.exit(f"XX DIGEST DRIFT for {bad} — registry now serves different bytes "
+                       "than compose pins: deliberate retag (repin deliberately) or "
+                       "a supply-chain problem (stop and investigate).")
+          print("All digest pins match the registry bytes.")
+          EOF
