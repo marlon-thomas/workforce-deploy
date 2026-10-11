@@ -1,0 +1,119 @@
+# build-thirdparty — rebuild the pinned third-party dependencies from source
+# and publish them into OUR registry (ADR-0015).
+#
+# Why this exists: compose.yaml pins minio/minio + minio/mc releases that
+# upstream no longer serves through ANY anonymous channel (quay.io/minio: 401,
+# docker.io/minio: 401, dl.min.io binary archives: 410 Gone). A fresh
+# appliance must be deployable from the pipeline alone — never from an
+# operator machine's image store. The supply chain here is:
+#
+#   public git archive at a pinned COMMIT  (immutability: URL is the commit
+#   SHA)  ->  sha256 of the tarball  (pinned below; the build aborts on any
+#   upstream content drift)  ->  Go build inside a pinned builder image
+#   (module integrity via go.sum + sum.golang.org)  ->  GHCR push behind the
+#   same private-package + read:packages-PAT gate as our own suite images
+#   ->  compose.yaml references tag + digest.
+#
+# Runs on GitHub-hosted runners (this repo is PUBLIC = free minutes), so no
+# operator device touches the bytes. Bump a dependency: change COMMIT/VERSION
+# /SHA256 together, re-run, take the new digest from the job summary into
+# compose.yaml.
+name: build-thirdparty
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - thirdparty/**
+      - .github/workflows/build-thirdparty.yml
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write          # SLSA provenance attestations on the pushed images
+
+env:
+  MINIO_VERSION: RELEASE.2024-10-13T13-34-11Z
+  MINIO_COMMIT: d10bb7e1b667c2df72c394ef1fa52ab4a6802d0f
+  MINIO_SHA256: 48868ef201be0b2f5a7378e66a6834d2a19dbef39ef0fecf649ea4b505834114
+  MC_VERSION: RELEASE.2024-11-17T19-35-25Z
+  MC_COMMIT: bb4ff4951a3e54bbee6ac75cfaf387c521e98709
+  MC_SHA256: f95b0242818cca3d07d988c06c4ebe79734ddb7cf1ed4da785a01bda8237f493
+
+jobs:
+  minio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch + verify pinned source
+        run: |
+          curl -fsSL "https://github.com/minio/minio/archive/${MINIO_COMMIT}.tar.gz" -o src.tar.gz
+          echo "${MINIO_SHA256}  src.tar.gz" | sha256sum -c
+          mkdir -p build/minio
+          tar xzf src.tar.gz -C build/minio --strip-components=1
+          cp thirdparty/minio/Dockerfile build/minio/Dockerfile
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: build/minio
+          push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            VERSION=${{ env.MINIO_VERSION }}
+            COMMIT=${{ env.MINIO_COMMIT }}
+          tags: ghcr.io/${{ github.repository_owner }}/minio:${{ env.MINIO_VERSION }}
+
+  mc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch + verify pinned source
+        run: |
+          curl -fsSL "https://github.com/minio/mc/archive/${MC_COMMIT}.tar.gz" -o src.tar.gz
+          echo "${MC_SHA256}  src.tar.gz" | sha256sum -c
+          mkdir -p build/mc
+          tar xzf src.tar.gz -C build/mc --strip-components=1
+          cp thirdparty/mc/Dockerfile build/mc/Dockerfile
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: build/mc
+          push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            VERSION=${{ env.MC_VERSION }}
+            COMMIT=${{ env.MC_COMMIT }}
+          tags: ghcr.io/${{ github.repository_owner }}/minio-mc:${{ env.MC_VERSION }}
+
+  digest:
+    needs: [minio, mc]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ github.token }}
+      - name: Record digests for compose.yaml pinning
+        run: |
+          # The packages are PRIVATE — inspect needs the job's own login.
+          {
+            echo "## Digests for compose.yaml"
+            echo '```'
+            for IMG in "minio:${MINIO_VERSION}" "minio-mc:${MC_VERSION}"; do
+              docker buildx imagetools inspect "ghcr.io/${{ github.repository_owner }}/${IMG}" \
+                | awk -v i="$IMG" '/Digest:/{print "ghcr.io/${{ github.repository_owner }}/" i " -> " $2}'
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
