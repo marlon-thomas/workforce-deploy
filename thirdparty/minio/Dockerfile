@@ -26,7 +26,11 @@ FROM docker.io/library/alpine:3.20
 # alpine (not scratch/ubi-micro) on purpose: the object-storage init job in
 # compose.yaml runs /bin/sh loops, and TZ needs tzdata (compose sets
 # Europe/London). Static binary (CGO off) means no glibc deps.
-RUN apk add --no-cache ca-certificates tzdata
+# curl: the compose healthcheck probes /minio/health/live via curl — the
+# upstream release image ships a static curl for exactly this; alpine's
+# package replaces it (apk keeps the image tiny, adds no glibc since only
+# curl's own deps pull libc — binary stays static for minio itself).
+RUN apk add --no-cache ca-certificates tzdata curl
 COPY --from=build /out/minio /usr/bin/minio
 COPY --from=build /src/dockerscripts/docker-entrypoint.sh /usr/bin/docker-entrypoint.sh
 COPY --from=build /src/LICENSE /licenses/LICENSE
