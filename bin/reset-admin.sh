@@ -14,10 +14,25 @@ cd "$(dirname "$0")/.."
 . ./.env
 
 # Rootless-aware docker context: when run as root on a rootless install, talk to the
-# service user's daemon socket (compose exec etc. need the right socket).
+# service user's daemon socket (compose exec etc. need the right socket). Two real
+# layouts exist: the docker "rootless" context path, and the plain XDG runtime dir
+# socket (Incus appliance, 2026-10-11 — the context path was ABSENT and the script
+# died silently under pipefail). Try both; else fail with a clear message instead
+# of the silent abort.
 resolve_docker_context() {
-  if [ "$(id -u)" -eq 0 ] && [ -S "/home/workforce_app_sa/.docker/run/docker.sock" ]; then
-    export DOCKER_HOST="unix:///home/workforce_app_sa/.docker/run/docker.sock"
+  if [ "$(id -u)" -eq 0 ]; then
+    SU_UID="$(id -u "${SERVICE_USER:-workforce_app_sa}" 2>/dev/null || echo 1001)"
+    for sock in "/home/${SERVICE_USER:-workforce_app_sa}/.docker/run/docker.sock" \
+                "/run/user/${SU_UID}/docker.sock"; do
+      if [ -S "$sock" ]; then
+        export DOCKER_HOST="unix://$sock"
+        return 0
+      fi
+    done
+    echo "Cannot find the service user's rootless Docker socket (checked the" \
+         "context path and /run/user/<uid>/docker.sock). Is the rootless daemon" \
+         "running?  loginctl show-user ${SERVICE_USER:-workforce_app_sa}" 1>&2
+    exit 1
   fi
 }
 resolve_docker_context
