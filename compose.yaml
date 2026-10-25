@@ -62,7 +62,7 @@ services:
   # One-shot: validate object storage, create the evidence bucket if missing,
   # and lock it down to authenticated access (spec §10.2 init requirements).
   init:
-    image: ghcr.io/marlon-thomas/minio-mc@sha256:4e0019d9a87840e163f1bd331119db1d6f813dccc081a531b77f1e2ff934eaf7  # tag: RELEASE.2024-11-17T19-35-25Z — rebuilt from pinned source (ADR-0015). Digest-only refs, verified against registry by build digest-check
+    image: ghcr.io/marlon-thomas/minio-mc@sha256:8b85dbecde29b44d696363bee5ab57d6bacea8780a6d90ded0827c5e6f0b3df3  # tag: RELEASE.2024-11-17T19-35-25Z — rebuilt from pinned source (ADR-0015). Digest-only refs, verified against registry by build digest-check
     restart: "no"
     networks: [data]
     environment:
@@ -375,7 +375,7 @@ services:
       retries: 6
 
   object-storage:
-    image: ghcr.io/marlon-thomas/minio@sha256:cad5e2891710c62256f702c64b37fc62f8de9a745de2c17cbbce74d79cc40c77  # tag: RELEASE.2024-10-13T13-34-11Z — rebuilt from source (ADR-0015). Digest-only, verified against registry by build digest-check
+    image: ghcr.io/marlon-thomas/minio@sha256:dd0381b7f5b65e8ceb38c60888c6a2d46d8e7f1677607c0b8ecbb9b814b3f72d  # tag: RELEASE.2024-10-13T13-34-11Z — rebuilt from source (ADR-0015). Digest-only, verified against registry by build digest-check
     restart: unless-stopped
     command: server /data --console-address ":9001"
     networks: [data]
