@@ -118,6 +118,51 @@ Paste the output to support. The "reachability" row failing almost always means 
 ```
 Then destroy the VPS at the provider. Total cost: pennies of hourly billing.
 
+## Test appliance (Incus)
+
+The TEST environment is the Incus **container** `workforce-test` in project
+`appliance` on the devbox — the only supported test platform (the VPS has no
+`/dev/kvm`: containers only, no Vagrant/libvirt VMs). Names live in
+`environments/test.env` (`INCUS_*`, `TAILSCALE_HOSTNAME`, `GUEST_SSH_KEY`).
+
+Day to day, from a clone of this repo on the devbox:
+
+```bash
+python3 bin/deploy_to_test.py --skip-to 5   # converge to test.env:APP_VERSION + verify
+python3 bin/deploy_to_test.py --fresh       # restore snapshot 'clean', then converge
+python3 bin/deploy_to_test.py --snapshot    # after a verified run: re-take 'clean'
+```
+
+Incus access: `incus-admin` membership or passwordless `sudo incus` (the
+restricted `incus` group only sees its own per-user project). The deployer never
+creates or destroys the container. Creating it is a one-time manual job,
+recorded here as it was done on 2026-10-11:
+
+1. A project with its own storage pool, profile (root disk + network) and a
+   bridge on `10.230.4.0/24`; then
+   `incus launch images:ubuntu/24.04 workforce-test --project appliance`
+   with `security.nesting=true` (rootless Docker inside).
+2. Host NAT for the bridge, persisted as `incus-nat.service` (MASQUERADE +
+   FORWARD accepts — ufw's FORWARD drop otherwise blocks guest egress).
+3. Guest DNS: `/etc/resolv.conf` with 1.1.1.1/8.8.8.8 (the systemd-resolved
+   symlink removed).
+4. `openssh-server` in the guest (bootstrap.py connects over SSH; the
+   deployer authorises your key for root and pins the host key via `incus exec`).
+5. `python3 bin/deploy_to_test.py` — Tailscale + DuckDNS, the interactive
+   install, converge, verify — then `--snapshot` for the `clean` baseline.
+
+## Restore drill (deployment-spec D-DEP9)
+
+Prove a backup restores — on an operator machine with Incus, never on the
+appliance. Copy an archive off the box (or from the off-site target), then:
+
+    GHCR_TOKEN_FILE=~/.config/workforce-dev/ghcr-read.token \
+      ./bin/restore-drill.sh backups/<archive>.tar.gz
+
+It restores into a throw-away container with `bin/restore.sh --data-only`
+and checks app DB, sign-in DB and evidence object counts; exit 0 = PASS.
+Not yet scheduled — run it at least monthly (nightly once automated).
+
 ## Hardening notes (for production, not the test)
 
 - ~~Rootless Docker~~ — **implemented**: the daemon runs as the `workforce_app_sa` user by default (no root-equivalent daemon). `--system-docker` reverts for hosts without userns.

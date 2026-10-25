@@ -16,8 +16,14 @@
 #
 # Runs on GitHub-hosted runners (this repo is PUBLIC = free minutes), so no
 # operator device touches the bytes. Bump a dependency: change COMMIT/VERSION
-# /SHA256 together, re-run, take the new digest from the job summary into
-# compose.yaml.
+# /SHA256 together and push; the `digest` job then opens a PR that rewrites
+# the compose.yaml pins to the digests it just read back from the registry —
+# no human ever transcribes hex again (the d3d/d33 incident).
+#
+# Repo setting required once: Settings -> Actions -> General -> "Allow GitHub
+# Actions to create and approve pull requests". PRs opened with GITHUB_TOKEN
+# do not trigger other workflows, so the PR's own digest-check run is started
+# explicitly below (workflow_dispatch on the PR branch).
 name: build-thirdparty
 on:
   workflow_dispatch:
@@ -30,6 +36,10 @@ permissions:
   contents: read
   packages: write
   id-token: write          # SLSA provenance attestations on the pushed images
+
+concurrency:
+  group: build-thirdparty-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   MINIO_VERSION: RELEASE.2024-10-13T13-34-11Z
@@ -99,21 +109,82 @@ jobs:
   digest:
     needs: [minio, mc]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write        # push the pin branch
+      pull-requests: write   # open the pin PR
+      actions: write         # dispatch digest-check on the PR branch
+      packages: read
     steps:
+      - uses: actions/checkout@v4
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ github.token }}
-      - name: Record digests for compose.yaml pinning
+      - uses: docker/setup-buildx-action@v3
+      - name: Read the pushed digests back from the registry
+        id: digests
         run: |
           # The packages are PRIVATE — inspect needs the job's own login.
+          # Index digest of the multi-platform manifest the tag now serves
+          # (the same value digest-check recomputes from the bytes).
+          OWNER="${{ github.repository_owner }}"
+          MINIO_DIGEST="$(docker buildx imagetools inspect "ghcr.io/${OWNER}/minio:${MINIO_VERSION}" --format '{{json .Manifest}}' | jq -r .digest)"
+          MC_DIGEST="$(docker buildx imagetools inspect "ghcr.io/${OWNER}/minio-mc:${MC_VERSION}" --format '{{json .Manifest}}' | jq -r .digest)"
+          for d in "$MINIO_DIGEST" "$MC_DIGEST"; do
+            [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "unexpected digest: '$d'"; exit 1; }
+          done
+          echo "minio=${MINIO_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "mc=${MC_DIGEST}" >> "$GITHUB_OUTPUT"
           {
             echo "## Digests for compose.yaml"
             echo '```'
-            for IMG in "minio:${MINIO_VERSION}" "minio-mc:${MC_VERSION}"; do
-              docker buildx imagetools inspect "ghcr.io/${{ github.repository_owner }}/${IMG}" \
-                | awk -v i="$IMG" '/Digest:/{print "ghcr.io/${{ github.repository_owner }}/" i " -> " $2}'
-            done
+            echo "ghcr.io/${OWNER}/minio:${MINIO_VERSION} -> ${MINIO_DIGEST}"
+            echo "ghcr.io/${OWNER}/minio-mc:${MC_VERSION} -> ${MC_DIGEST}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Rewrite the compose.yaml pins
+        env:
+          OWNER: ${{ github.repository_owner }}
+          MINIO_DIGEST: ${{ steps.digests.outputs.minio }}
+          MC_DIGEST: ${{ steps.digests.outputs.mc }}
+        run: |
+          python3 - <<'EOF'
+          import os, re, sys
+          owner = os.environ["OWNER"]
+          pins = {  # repo -> (digest, tag)
+              "minio": (os.environ["MINIO_DIGEST"], os.environ["MINIO_VERSION"]),
+              "minio-mc": (os.environ["MC_DIGEST"], os.environ["MC_VERSION"]),
+          }
+          text = open("compose.yaml").read()
+          for repo, (digest, tag) in pins.items():
+              # `minio@` never matches `minio-mc@` (the @ is part of the pattern)
+              pat = re.compile(
+                  r"(image: ghcr\.io/" + re.escape(owner) + "/" + re.escape(repo)
+                  + r")@sha256:[0-9a-f]{64}([^\n]*?tag:\s*)\S+")
+              text, n = pat.subn(lambda m: f"{m.group(1)}@{digest}{m.group(2)}{tag}", text)
+              if n == 0:
+                  sys.exit(f"no digest pin for {repo} found in compose.yaml — pin shape changed?")
+              print(f"{repo}: {n} pin(s) -> {digest} ({tag})")
+          open("compose.yaml", "w").write(text)
+          EOF
+          git diff --stat
+      - name: Open the pin PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.ref_name }}
+        run: |
+          if git diff --quiet -- compose.yaml; then
+            echo "compose.yaml already pins these digests — no PR needed."
+            exit 0
+          fi
+          BRANCH="ci/thirdparty-digests-${GITHUB_RUN_ID}"
+          git config user.name "build-thirdparty[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git commit -m "chore(ci): pin rebuilt thirdparty digests (run ${GITHUB_RUN_ID})" -- compose.yaml
+          git push origin "$BRANCH"
+          gh pr create --base "$BASE" --head "$BRANCH" \
+            --title "chore(ci): pin rebuilt thirdparty digests (run ${GITHUB_RUN_ID})" \
+            --body "Digests read back from GHCR by build-thirdparty run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} (ADR-0015). Machine-written: no hand-transcribed hex. digest-check is dispatched on this branch; merge when it is green."
+          gh workflow run digest-check.yml --ref "$BRANCH"

@@ -9,6 +9,7 @@
     owner: "{{ service_user }}"
     group: "{{ service_user }}"
     mode: "0600"
+  no_log: true   # carries SMTP_PASSWORD / DUCKDNS_API_TOKEN (--diff would print them)
 
 - name: api JVM truststore — local test-CA file in certs mode (deterministic,
     network-free, no race with the gateway's own cert rotation), presented

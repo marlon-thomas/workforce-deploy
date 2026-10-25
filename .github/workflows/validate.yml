@@ -1,0 +1,20 @@
+# validate — static checks for the deploy apparatus on every push and PR
+# (audit Q1). Compose syntax, shell syntax and python syntax breakage is
+# caught here, not on an appliance at its next converge. The checks live in
+# bin/ci-validate.sh so they run identically on a workstation.
+name: validate
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static validation (bash -n, python, docker compose config, shellcheck)
+        run: ./bin/ci-validate.sh

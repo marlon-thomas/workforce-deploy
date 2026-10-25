@@ -94,8 +94,9 @@ class SSH:
     deploylib.run() gets (rc, out) for BOTH live viewing and parsing."""
 
     def __init__(self, host, user, password=None, port=22):
-        self.client = paramiko.SSHClient()
-        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        # accept-new host-key semantics (deploylib): first contact recorded,
+        # a changed key refused before authentication — never AutoAddPolicy.
+        self.client = deploylib.verified_ssh_client()
         self.client.connect(host, port=port, username=user,
                             password=password, timeout=15,
                             look_for_keys=True, allow_agent=True)
@@ -125,6 +126,8 @@ def ssh_or_prompt(host, user):
     Returns an SSH handle, or None when the box cannot be reached as `user`."""
     try:
         return SSH(host, user)
+    except paramiko.BadHostKeyException as exc:
+        deploylib.explain_bad_host_key(exc, host)
     except paramiko.AuthenticationException:
         pw = getpass.getpass(f"  password for {user}@{host}: ")
         try:

@@ -17,6 +17,14 @@ Usage:
     python3 bootstrap.py --host 10.230.4.55 --keyfile ~/.ssh/id_ed25519
                                                        # key auth (root password
                                                        # locked, e.g. fresh Incus guest)
+    python3 bootstrap.py --host 203.0.113.7 --host-key-fingerprint SHA256:abc…
+                                                       # verify the server's host key
+                                                       # (from the provider console:
+                                                       # ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub)
+
+Host keys are never trusted blindly: with --host-key-fingerprint the presented
+key must match; without it, accept-new semantics (first contact is recorded in
+~/.ssh/known_hosts, a CHANGED key is refused). known_hosts is never scrubbed.
 
 Root password is prompted with getpass when not supplied (never on the command
 line — it would leak into `ps` on your machine).  When --keyfile is given,
@@ -36,47 +44,12 @@ try:
 except ImportError:
     sys.exit("paramiko is required:  pip install paramiko")
 
+import shlex
+
+from deploylib import GUARDED_PULL, explain_bad_host_key, verified_ssh_client
+
 BUNDLE_REPO = "https://github.com/marlon-thomas/workforce-deploy.git"
 INSTALL_CMD = "cd /opt/workforce-deploy && ./bin/install.sh --env {env}"
-
-# Vagrant mode: bundle lands at /opt (via sudo); sudo is NOPASSWD.
-VAGRANT_PREP = r"""
-set -e
-echo "==> Installing host prerequisites (git, curl, tailscale)…"
-# Some networks blackhole plain-HTTP to Ubuntu mirrors; apt over https
-# works everywhere that has DNS + 443 (observed on a filtered home network).
-sudo sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; \
-             s|http://security.ubuntu.com|https://security.ubuntu.com|g; \
-             s|http://us.archive.ubuntu.com|https://us.archive.ubuntu.com|g' \
-    /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-sudo apt-get update -qq >/dev/null
-sudo apt-get install -y -qq git curl ca-certificates >/dev/null
-if ! command -v tailscale >/dev/null 2>&1; then
-  curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1 || \
-    echo "WARN: tailscale install failed — install it manually inside the VM."
-fi
-sudo systemctl enable --now tailscaled >/dev/null 2>&1 || true
-echo "==> Fetching the deployment bundle straight to its final home…"
-# No staging copy: the bundle lands at /opt/workforce-deploy (where the
-# installer wants to live) and later runs just `git pull` it. Untracked
-# state there (.env, secrets/) is never touched by a pull.
-if [ -d /opt/workforce-deploy/.git ]; then
-# Pull as the checkout's OWNER (the installer chowns the bundle to the service
-# user; git refuses cross-owner pulls, and a root pull would litter root-owned
-# files through the service user's working tree).
-OWNER=$(sudo stat -c '%U' /opt/workforce-deploy/.git)
-if [ "$OWNER" = root ]; then
-  sudo git -C /opt/workforce-deploy pull -q --ff-only
-else
-  sudo sudo -u "$OWNER" git -C /opt/workforce-deploy pull -q --ff-only
-fi
-else
-  # Old installs left a staged/pointer clone under the vagrant home — drop it.
-  sudo rm -rf /home/vagrant/workforce-deploy
-  sudo git clone -q {repo} /opt/workforce-deploy
-fi
-echo "==> Bundle ready. Handing over to the installer (answer its prompts below)."
-"""
 
 PREP = r"""
 set -e
@@ -110,9 +83,9 @@ if [ -d /opt/workforce-deploy/.git ]; then
 # files through the service user's working tree).
 OWNER=$(stat -c '%U' /opt/workforce-deploy/.git)
 if [ "$OWNER" = root ]; then
-  git -C /opt/workforce-deploy pull -q --ff-only
+  sh -c "cd /opt/workforce-deploy && "{pull}
 else
-  sudo -u "$OWNER" git -C /opt/workforce-deploy pull -q --ff-only
+  sudo -u "$OWNER" sh -c "cd /opt/workforce-deploy && "{pull}
 fi
 else
   rm -rf /root/workforce-deploy
@@ -120,34 +93,6 @@ else
 fi
 echo "==> Bundle ready. Handing over to the installer (answer its prompts below)."
 """
-
-
-def scrub_known_hosts(host):
-    """Remove any stale entries for the host (both its name and resolved IPs) from
-    the local known_hosts files — a re-provisioned server (new host key) would
-    otherwise trip client-side strict host key checking on some setups."""
-    import socket
-    import glob
-    import subprocess
-    names = {host}
-    try:
-        infos = socket.getaddrinfo(host, None)
-        for info in infos:
-            names.add(info[4][0])
-    except OSError:
-        pass
-    removed_any = False
-    for kh in glob.glob(os.path.expanduser("~/.ssh/known_hosts*")):
-        for name in names:
-            result = subprocess.run(
-                ["ssh-keygen", "-R", name, "-f", kh],
-                capture_output=True)
-            # ssh-keygen -R exits 0 even when nothing was removed; detect via output
-            if b"Found" not in result.stderr and result.returncode == 0 and result.stdout:
-                pass
-            removed_any = True  # ssh-keygen -R rewrites the file idempotently
-    if removed_any:
-        print(f"Cleared known_hosts entries for: {', '.join(sorted(names))}")
 
 
 def read_env_file(env_name):
@@ -184,7 +129,7 @@ def ship_env_files(client, env_name, remote_home):
             if os.path.isfile(tok):
                 sftp.put(tok, f"{remote_home}/duckdns.env")
                 # 644: the DNS-01 branch reads it as the SERVICE user
-                # (workforce_app_sa), not vagrant — 0600 is unreadable
+                # (workforce_app_sa), not root — 0600 is unreadable
                 # to it and the installer falls back to prompting.
                 run_quiet(client, f"chmod 644 {remote_home}/duckdns.env")
                 print("DuckDNS token file copied into the VM.")
@@ -207,14 +152,18 @@ def ship_env_files(client, env_name, remote_home):
         sftp.close()
 
 
-def connect(host, port, user, password, keyfile=None):
-    scrub_known_hosts(host)
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+def connect(host, port, user, password, keyfile=None, fingerprint=None,
+            known_hosts=None):
+    client = verified_ssh_client(fingerprint=fingerprint, known_hosts=known_hosts)
     print(f"Connecting to {user}@{host}:{port} …")
-    client.connect(host, port=port, username=user, password=password,
-                   key_filename=keyfile,
-                   look_for_keys=False, allow_agent=False, timeout=20)
+    try:
+        client.connect(host, port=port, username=user, password=password,
+                       key_filename=keyfile,
+                       look_for_keys=False, allow_agent=False, timeout=20)
+    except paramiko.BadHostKeyException as exc:
+        explain_bad_host_key(exc, host, port)
+    except paramiko.SSHException as exc:
+        sys.exit(f"XX {exc}")
     print("Connected.")
     return client
 
@@ -318,68 +267,42 @@ def terminal_width():
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--host", help="server IP or hostname "
-                    "(not needed with --vagrant: resolved from "
-                    "'vagrant ssh-config')")
+    ap.add_argument("--host", required=True, help="server IP or hostname "
+                    "(the TEST appliance: deploy_to_test.py passes the Incus "
+                    "guest's eth0 address)")
     ap.add_argument("--port", type=int, default=22)
     ap.add_argument("--user", default="root")
     ap.add_argument("--password", help="root password (prompted if omitted, "
                     "skipped entirely when --keyfile is given)")
     ap.add_argument("--keyfile", help="private key for SSH auth instead of a "
-                    "password (non-vagrant mode — e.g. a fresh Incus/container "
-                    "guest whose root account has no password). Vagrant mode "
-                    "ignores this: its key comes from 'vagrant ssh-config'.")
+                    "password (e.g. the Incus test guest, whose root account has "
+                    "no password)")
+    ap.add_argument("--host-key-fingerprint", metavar="SHA256:…",
+                    help="expected server host-key fingerprint (as printed by "
+                         "'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub' on the "
+                         "server's console); verified before any credential is sent. "
+                         "Without it: accept-new (first contact recorded in "
+                         "~/.ssh/known_hosts, a changed key refused)")
     ap.add_argument("--env", default="prod", choices=["test", "prod"],
                     help="deployment environment (test = Ubuntu appliance, prod = live VPS)")
-    ap.add_argument("--vagrant", action="store_true",
-                    help="target the TEST Vagrant VM (uses 'vagrant ssh-config' for "
-                         "host/port/key; run from deploy/environments after 'vagrant up')")
     ap.add_argument("--repo", default=BUNDLE_REPO,
                     help="deployment bundle repo to clone inside the target "
                          "(default: the public bundle; deploy_to_test passes "
                          "the origin of the bundle it runs from)")
     ap.add_argument("--smoke", action="store_true",
-                    help="no-TLS smoke install inside the VM (OIDC-less, HTTP) — "
-                         "the only mode that works without router port-forwarding")
+                    help="no-TLS smoke install (OIDC-less, HTTP)")
     args = ap.parse_args()
 
-    if args.vagrant:
-        import subprocess
-        # Work regardless of caller's cwd: 'vagrant ssh-config' needs the
-        # Vagrantfile directory (deploy/environments, sibling of this script).
-        env_dir = os.path.normpath(os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "environments"))
-        cfg = subprocess.run(["vagrant", "ssh-config"], capture_output=True,
-                             text=True, check=True,
-                             cwd=env_dir if os.path.isdir(env_dir) else None).stdout
-        params = {}
-        for line in cfg.splitlines():
-            if " " in line:
-                k, _, v = line.strip().partition(" ")
-                params[k.lstrip(" ")] = v.strip(" \"'")
-        args.host = params.get("HostName", "127.0.0.1")
-        args.port = int(params.get("Port", 2222))
-        args.user = params.get("User", "vagrant")
-        kf = params.get("IdentityFile")
-        if kf:
-            # Windows vagrant emits backslash paths — paramiko accepts either,
-            # but normalise and expand for safety.
-            kf = os.path.expanduser(kf.replace("\\", "/"))
-        args.keyfile = kf
-        print(f"Vagrant VM: {args.host}:{args.port} (user {args.user}, key auth)")
-
-    if not args.vagrant and args.keyfile:
+    if args.keyfile:
         # '~' and relative paths are a human convenience; paramiko wants absolute.
         args.keyfile = os.path.abspath(os.path.expanduser(args.keyfile))
         if not os.path.isfile(args.keyfile):
             sys.exit(f"error: key file not found: {args.keyfile}")
 
     if args.keyfile:
-        # Key auth (vagrant mode or explicit --keyfile): no password needed or wanted.
+        # Key auth (--keyfile): no password needed or wanted.
         password = args.password
     else:
-        if not args.host:
-            sys.exit("error: --host is required (unless --vagrant)")
         password = args.password
         while not password:
             # mandatory: empty input = accidental Enter — retry, not quit
@@ -388,36 +311,15 @@ def main():
                 "(Enter to retry, Ctrl+C to exit): ")
 
     client = connect(args.host, args.port, args.user, password,
-                     keyfile=getattr(args, "keyfile", None))
+                     keyfile=getattr(args, "keyfile", None),
+                     fingerprint=args.host_key_fingerprint,
+                     known_hosts=None)
     try:
         prep_cmd = PREP
         install_cmd = INSTALL_CMD.format(env=args.env)
         # repo chosen via --repo (or the public bundle default), formatted
         # into the prep templates at use-site
-        if args.vagrant:
-            rc = run_quiet(client, VAGRANT_PREP.format(repo=args.repo))
-            if rc != 0:
-                sys.exit(f"Host preparation failed (exit {rc}).")
-            # Env-declared out-of-band material (DuckDNS token, test-CA leaf).
-            # Nothing here is test-vs-prod specific — ship_env_files reads the
-            # env file and ships what it names (prod names none -> no-op).
-            ship_env_files(client, args.env, "/home/vagrant")
-            install_cmd = ("cd /opt/workforce-deploy && "
-                           "sudo -E bash ./bin/install.sh --env " + args.env
-                           + (" --smoke" if args.smoke else ""))
-            interactive_shell(client, install_cmd)
-            print("")
-            print("=" * 72)
-            print(" Installer finished. (Tailscale/DuckDNS were configured")
-            print(" before the install, so discovery converged inline.)")
-            print("")
-            print(" Browse (from any tailnet device):")
-            print("   https://workforce-test.duckdns.org        (app)")
-            print("   https://workforce-test-auth.duckdns.org   (sign-in, user: admin)")
-            print("=" * 72)
-            client.close()
-            return
-        rc = run_quiet(client, prep_cmd.format(repo=args.repo))
+        rc = run_quiet(client, prep_cmd.format(repo=args.repo, pull=shlex.quote(GUARDED_PULL)))
         if rc != 0:
             sys.exit(f"Host preparation failed (exit {rc}).")
         ship_env_files(client, args.env, "/root")
@@ -429,7 +331,7 @@ def main():
         print("   - the four deployment questions")
         print("=" * 72)
         print("")
-        interactive_shell(client, INSTALL_CMD.format(env=args.env))
+        interactive_shell(client, install_cmd + (" --smoke" if args.smoke else ""))
         print("")
         print("=" * 72)
         print(" Installer finished.")

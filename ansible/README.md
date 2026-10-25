@@ -11,9 +11,9 @@ safe: every task declares desired state, never a sequence of mutations.
     ansible-playbook -i inventories/prod/hosts.yml site.yml --ask-pass
     # or with the session key: --key-file ~/.ssh/id_ed25519
 
-## Dev (Vagrant VM)
-    cd ../environments && vagrant up
-    ansible-playbook -i inventories/dev/hosts.yml site.yml
+## Test (Incus appliance on the devbox)
+Not driven from a control machine: `bin/deploy_to_test.py` installs/converges the
+Incus guest, and `install.sh` runs this playbook inside it (`connection=local`).
 
 ## What it does
 1. common — packages, service user, docker, sysctl (unprivileged port floor), firewall

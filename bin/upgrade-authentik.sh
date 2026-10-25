@@ -16,17 +16,10 @@ cd "$(dirname "$0")/.."
 # shellcheck disable=SC1091
 . ./.env
 
-# Rootless-aware docker context (same resolution as update.sh)
-resolve_docker_context() {
-  if [ "$(id -u)" -eq 0 ] && [ -S "/home/workforce_app_sa/.docker/run/docker.sock" ]; then
-    export DOCKER_HOST="unix:///home/workforce_app_sa/.docker/run/docker.sock"
-  elif [ "$(id -u)" -ne 0 ] && [ -z "${DOCKER_HOST:-}" ]; then
-    for s in "$HOME/.docker/run/docker.sock" "/run/user/$(id -u)/docker.sock"; do
-      if [ -S "$s" ]; then export DOCKER_HOST="unix://$s"; export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"; break; fi
-    done
-  fi
-}
-resolve_docker_context
+# Docker daemon selection (rootless-aware) lives in ONE place: bin/lib/common.sh.
+# shellcheck source=lib/common.sh
+. ./bin/lib/common.sh
+use_docker_socket
 
 say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mXX\033[0m %s\n' "$*"; exit 1; }

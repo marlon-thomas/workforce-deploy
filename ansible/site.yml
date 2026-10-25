@@ -1,6 +1,6 @@
 ---
 # Care Angels Workforce Suite — full provisioning (deployment-spec §B).
-# One playbook, two inventories: dev (Vagrant VM) and prod (VPS).
+# One playbook, run on the box by install.sh (test = the Incus appliance, prod = the VPS).
 #
 #   ansible-playbook -i inventories/prod/hosts.yml site.yml
 #
@@ -22,6 +22,7 @@
       ansible.builtin.set_fact:
         ak_admin_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits,length=18') }}"
       when: ak_admin_password is not defined or ak_admin_password | length == 0
+      no_log: true
 
     - name: Check registry credential already works
       ansible.builtin.shell: |
@@ -34,11 +35,14 @@
       changed_when: false
       failed_when: false
 
+    # Token on stdin, never in the command string (a templated `echo '<token>'`
+    # sits in the target's process list and in -vvv output); no_log keeps it
+    # out of the console and the install log.
     - name: Registry login (only when the stored credential cannot see the image)
-      ansible.builtin.shell: |
-        echo '{{ github_token }}' | docker login ghcr.io -u {{ gh_user | default('marlon-thomas') }} --password-stdin
-      args:
-        executable: /bin/bash
+      ansible.builtin.command:
+        argv: [docker, login, ghcr.io, -u, "{{ gh_user | default('marlon-thomas') }}", --password-stdin]
+        stdin: "{{ github_token }}"
+      no_log: true
       become: "{{ ansible_user_id != service_user }}"
       become_user: "{{ service_user }}"
       when: "'ALREADY-AUTHED' not in authed.stdout"

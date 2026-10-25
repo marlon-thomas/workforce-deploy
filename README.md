@@ -12,31 +12,40 @@ You do NOT need the private source repo to deploy or operate the product.
 
 | Path | What |
 |---|---|
-| `bin/bootstrap.py` | first-command runner: preps a fresh box (root or Vagrant), ships out-of-band host files, runs the installer |
+| `bin/bootstrap.py` | first-command runner: preps a fresh box over SSH (root password or key), ships out-of-band host files, runs the installer |
 | `bin/install.sh` | the appliance installer (service user → rootless Docker → prompts → Ansible) |
 | `bin/update.sh` / `doctor.sh` / `backup.sh` / `smoke.sh` | versioned updates with rollback, health check, backups, OIDC-less smoke run |
-| `bin/deploy_to_test.py` | laptop orchestrator for the TEST VM lifecycle (Vagrant + Tailscale + DuckDNS + installer) — run it from a clone of this repo |
+| `bin/restore.sh` / `restore-drill.sh` | restore an archive (app DB + sign-in DB + evidence); prove an archive restores in a scratch Incus container (operator machine only) |
+| `bin/ci-validate.sh` | static checks run by `.github/workflows/validate.yml` (bash -n, python, `docker compose config`) — run before pushing |
+| `bin/lib/common.sh` | shared helpers: the ONE Docker-socket discovery (`docker_socket`) and the backup/restore data-plane functions |
+| `bin/deploy_to_test.py` | devbox orchestrator for the TEST appliance — the Incus container `workforce-test` (Tailscale + DuckDNS + installer + version converge) |
 | `bin/gen-test-ca.sh` | workstation-only: private test CA (TLS for the test env never touches a public CA) |
 | `compose.yaml` + `gateway/` `blueprints/` `ansible/` | the declarative stack: Caddy (TLS), authentik (OIDC), the suite |
 | `environments/*.env` | per-environment names/TLS mode + the **pinned app version** |
-| `host-setup/setup-host.py` | the ONLY privileged host prep (idempotent; invoked automatically by deploy_to_test when a gap is detected) |
 | `RUNBOOK.md` | day-2 operations |
 
 ## Quick start
 
-**Test appliance (any dev box with Vagrant + libvirt):**
+**Test appliance (the Incus container on the devbox — the only supported test platform;
+the devbox VPS has no `/dev/kvm`, so there are no Vagrant/libvirt VMs):**
 ```bash
-bin/gen-test-ca.sh test            # once per machine (prints the trust-import line)
-python3 bin/deploy_to_test.py      # VM → Tailscale/DuckDNS → installer (self-heals host prep via sudo)
+bin/gen-test-ca.sh test               # once per machine (prints the trust-import line)
+python3 bin/deploy_to_test.py         # appliance → Tailscale/DuckDNS → install if needed → converge + verify
+python3 bin/deploy_to_test.py --skip-to 5   # day-to-day: converge to environments/test.env:APP_VERSION
+python3 bin/deploy_to_test.py --fresh       # reset to snapshot 'clean', then converge
 ```
+The container itself is created once by hand (RUNBOOK.md, "Test appliance (Incus)").
 Then browse `https://workforce-test.duckdns.org` (sign-in served at
 `…-auth.duckdns.org`); the first account to sign in creates the organisation
 through the first-run wizard and becomes its administrator.
 
 **Production VPS:**
 ```bash
-python3 bin/bootstrap.py --host <ip> --env prod
+python3 bin/bootstrap.py --host <ip> --env prod \
+  --host-key-fingerprint SHA256:...   # from the provider console: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 ```
+Without `--host-key-fingerprint` the first contact is accepted and recorded
+in `~/.ssh/known_hosts` (accept-new); a changed host key is always refused.
 (prod uses real Let's Encrypt via HTTP-01; `test` never issues public certificates.)
 
 ## Credentials & secrets
@@ -63,11 +72,11 @@ defeat `-rs`. The password then surfaces in exactly three places, in order:
    `initial admin password (auto-generated at install): …` at the very end,
    when you're actually looking at the terminal.
 3. **On the appliance, durably** — `/opt/workforce-deploy/secrets/initial-admin-password`
-   (mode `0400`, service-user owned). It stays until you delete it. From your
-   workstation (test VM):
+   (mode `0400`, service-user owned). It stays until you delete it. From the
+   devbox (test appliance):
 
    ```bash
-   cd environments && vagrant ssh -c 'sudo -n cat /opt/workforce-deploy/secrets/initial-admin-password'
+   sudo incus exec workforce-test --project appliance -- cat /opt/workforce-deploy/secrets/initial-admin-password
    ```
 
    On any box (as the service user): `cat ./secrets/initial-admin-password`
@@ -138,22 +147,11 @@ contract & onboarding magic links) go through a durable ledger: rows are only
   catcher (loopback UI at `http://127.0.0.1:8025` on the box; `SMTP_HOST=mailpit`).
   Nothing leaves the machine.
 
-## If a deploy says "the VM has no outbound internet"
+## If a deploy says "the guest has no outbound internet"
 
-The deployer's STEP 2 now self-heals the known host-side cause before giving
-up: on Fedora hosts, firewalld, Docker and libvirt all write to the same
-iptables-nft `FORWARD` chain, and a restart race can leave it **policy drop**
-with the VM's transit rules gone — host fine, guest fine, nothing forwarded.
-Recovery ladder (lightest first, stops at first success, needs passwordless
-sudo — otherwise the exact manual commands are printed):
-
-1. `firewall-cmd --reload`
-2. `systemctl restart firewalld`
-3. `systemctl restart docker` — *bounces running host containers (dev stacks), last resort*
-4. recreate `vagrant-libvirt` network + `vagrant reload`
-
-Also checked along the way: host outbound itself (if the host is down, no
-ladder will help) and `net.ipv4.ip_forward`. If the deployer still fails
-after the ladder, its final message lists what to capture (`nft list chain ip
-filter FORWARD`) for support. Guest-side flukes (stale DHCP lease, out-of-band
-VM restart) are handled earlier in the same step by gentler retries.
+STEP 2 probes HTTPS from inside the container. The known devbox cause is the
+host NAT for the Incus bridge (`10.230.4.0/24`): ufw's FORWARD drop swallows
+guest traffic unless `incus-nat.service` (MASQUERADE + FORWARD accepts) is
+active — the deployer restarts it once via sudo and re-probes. Otherwise it
+prints the guest's address, routes and resolver: guest DNS must be
+1.1.1.1/8.8.8.8 (RUNBOOK.md, "Test appliance (Incus)").

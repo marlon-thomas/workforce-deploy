@@ -1,32 +1,41 @@
 #!/usr/bin/env python3
 """
-deploy_to_test.py — deploy the workforce suite to the TEST appliance,
-from any operating system (Windows, macOS, Linux).
+deploy_to_test.py — deploy the workforce suite to the TEST appliance: the
+Incus system container `workforce-test` (project `appliance`) on the devbox.
 
-  STEP 0  host prerequisites, checked per-OS. READ-ONLY: this script never
-          uses sudo. One-time privileged fixes live in
-          ../host-setup/setup-host.py — invoked AUTOMATICALLY via sudo
-          when it detects something it fixes, so the human is only asked for
-          what genuinely cannot be scripted (re-login, browser auth);
-          idempotent) — missing prerequisites are pointed there.
-  STEP 1  boot the bare Ubuntu appliance      (vagrant up + snapshot)
-  STEP 2  verify the guest has internet       (HTTPS probe; gentle recovery)
-  STEP 3  install the suite inside it         (bootstrap.py --vagrant --env test,
-          interactive: GitHub PAT, email, admin password, backup target)
-  STEP 4  Tailscale + DuckDNS                 (VM joins your tailnet, records
-          point at it — browse from any tailnet device)
-  STEP 5  converge to the pinned version      (deploylib.converge + verify —
-          the SAME shared code deploy_to_prod.py runs; box moves to
-          environments/test.env:APP_VERSION via update.sh)
+Incus is the ONLY supported test platform. The devbox is a VPS without
+/dev/kvm, so Vagrant/libvirt VMs cannot run there; the appliance is an Incus
+*container* (handover note 2026-10-11 §6, ADR-0014 topology note).
 
-Usage:
-  python3 deploy_to_test.py                 # full journey
-  python3 deploy_to_test.py --check-only    # STEP 0 only
-  python3 deploy_to_test.py --fresh         # destroy + rebuild the VM first
-  python3 deploy_to_test.py --skip-to N     # resume at step N (runs N..5)
+  STEP 0  host prerequisites (read-only checks; the only sudo it may run is
+          the one-time trust import of the private test CA)
+  STEP 1  the appliance exists and is running   (--fresh: restore snapshot
+          'clean' first — the installed, verified baseline)
+  STEP 2  the guest has outbound internet       (HTTPS probe; host NAT check)
+  STEP 3  Tailscale + DuckDNS                   (guest on the tailnet, both
+          test names pointing at its tailnet IP — before any install, because
+          the installer's OIDC discovery goes through the public hostname)
+  STEP 4  install the suite if it is not there  (bootstrap.py --host <guest>
+          over SSH: host key pinned from the guest itself via incus, this
+          host's key authorised for root; interactive prompts on first install)
+  STEP 5  converge to environments/test.env:APP_VERSION + verify
+          (deploylib.converge — the SAME code deploy_to_prod.py runs; only the
+          transport differs: `incus exec … sudo -iu workforce_app_sa`)
 
-Everything the VM runs comes from the deployment bundle (cloned fresh from
-origin by bootstrap.py) — nothing is ever hand-edited in the VM.
+Usage (on the devbox, from a clone of this repo):
+  python3 bin/deploy_to_test.py                 # full journey (idempotent)
+  python3 bin/deploy_to_test.py --check-only    # STEP 0 only
+  python3 bin/deploy_to_test.py --skip-to 5     # just converge + verify
+  python3 bin/deploy_to_test.py --fresh         # reset to snapshot 'clean', then converge
+  python3 bin/deploy_to_test.py --snapshot      # after a verified run: re-take 'clean'
+
+Incus access: as a member of `incus-admin`, or via passwordless `sudo incus`
+(detected automatically). Creating the container itself (project, storage
+pool, profile, network, host NAT) is a one-time manual step — RUNBOOK.md
+"Test appliance (Incus)".
+
+Everything the guest runs comes from the deployment bundle (cloned from
+origin by bootstrap.py) — nothing is ever hand-edited in the guest.
 """
 
 import argparse
@@ -39,7 +48,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -52,9 +60,7 @@ BOOTSTRAP = os.path.join(HERE, "bootstrap.py")
 
 DUCKDNS_API = "https://www.duckdns.org/update"   # the DuckDNS service endpoint
 
-# Hostnames derive from the test environment file (single source of truth —
-# the same values the installer uses). Token path is a host-side convention,
-# overridable via the DUCKDNS_TOKEN_FILE environment variable.
+# Host-side token file (outside the repo), overridable via the environment.
 DUCKDNS_TOKEN_FILE = os.environ.get("DUCKDNS_TOKEN_FILE") or os.path.expanduser(
     os.path.join("~", ".config", "workforce-dev", "duckdns.env"))
 
@@ -80,6 +86,18 @@ APP_HOSTNAME = (f"{TEST_ENV['WF_SUBDOMAIN']}.{BASE_DOMAIN}"
 AUTH_HOSTNAME = (f"{TEST_ENV['AUTH_SUBDOMAIN']}.{BASE_DOMAIN}"
                  if BASE_DOMAIN and TEST_ENV.get("AUTH_SUBDOMAIN") else None)
 
+# The appliance (environments/test.env; defaults = the devbox as built 2026-10-11).
+INSTANCE = TEST_ENV.get("INCUS_INSTANCE", "workforce-test")
+PROJECT = TEST_ENV.get("INCUS_PROJECT", "appliance")
+SNAPSHOT = TEST_ENV.get("INCUS_SNAPSHOT", "clean")
+TS_HOSTNAME = TEST_ENV.get("TAILSCALE_HOSTNAME", INSTANCE)
+SSH_KEY = os.path.expanduser(TEST_ENV.get("GUEST_SSH_KEY", "~/.ssh/id_ed25519"))
+SERVICE_USER = "workforce_app_sa"
+WORKDIR = deploylib.WORKDIR
+
+# `incus` or `sudo -n incus` — decided in STEP 0 (see incus_access()).
+INCUS = ["incus"]
+
 
 def duckdns_name(hostname):
     if hostname and BASE_DOMAIN and hostname.endswith("." + BASE_DOMAIN):
@@ -93,7 +111,7 @@ def require_hostnames():
              "(needs BASE_DOMAIN, WF_SUBDOMAIN, AUTH_SUBDOMAIN).")
 
 
-OS = platform.system()          # Windows | Darwin | Linux
+OS = platform.system()
 DISTRO = ""
 if OS == "Linux":
     try:
@@ -104,15 +122,9 @@ if OS == "Linux":
 
 MISSING = []
 
-# Privileged fixes the script CAN run itself via sudo (the sudo prompt lands
-# on the user's TTY). "The deploy script never runs as root" is about its own
-# privileges — it must not offload known, idempotent, one-command fixes to the
-# human. Genuinely human-only items (re-login for group membership, browser
-# auth at the DNS/tailscale providers, the service-user password) stay in
-# MISSING + pause_for_manual.
+# Privileged fixes the script runs itself via sudo (prompt on this TTY) —
+# today only the one-time import of the private test CA into the trust store.
 PRIV_TASKS = []
-SETUP_HOST = os.path.normpath(
-    os.path.join(HERE, "..", "host-setup", "setup-host.py"))
 
 
 def priv(why, cmds):
@@ -188,128 +200,102 @@ def pause_for_manual(instructions):
         fail("no interactive terminal available — fix the items above and re-run.")
 
 
+
+# ============================================================ incus transport
+
+def incus(*args):
+    """Run an incus command against the appliance's project, capturing output."""
+    return sh_out(INCUS + list(args) + ["--project", PROJECT])
+
+
+def guest(cmd, as_service_user=False):
+    """Run a shell command inside the guest (as root, or as the service user
+    through a login shell — the same identity the installer and update.sh use).
+    Returns (returncode, combined output)."""
+    inner = (["sudo", "-n", "-iu", SERVICE_USER, "bash", "-lc", cmd]
+             if as_service_user else ["bash", "-lc", cmd])
+    r = sh_out(INCUS + ["exec", INSTANCE, "--project", PROJECT, "--"] + inner)
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def incus_access():
+    """Pick the incus invocation that can see the appliance's project: plain
+    `incus` for incus-admin members, else passwordless `sudo -n incus`. A
+    member of the restricted `incus` group only sees its own per-user project,
+    which is why plain `incus list --project appliance` can look empty."""
+    global INCUS
+    for prefix in (["incus"], ["sudo", "-n", "incus"]):
+        r = sh_out(prefix + ["project", "show", PROJECT])
+        if r.returncode == 0:
+            INCUS = prefix
+            return True
+    return False
+
+
+def instance_state():
+    """'RUNNING' | 'STOPPED' | … | None when the instance does not exist."""
+    r = incus("list", INSTANCE, "-c", "ns", "--format", "csv")
+    for line in (r.stdout or "").splitlines():
+        name, _, state = line.partition(",")
+        if name == INSTANCE:
+            return state.strip()
+    return None
+
+
+def snapshot_exists():
+    r = incus("snapshot", "list", INSTANCE, "--format", "csv", "-c", "n")
+    return SNAPSHOT in [l.strip() for l in (r.stdout or "").splitlines()]
+
+
+def guest_eth0_ip():
+    rc, out = guest("ip -4 -o addr show dev eth0 | awk '{print $4}' | cut -d/ -f1")
+    ip = out.strip().splitlines()[-1].strip() if out.strip() else ""
+    return ip if rc == 0 and re.match(r"^\d+\.\d+\.\d+\.\d+$", ip) else None
+
+
+
 # ============================================================ STEP 0
 
-def step0(attempts=0):
+def step0(attempts=0, check_only=False):
     say("\n───────── STEP 0: host prerequisites ─────────")
     MISSING.clear()
     PRIV_TASKS.clear()
 
-    # Fedora: libxcrypt-compat BEFORE anything vagrant — Vagrant's embedded
-    # Ruby won't even start without it.
-    if OS == "Linux" and DISTRO == "fedora":
-        r = subprocess.run(["rpm", "-q", "libxcrypt-compat"],
-                           capture_output=True, check=False)
-        if r.returncode == 0:
-            ok("libxcrypt-compat (Fedora)")
-        else:
-            priv("libxcrypt-compat missing (Vagrant's Ruby needs it)",
-                 [["sudo", "python3", SETUP_HOST]])
+    if OS != "Linux":
+        fail("the TEST appliance runs in Incus on the devbox — run this script "
+             "there (it is Linux-only).")
 
-    # vagrant: present AND runnable
-    vagrant_ok = False
-    if have("vagrant"):
-        v = sh_out(["vagrant", "--version"])
-        if v.returncode != 0:
-            tail = (v.stderr or v.stdout or "").strip().splitlines()
-            MISSING.append("vagrant does not run: "
-                           + (tail[-1] if tail else f"exit {v.returncode}"))
+    if not have("incus"):
+        MISSING.append("incus CLI — the devbox runs Incus (zabbly repo); this "
+                       "host is not the appliance host")
+    elif incus_access():
+        how = "incus-admin" if INCUS == ["incus"] else "passwordless sudo"
+        ok(f"incus can manage project '{PROJECT}' (via {how})")
+        state = instance_state()
+        if state is None:
+            MISSING.append(f"Incus instance '{INSTANCE}' not found in project "
+                           f"'{PROJECT}' — create it once by hand (RUNBOOK.md, "
+                           "'Test appliance (Incus)'); this script never creates "
+                           "or destroys the container")
         else:
-            ok(f"vagrant runs ({(v.stdout or '').strip() or 'version probe ok'})")
-            vagrant_ok = True
+            ok(f"appliance '{INSTANCE}' exists ({state})")
     else:
-        for p in (os.path.expanduser(os.path.join("~", ".local", "bin")),
-                  os.path.join(os.environ.get("LOCALAPPDATA", ""),
-                               "Programs", "workforce-bin")):
-            if p and os.path.isfile(os.path.join(
-                    p, "vagrant.exe" if OS == "Windows" else "vagrant")):
-                os.environ["PATH"] = p + os.pathsep + os.environ["PATH"]
-                break
-        if have("vagrant"):
-            ok("vagrant (found in a user bin dir)")
-            vagrant_ok = True
-        else:
-            MISSING.append("vagrant — install from "
-                           "https://developer.hashicorp.com/vagrant/install")
+        user = os.environ.get("USER") or os.environ.get("LOGNAME", "")
+        MISSING.append(
+            f"no admin access to Incus project '{PROJECT}' — either  sudo usermod "
+            f"-aG incus-admin {user}  (then log out & back in) or allow "
+            "passwordless sudo for incus")
 
-    # hypervisor / provider
-    if OS == "Linux":
-        if not have("virsh"):
-            pkg = ("sudo dnf install -y @virtualization"
-                   if DISTRO == "fedora" else
-                   "sudo apt-get install -y qemu-kvm libvirt-daemon-system "
-                   "libvirt-clients")
-            MISSING.append(f"libvirt/KVM — run:  {pkg}")
-        elif subprocess.run(["systemctl", "is-active", "--quiet", "libvirtd"],
-                            check=False).returncode != 0 and \
-                subprocess.run(["systemctl", "is-active", "--quiet", "virtqemud"],
-                               check=False).returncode != 0:
-            # Fedora 40+ runs the modular daemons: virtqemud is active while
-            # libvirtd stays inactive/socket-activated — accept either.
-            priv("libvirt daemons not running (libvirtd and virtqemud "
-                 "both inactive)", [["sudo", "python3", SETUP_HOST]])
-        if have("virsh"):
-            r = sh_out(["virsh", "-c", "qemu:///system", "list", "--all"])
-            if r.returncode == 0:
-                ok("libvirt access (group membership effective)")
-            else:
-                user = os.environ.get("USER") or os.environ.get("LOGNAME", "")
-                MISSING.append(
-                    f"libvirt group access — run:  sudo usermod -aG libvirt {user}"
-                    "   …then LOG OUT & BACK IN")
-            # default NAT network active
-            ni = sh_out(["virsh", "-c", "qemu:///system", "net-info", "default"])
-            net_active = any(
-                ln.strip().startswith("Active:")
-                and ln.split(":", 1)[1].strip().lower() == "yes"
-                for ln in (ni.stdout or "").splitlines())
-            if net_active:
-                ok("libvirt default network (NAT)")
-            else:
-                priv("libvirt default network inactive",
-                     [["sudo", "python3", SETUP_HOST]])
-            # firewalld forwards virbr0
-            if have("firewall-cmd"):
-                az = sh_out(["firewall-cmd", "--get-active-zones"])
-                if "virbr0" in (az.stdout or ""):
-                    ok("firewalld forwards virbr0 (guest internet)")
-                else:
-                    priv("firewalld not forwarding virbr0",
-                     [["sudo", "python3", SETUP_HOST]])
+    for tool in ("ssh-keygen", "curl"):
+        if not have(tool):
+            MISSING.append(f"{tool} — install it (apt-get install openssh-client curl)")
+    if not os.path.isfile(SSH_KEY) or not os.path.isfile(SSH_KEY + ".pub"):
+        MISSING.append(f"SSH key pair {SSH_KEY}(.pub) — bootstrap.py authenticates "
+                       "to the guest's root with it (GUEST_SSH_KEY in test.env)")
     else:
-        if have("VBoxManage") or have("virtualbox"):
-            ok("VirtualBox")
-        else:
-            hint = ("Enable Hyper-V, or install VirtualBox from "
-                    "https://www.virtualbox.org/wiki/Downloads"
-                    if OS == "Windows" else
-                    "brew install --cask virtualbox")
-            MISSING.append(f"a hypervisor — {hint}")
+        ok(f"SSH key for the guest: {SSH_KEY}")
 
-    # vagrant-libvirt plugin (Linux only; needs a working vagrant)
-    if OS == "Linux" and vagrant_ok:
-        r = sh_out(["vagrant", "plugin", "list"])
-        if "vagrant-libvirt" in (r.stdout or ""):
-            ok("vagrant-libvirt plugin")
-        else:
-            note("installing the vagrant-libvirt plugin (user-local, no sudo)…")
-            sh(["vagrant", "plugin", "install", "vagrant-libvirt"])
-            ok("vagrant-libvirt plugin (installed just now)")
-
-        # docker↔libvirt coexistence: persistent DOCKER-USER accepts via a
-        # systemd drop-in (docker's FORWARD DROP policy swallows guest
-        # traffic otherwise; the drop-in re-applies on every docker start).
-        if have("docker") and have("virsh"):
-            dropin = ("/etc/systemd/system/docker.service.d/"
-                      "workforce-libvirt-forward.conf")
-            if os.path.exists(dropin):
-                ok("docker↔libvirt forwarding fix (persistent)")
-            else:
-                priv("docker↔libvirt forwarding drop-in missing "
-                     "(docker's FORWARD DROP swallows guest traffic)",
-                     [["sudo", "python3", SETUP_HOST]])
-
-    # paramiko
+    # paramiko (bootstrap.py talks SSH through it)
     try:
         import paramiko  # noqa: F401
         ok("paramiko (python SSH)")
@@ -387,6 +373,20 @@ def step0(attempts=0):
     # password prompt lands on this TTY) and re-probe, instead of pushing a
     # "run this in another terminal" errand on the human. If sudo fails or
     # there is no TTY, the item degrades to the manual list.
+    if PRIV_TASKS and check_only:
+        # --check-only never changes anything: report, don't run.
+        for t in PRIV_TASKS:
+            MISSING.append(t["whys"][0] + " — a full run does this via sudo:  "
+                           + " &&  ".join(" ".join(map(str, c)) for c in t["cmds"]))
+        PRIV_TASKS.clear()
+    if check_only:
+        if MISSING:
+            warn("would need attention before a deploy:")
+            for m in MISSING:
+                print(f"    - {m}")
+        else:
+            say("  All prerequisites satisfied.")
+        return
     if PRIV_TASKS:
         if attempts >= 2:
             for t in PRIV_TASKS:
@@ -413,265 +413,93 @@ def step0(attempts=0):
             for t, c in failed:
                 MISSING.append(t["whys"][0] + " — auto-fix failed; run:  "
                                + " ".join(map(str, c)))
-            return step0(attempts + 1)
+            return step0(attempts + 1, check_only)
 
     if MISSING:
         if attempts >= 2:
             fail("prerequisites still missing after 3 rounds — fix manually "
                  "and re-run.")
         pause_for_manual(MISSING)
-        return step0(attempts + 1)
+        return step0(attempts + 1, check_only)
 
     say("  All prerequisites satisfied.")
 
 
-# ============================================================ teardown
-
-def tailscale_leave():
-    """Unregister this VM's tailnet node before it dies (best-effort).
-    Without this every reprovision leaves an offline orphan in the tailnet,
-    and Tailscale's name-dedup then registers the next node as
-    workforce-test-2, -3, … instead of the stable hostname the Vagrantfile
-    pins. A powered-off VM can't speak for itself — logged as a note."""
-    if not vm_created():
-        return
-    r = sh_out(["vagrant", "ssh", "-c", "sudo tailscale logout"], cwd=ENV_DIR)
-    if r.returncode == 0:
-        ok("VM logged out of the tailnet — no orphaned node left behind")
-    else:
-        note("tailscale logout skipped (VM powered off, or tailscale absent) "
-             "— clean any stale workforce-test-* device in the tailnet admin")
-
-
-def teardown():
-    """Destroy the appliance. Everything inside it (deployment, database,
-    certs, /opt state) dies with it, and the node unregisters itself from
-    the tailnet first. External state that survives is cosmetic and
-    re-pointed automatically on the next deploy."""
-    say("\n───────── TEARDOWN ─────────")
-    if vm_created():
-        tailscale_leave()
-        sh(["vagrant", "destroy", "-f"], cwd=ENV_DIR)
-        ok("VM destroyed — deployment, data, certs and snapshot all gone")
-    else:
-        note("no VM exists — nothing to destroy")
-    say("  Remaining external state (cosmetic):")
-    say("    - DuckDNS records still aimed at the old tailnet IP")
-    say("  Re-pointed automatically by the next deploy (STEP 3).")
-
-
 # ============================================================ STEP 1
 
-def vm_created():
-    r = sh_out(["vagrant", "status"], cwd=ENV_DIR)
-    return "not created" not in (r.stdout or "")
-
-
-def snapshot_exists():
-    r = sh_out(["vagrant", "snapshot", "list"], cwd=ENV_DIR)
-    return "clean" in (r.stdout or "")
-
-
 def step1(fresh):
-    say("\n───────── STEP 1: boot the appliance ─────────")
-    if fresh and vm_created():
-        note("destroying the existing VM (--fresh)…")
-        tailscale_leave()
-        sh(["vagrant", "destroy", "-f"], cwd=ENV_DIR)
-    sh(["vagrant", "up"], cwd=ENV_DIR)
-    if not snapshot_exists():
-        sh(["vagrant", "snapshot", "save", "clean"], cwd=ENV_DIR)
-        ok("snapshot 'clean' saved — future resets: "
-           "vagrant snapshot restore clean")
+    say("\n───────── STEP 1: the appliance ─────────")
+    state = instance_state()
+    if state is None:
+        fail(f"instance '{INSTANCE}' is gone from project '{PROJECT}' — recreate "
+             "it per RUNBOOK.md 'Test appliance (Incus)', then re-run.")
+    if fresh:
+        if not snapshot_exists():
+            fail(f"--fresh needs snapshot '{SNAPSHOT}', which does not exist yet "
+                 "— run once without --fresh, then --snapshot.")
+        note(f"restoring snapshot '{SNAPSHOT}' (the installed, verified baseline)…")
+        # No tailscale logout first: the snapshot holds the node's own state,
+        # so the restored guest comes back as the same tailnet device.
+        r = incus("snapshot", "restore", INSTANCE, SNAPSHOT)
+        if r.returncode != 0:
+            fail("snapshot restore failed: " + (r.stderr or r.stdout or "").strip())
+        ok(f"restored '{SNAPSHOT}'")
+        state = instance_state()
+    if state != "RUNNING":
+        note(f"starting '{INSTANCE}' (was {state})…")
+        r = incus("start", INSTANCE)
+        if r.returncode != 0:
+            fail("could not start the appliance: " + (r.stderr or r.stdout or "").strip())
+    for _ in range(30):
+        rc, _out = guest("true")
+        if rc == 0:
+            break
+        time.sleep(2)
     else:
-        ok("snapshot 'clean' exists")
-    say("  Appliance is up.")
+        fail("the appliance is running but `incus exec` does not answer.")
+    ok(f"'{INSTANCE}' is running" + (" (snapshot "
+       f"'{SNAPSHOT}' available for --fresh)" if snapshot_exists() else ""))
 
 
 # ============================================================ STEP 2
 
-PROBE_CMD = ("curl -4 -m 8 -sI https://github.com | head -1")
+PROBE_CMD = "curl -4 -m 8 -sI https://github.com | head -1"
 
 
 def guest_internet_ok():
     """HTTPS deliberately: some networks blackhole plain-HTTP to Ubuntu
-    mirrors while everything else works — an HTTP probe would measure the
-    ISP, not the VM (observed in the field)."""
-    r = sh_out(["vagrant", "ssh", "-c", PROBE_CMD], cwd=ENV_DIR)
-    out = r.stdout or ""
+    mirrors while everything else works."""
+    rc, out = guest(PROBE_CMD)
     return any(code in out for code in ("200", "301", "302")), out
-
-
-def _probe_host_out():
-    h = sh_out(["curl", "-4", "-m", "8", "-sI", "https://github.com"])
-    return (h.stdout or "").upper().lstrip().startswith("HTTP")
-
-
-def heal_host_network():
-    """Host-side self-recovery for the known firewalld/docker/libvirt race over
-    the iptables-nft FORWARD chain (observed 2026-09-19: host fine, guest fine,
-    zero transit — the policy-drop chain quietly lost the zone/libvirt jumps
-    after a network recreation). Ladder runs lightest-first and stops at the
-    first success. The docker step restarts host containers; it is ordered last
-    and only matters when the deploy cannot proceed without forwarding anyway.
-    Requires passwordless sudo; otherwise prints the exact manual commands."""
-    if not _probe_host_out():
-        warn("host itself has no outbound internet — nothing to self-heal here; "
-             "check the host connection first.")
-        return False
-    if sh_out(["sudo", "-n", "true"]).returncode != 0:
-        note("no passwordless sudo on the host — cannot self-heal automatically. Manual ladder:")
-        note("  sudo firewall-cmd --reload                                # 1")
-        note("  sudo systemctl restart firewalld                          # 2")
-        note("  sudo systemctl restart docker                             # 3 (bounces host containers)")
-        note("  sudo virsh net-destroy vagrant-libvirt && sudo virsh net-start vagrant-libvirt  # 4 + vagrant reload")
-        return False
-    if sh_out(["cat", "/proc/sys/net/ipv4/ip_forward"]).stdout.strip() != "1":
-        say("  re-enabling IPv4 forwarding…")
-        sh(["sudo", "-n", "sysctl", "-w", "net.ipv4.ip_forward=1"], check=False)
-    ladder = [
-        ("reload firewall rules",
-         [["sudo", "-n", "firewall-cmd", "--reload"]], False),
-        ("restart firewalld (FORWARD hooks rebuild)",
-         [["sudo", "-n", "systemctl", "restart", "firewalld"]], False),
-        ("restart docker after firewalld (correct chain order; host containers bounce)",
-         [["sudo", "-n", "systemctl", "restart", "docker"]], False),
-        ("recreate the libvirt network + reload the VM",
-         [["sudo", "-n", "virsh", "net-destroy", "vagrant-libvirt"],
-          ["sudo", "-n", "virsh", "net-start", "vagrant-libvirt"]], True),
-    ]
-    for label, cmds, reload_vm in ladder:
-        say("  self-heal: " + label + "…")
-        for c in cmds:
-            sh(c, check=False)
-        if reload_vm:
-            sh(["vagrant", "reload"], cwd=ENV_DIR, check=False)
-        time.sleep(4)
-        good, _ = guest_internet_ok()
-        if good:
-            ok("network self-healed at step: " + label)
-            return True
-    return False
 
 
 def step2():
     say("\n───────── STEP 2: verify guest internet ─────────")
-    for attempt in range(3):
+    good, out = guest_internet_ok()
+    if good:
+        ok(f"guest has outbound internet ({out.strip().splitlines()[-1] if out.strip() else 'probe'})")
+        return
+    host = sh_out(["curl", "-4", "-m", "8", "-sI", "https://github.com"])
+    if not (host.stdout or "").upper().lstrip().startswith("HTTP"):
+        fail("the devbox itself has no outbound internet — fix that first.")
+    # Known devbox gotcha: guest egress depends on the persisted host NAT for
+    # the Incus bridge (incus-nat.service: MASQUERADE + FORWARD accepts that
+    # ufw's FORWARD drop would otherwise swallow).
+    nat = sh_out(["systemctl", "is-active", "incus-nat.service"])
+    if (nat.stdout or "").strip() != "active":
+        warn("incus-nat.service is not active — restarting it (sudo)…")
+        sh(["sudo", "systemctl", "restart", "incus-nat.service"], check=False)
+        time.sleep(3)
         good, out = guest_internet_ok()
         if good:
-            ok(f"VM has outbound internet ({out.strip().splitlines()[-1] if out.strip() else 'probe'})")
+            ok("guest internet restored by restarting incus-nat.service")
             return
-        if attempt == 0:
-            # Is ssh itself alive? Stale vagrant↔libvirt state after an
-            # out-of-band VM restart makes vagrant ssh return nothing.
-            r = sh_out(["vagrant", "ssh", "-c", "echo ok"], cwd=ENV_DIR)
-            if "ok" not in (r.stdout or ""):
-                warn("vagrant cannot reach the VM (stale state) — cycling "
-                     "the VM through vagrant…")
-                sh(["vagrant", "halt", "--force"], cwd=ENV_DIR, check=False)
-                sh(["vagrant", "up"], cwd=ENV_DIR, check=False)
-                time.sleep(3)
-            else:
-                warn("guest lease may be stale — renewing gently…")
-                sh(["vagrant", "ssh", "-c",
-                    "sudo dhclient -r eth0 2>/dev/null; sudo dhclient eth0; "
-                    "sleep 2"], cwd=ENV_DIR, check=False)
-                time.sleep(3)
-        elif attempt == 1:
-            warn("still no internet — full vagrant-managed VM cycle…")
-            sh(["vagrant", "halt", "--force"], cwd=ENV_DIR, check=False)
-            sh(["vagrant", "up"], cwd=ENV_DIR, check=False)
-            time.sleep(3)
-        else:
-            # third failure: stop poking the guest (its lease/route/vagrant state
-            # already had two tries) and heal the HOST transit layer instead.
-            if heal_host_network():
-                return
-
-    diag = sh_out(["vagrant", "ssh", "-c",
-                   "ip -4 addr show eth0 | grep inet; "
-                   + PROBE_CMD + "; echo curl_exit=$?"],
-                  cwd=ENV_DIR)
-    guest = (diag.stdout or "(unreachable)").strip()
-    host_line = sh_out(["curl", "-4", "-m", "8", "-sI", "https://github.com"])
-    fail("the VM has no outbound internet, and the host self-heal ladder did not "
-         "restore it. Guest state:\n    "
-         + guest.replace("\n", "\n    ")
-         + "\n  Host probe on the same URL: "
-         + ((host_line.stdout or "").strip().splitlines()[-1]
-            if (host_line.stdout or "").strip() else "failed")
-         + "\n  If the host probe failed, it is the host's own connection. "
-           "Otherwise attach this output plus `sudo nft list chain ip filter FORWARD` "
-           "when reporting.")
-
-
-# ============================================================ STEP 4 (installer)
-
-def step4():
-    say("\n───────── STEP 4: install the suite (interactive) ─────────")
-    say("  First run: the installer asks for a GitHub PAT (read:packages),")
-    say("  email, admin password and backup directory, here in this terminal.")
-    say("  An existing deployment resumes with no prompts at all.")
-    say("  Out-of-band files are copied in automatically per the env file")
-    say(f"  (DuckDNS token at {DUCKDNS_TOKEN_FILE}, test CA leaf at")
-    say("   ~/.config/workforce-dev/testca) — the installer consumes both.")
-    cmd = [sys.executable, BOOTSTRAP, "--vagrant", "--env", "test"]
-    try:
-        sh(cmd)
-    except KeyboardInterrupt:
-        restore_terminal()
-        say("\n  (interrupted — the installer is resumable; rerun this "
-            "script to continue)")
-        raise SystemExit(130)
-    finally:
-        restore_terminal()
-
-
-# ============================================================ STEP 5 (version)
-
-def step5_version():
-    """Shared converge+verify: identical code path to deploy_to_prod's.
-    Only the transport differs — here a vagrant ssh as the service user."""
-    say("\n───────── STEP 5: converge to pinned version + verify ─────────")
-    target = TEST_ENV.get("APP_VERSION")
-    if not target:
-        fail("environments/test.env has no APP_VERSION pin")
-
-    def run(cmd):
-        full = ["vagrant", "ssh", "-c",
-                "sudo -n -iu workforce_app_sa bash -lc " + shlex.quote(cmd)]
-        r = sh_out(full, cwd=ENV_DIR)
-        out = (r.stdout or "") + (r.stderr or "")
-        if r.returncode != 0:
-            say(out)                       # show what went wrong, not just rc
-        return r.returncode, out
-
-    current = deploylib.box_version(run)
-    if not current:
-        fail("cannot read APP_VERSION from /opt/workforce-deploy/.env on the VM "
-             "(install failed?)")
-    if current == target:
-        ok(f"VM already on the pinned version {target}")
-    else:
-        deploylib.converge(run, target)
-    ca = os.path.expanduser(
-        TEST_ENV.get("TLS_CA_DIR", "~/.config/workforce-dev/testca") + "/ca.crt")
-    require_hostnames()
-    deploylib.verify_buildmeta(f"https://{APP_HOSTNAME}/api/v1/build-meta",
-                               target, cafile=ca, insecure=True)
-    # #15: the installer's one-time password banner scrolled away long ago;
-    # reprint the recoverable record HERE, at the moment the operator is
-    # reading this terminal. Only exists for installs that auto-generated it.
-    r = sh_out(["vagrant", "ssh", "-c",
-                "sudo -n cat /opt/workforce-deploy/secrets/initial-admin-password 2>/dev/null || true"],
-               cwd=ENV_DIR)
-    initial = (r.stdout or "").strip()
-    # Guard against a corrupt record printing as the "password" (observed once:
-    # 2-byte literal \n). Short/escaped content is treated as absent.
-    if initial and len(initial) >= 8 and "\\" not in initial and initial != "\\n":
-        warn("initial admin password (auto-generated at install): " + initial)
-        say("  (on the box: /opt/workforce-deploy/secrets/initial-admin-password —"
-            " move it to your password manager, then delete the file)")
+    _rc, diag = guest("ip -4 -o addr show dev eth0; ip route; cat /etc/resolv.conf; "
+                      + PROBE_CMD + "; echo curl_exit=$?")
+    fail("the guest has no outbound internet although the host does. Guest state:\n    "
+         + diag.strip().replace("\n", "\n    ")
+         + "\n  Check: systemctl status incus-nat.service; sudo nft list ruleset | "
+           "grep -A3 10.230.4; guest DNS must be 1.1.1.1/8.8.8.8 (RUNBOOK.md).")
 
 
 # ============================================================ STEP 3 (tailnet+DNS)
@@ -697,32 +525,36 @@ def read_duckdns_token():
 
 
 def step3_tailnet():
-    """Join the tailnet and point DuckDNS at THIS VM BEFORE the installer:
-    the playbook's discovery check resolves the public hostname, which must
-    reach THIS VM (the historical fresh-deploy chicken-and-egg)."""
-    say("\n───────── STEP 3: Tailscale + DuckDNS (before install) ─────────")
+    """Put the guest on the tailnet and point DuckDNS at it BEFORE any install:
+    the playbook's OIDC discovery check resolves the public hostname, which
+    must already reach this guest."""
+    say("\n───────── STEP 3: Tailscale + DuckDNS ─────────")
     require_hostnames()
-    say("  A login URL will appear — open it in a browser and approve "
-        "the device.")
-    # Fresh VMs don't have tailscale yet: bootstrap installs it (STEP 4),
-    # but the join now happens first. Install on demand, idempotently.
-    r = sh_out(["vagrant", "ssh", "-c", "command -v tailscale"], cwd=ENV_DIR)
-    if r.returncode != 0 or not (r.stdout or "").strip():
-        note("installing Tailscale inside the VM (one-time)…")
-        sh(["vagrant", "ssh", "-c",
-            "curl -fsSL https://tailscale.com/install.sh | sudo sh"],
-           cwd=ENV_DIR)
-    join_cmd = "sudo tailscale up"
-    if getattr(main, "ts_auth_key", None):
-        join_cmd += f" --auth-key={main.ts_auth_key}"
-        note("joining the tailnet with the provided auth key…")
-    sh(["vagrant", "ssh", "-c", join_cmd], cwd=ENV_DIR, check=False)
-    r = sh_out(["vagrant", "ssh", "-c", "tailscale ip -4"], cwd=ENV_DIR)
-    ip = (r.stdout or "").strip().splitlines()[-1].strip() if r.stdout else ""
-    if not ip.startswith("100."):
-        fail(f"could not read the VM's tailnet IP (got: {ip!r}). Run "
-             "vagrant ssh -c 'tailscale ip -4' manually.")
-    ok(f"VM tailnet IP: {ip}")
+    rc, out = guest("tailscale ip -4 2>/dev/null")
+    ip = out.strip().splitlines()[0].strip() if rc == 0 and out.strip() else ""
+    if ip.startswith("100."):
+        ok(f"guest already on the tailnet: {ip}")
+    else:
+        rc, _ = guest("command -v tailscale")
+        if rc != 0:
+            note("installing Tailscale inside the guest (one-time)…")
+            rc, out = guest("curl -fsSL https://tailscale.com/install.sh | sh")
+            if rc != 0:
+                fail("Tailscale install failed in the guest:\n" + out[-800:])
+        join = f"tailscale up --hostname={shlex.quote(TS_HOSTNAME)}"
+        if getattr(main, "ts_auth_key", None):
+            join += f" --auth-key={shlex.quote(main.ts_auth_key)}"
+            note("joining the tailnet with the provided auth key…")
+        else:
+            say("  A login URL will appear — open it in a browser and approve the device.")
+        # Interactive: stream it (the login URL must reach the operator).
+        sh(INCUS + ["exec", INSTANCE, "--project", PROJECT, "--", "bash", "-lc", join],
+           check=False)
+        rc, out = guest("tailscale ip -4")
+        ip = out.strip().splitlines()[0].strip() if rc == 0 and out.strip() else ""
+        if not ip.startswith("100."):
+            fail(f"could not read the guest's tailnet IP (got: {ip!r}).")
+        ok(f"guest tailnet IP: {ip}")
 
     token = read_duckdns_token()
     qs = urllib.parse.urlencode({
@@ -736,7 +568,7 @@ def step3_tailnet():
         fail(f"DuckDNS update failed: {exc}")
     if not body.upper().startswith("OK"):
         fail(f"DuckDNS rejected the update (response: {body[:200]!r}). "
-             "Check the token, then re-run with --skip-to 4.")
+             "Check the token, then re-run with --skip-to 3.")
     ok("DuckDNS records updated.")
 
     for host in (APP_HOSTNAME, AUTH_HOSTNAME):
@@ -753,12 +585,116 @@ def step3_tailnet():
             ok(f"{host} → {resolved}")
         else:
             warn(f"{host} → {resolved or 'unresolved'} (expected {ip}); "
-                 "DNS caching — retry shortly or add a hosts entry:")
-            if OS == "Windows":
-                say(f"    (admin) Add-Content $env:SystemRoot\\System32"
-                    f"\\drivers\\etc\\hosts '\"<ip> {host}\"'")
-            else:
-                say(f"    (sudo)  echo '<ip> {host}' >> /etc/hosts")
+                 f"DNS caching — retry shortly or:  echo '{ip} {host}' | sudo tee -a /etc/hosts")
+
+
+# ============================================================ STEP 4 (installer)
+
+def installed():
+    rc, _ = guest(f"test -f {WORKDIR}/.env")
+    return rc == 0
+
+
+def authorise_host_key():
+    """Make sure this host's public key may log in as root in the guest (the
+    guest's root password is locked). incus exec is the trusted channel."""
+    with open(SSH_KEY + ".pub") as f:
+        pub = f.read().strip()
+    rc, _ = guest("install -d -m 700 /root/.ssh && touch /root/.ssh/authorized_keys && "
+                  "chmod 600 /root/.ssh/authorized_keys && grep -qxF "
+                  + shlex.quote(pub) + " /root/.ssh/authorized_keys || echo "
+                  + shlex.quote(pub) + " >> /root/.ssh/authorized_keys")
+    if rc != 0:
+        fail("could not authorise this host's SSH key for root in the guest.")
+
+
+def guest_host_key_fingerprint():
+    """The guest's ED25519 host-key fingerprint, read through incus — so
+    bootstrap.py can PIN it instead of trusting first contact over the network."""
+    rc, out = guest("ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub")
+    m = re.search(r"(SHA256:\S+)", out)
+    if rc != 0 or not m:
+        fail("could not read the guest's SSH host key (is openssh-server installed?).")
+    return m.group(1)
+
+
+def step4(reinstall):
+    say("\n───────── STEP 4: install the suite ─────────")
+    if installed() and not reinstall:
+        ok(f"suite already installed in the guest ({WORKDIR}/.env present) — "
+           "version changes happen in STEP 5")
+        return
+    ip = guest_eth0_ip()
+    if not ip:
+        fail("could not read the guest's eth0 address.")
+    authorise_host_key()
+    fp = guest_host_key_fingerprint()
+    ok(f"guest {ip}, host key pinned {fp}")
+    say("  First install: the installer asks for the service-user password, a")
+    say("  GitHub PAT (read:packages), admin password and backup target, here in")
+    say("  this terminal. The test-CA leaf is shipped automatically.")
+    cmd = [sys.executable, BOOTSTRAP, "--host", ip, "--user", "root",
+           "--keyfile", SSH_KEY, "--host-key-fingerprint", fp, "--env", "test"]
+    try:
+        sh(cmd)
+    except KeyboardInterrupt:
+        restore_terminal()
+        say("\n  (interrupted — the installer is resumable; rerun this "
+            "script with --skip-to 4 --reinstall)")
+        raise SystemExit(130)
+    finally:
+        restore_terminal()
+
+
+# ============================================================ STEP 5 (version)
+
+def step5_version():
+    """Shared converge+verify: identical code path to deploy_to_prod's.
+    Only the transport differs — incus exec as the service user."""
+    say("\n───────── STEP 5: converge to pinned version + verify ─────────")
+    target = TEST_ENV.get("APP_VERSION")
+    if not target:
+        fail("environments/test.env has no APP_VERSION pin")
+
+    def run(cmd):
+        rc, out = guest(cmd, as_service_user=True)
+        if rc != 0:
+            say(out)                       # show what went wrong, not just rc
+        return rc, out
+
+    current = deploylib.box_version(run)
+    if not current:
+        fail(f"cannot read APP_VERSION from {WORKDIR}/.env in the guest "
+             "(install failed?)")
+    if current == target:
+        ok(f"appliance already on the pinned version {target}")
+    else:
+        deploylib.converge(run, target)
+    ca = os.path.expanduser(
+        TEST_ENV.get("TLS_CA_DIR", "~/.config/workforce-dev/testca") + "/ca.crt")
+    require_hostnames()
+    deploylib.verify_buildmeta(f"https://{APP_HOSTNAME}/api/v1/build-meta",
+                               target, cafile=ca, insecure=True)
+    # #15: reprint the one-time admin password record while the operator is
+    # reading this terminal (only exists for installs that auto-generated it).
+    _rc, initial = guest(f"cat {WORKDIR}/secrets/initial-admin-password 2>/dev/null || true")
+    initial = initial.strip()
+    if initial and len(initial) >= 8 and "\\" not in initial:
+        warn("initial admin password (auto-generated at install): " + initial)
+        say(f"  (in the guest: {WORKDIR}/secrets/initial-admin-password —"
+            " move it to your password manager, then delete the file)")
+
+
+def take_snapshot():
+    """(Re)take the baseline snapshot --fresh restores. Only after a verified run."""
+    if snapshot_exists():
+        r = incus("snapshot", "delete", INSTANCE, SNAPSHOT)
+        if r.returncode != 0:
+            fail("could not replace the old snapshot: " + (r.stderr or "").strip())
+    r = incus("snapshot", "create", INSTANCE, SNAPSHOT)
+    if r.returncode != 0:
+        fail("snapshot failed: " + (r.stderr or r.stdout or "").strip())
+    ok(f"snapshot '{SNAPSHOT}' taken — `--fresh` now resets to this state")
 
 
 # ============================================================ main
@@ -767,35 +703,31 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--fresh", action="store_true",
-                    help="tear down the VM and redeploy from scratch "
-                         "(full journey)")
-    ap.add_argument("--teardown", action="store_true",
-                    help="destroy the VM and stop (no redeploy)")
+                    help=f"restore snapshot '{SNAPSHOT}' first, then run the journey")
     ap.add_argument("--check-only", action="store_true",
                     help="run STEP 0 (prerequisite report) and exit")
     ap.add_argument("--skip-to", type=int, default=0, choices=[0, 1, 2, 3, 4, 5],
-                    help="resume at step N (runs that step and everything "
-                         "after): 0 prereqs, 1 VM, 2 guest-internet, "
+                    help="resume at step N (runs that step and everything after): "
+                         "0 prereqs, 1 appliance, 2 guest-internet, "
                          "3 Tailscale+DuckDNS, 4 install, 5 version converge")
+    ap.add_argument("--reinstall", action="store_true",
+                    help="STEP 4 runs bootstrap.py even when the suite is installed "
+                         "(the installer resumes/re-converges)")
+    ap.add_argument("--snapshot", action="store_true",
+                    help=f"after a successful verify, (re)take snapshot '{SNAPSHOT}'")
     ap.add_argument("--tailscale-auth-key",
-                    help="join the tailnet unattended (else the login URL "
-                         "is shown for browser approval)")
+                    help="join the tailnet unattended (else a login URL is shown)")
     args = ap.parse_args()
 
     say("═══════════════════════════════════════════════════════")
-    say("  Workforce Suite → TEST environment (any OS)")
+    say(f"  Workforce Suite → TEST appliance (Incus: {PROJECT}/{INSTANCE})")
     say("═══════════════════════════════════════════════════════")
 
     main.ts_auth_key = args.tailscale_auth_key
-    if args.teardown:
-        teardown()
-        return
-    step0()
+    step0(check_only=args.check_only)   # always: it also decides how incus is invoked
     if args.check_only:
-        say("\nCheck complete — nothing was run.")
+        say("\nCheck complete — nothing was changed.")
         return
-    if not os.path.isdir(ENV_DIR):
-        fail(f"environments directory not found: {ENV_DIR}")
 
     if args.skip_to <= 1:
         step1(args.fresh)
@@ -804,18 +736,19 @@ def main():
     if args.skip_to <= 3:
         step3_tailnet()
     if args.skip_to <= 4:
-        step4()
+        step4(args.reinstall)
     if args.skip_to <= 5:
         step5_version()
+    if args.snapshot:
+        take_snapshot()
 
     require_hostnames()
     say("\n═══════════════════════════════════════════════════════")
-    say("  TEST environment deployed.")
+    say("  TEST appliance deployed.")
     say(f"    App:     https://{APP_HOSTNAME}")
     say(f"    Sign-in: https://{AUTH_HOSTNAME}   (user: admin)")
-    say("  Reachable from any device on your tailnet.")
-    say("  Reset anytime:   vagrant snapshot restore clean && vagrant up")
-    say("  Full tear-down + redeploy:  deploy_to_test.py --fresh")
+    say("  Reachable from any device on your tailnet (test-CA root installed).")
+    say(f"  Reset to the baseline:  deploy_to_test.py --fresh   (snapshot '{SNAPSHOT}')")
     say("═══════════════════════════════════════════════════════")
 
 

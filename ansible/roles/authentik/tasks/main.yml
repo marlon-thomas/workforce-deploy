@@ -23,12 +23,14 @@
   vars:
     ak_secret: "{{ lookup('file', '/opt/workforce-deploy/secrets/ak_secret') }}"
     ak_db_password: "{{ lookup('file', '/opt/workforce-deploy/secrets/ak_db_password') }}"
+  no_log: true   # content is secret_key + DB password
 
 - name: OIDC client credentials read from the secrets the installer generated
   ansible.builtin.set_fact:
     oidc_client_id: "{{ lookup('file', '/opt/workforce-deploy/secrets/oidc_client_id') }}"
     oidc_client_secret: "{{ lookup('file', '/opt/workforce-deploy/secrets/oidc_client_secret') }}"
     acme_email: "{{ lookup('env', 'ACME_EMAIL') | default('admin@example.com', true) }}"
+  no_log: true   # OIDC client secret
 
 - name: blueprint rendered from values
   ansible.builtin.template:
@@ -38,6 +40,7 @@
     group: "{{ service_user }}"
     mode: "0644"
   register: blueprint_render
+  no_log: true   # renders the OIDC client secret + first admin password (--diff would print them)
 
 - name: Service user uid (rootless docker socket lives in their runtime dir)
   ansible.builtin.command: id -u {{ service_user }}

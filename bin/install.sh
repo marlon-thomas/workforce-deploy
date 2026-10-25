@@ -14,6 +14,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."   # bundle root
+# shellcheck source=lib/common.sh
+. ./bin/lib/common.sh     # docker_socket / use_docker_socket (one discovery path)
 
 SMOKE=0
 SYSTEM_DOCKER=0
@@ -37,6 +39,9 @@ while [ $# -gt 0 ]; do
 done
 [ -n "${ENV_NAME_ARG}" ] && { [ "${ENV_NAME_ARG}" = "test" ] || [ "${ENV_NAME_ARG}" = "prod" ] \
   || { echo "Unknown environment: ${ENV_NAME_ARG} (test|prod)"; exit 1; }; }
+# What to type to resume after a failure (printed by every failure path).
+RESUME_CMD="./bin/install.sh${ENV_NAME_ARG:+ --env ${ENV_NAME_ARG}}"
+[ "${SMOKE}" -eq 1 ] && RESUME_CMD="${RESUME_CMD} --smoke"
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m ->\033[0m %s\n' "$*"; }
@@ -237,7 +242,7 @@ INV
       t0=$SECONDS; last=""
       while :; do
         sleep 3
-        sum=$(DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock" docker ps -a \
+        sum=$(DOCKER_HOST="unix://$(docker_socket || echo "/run/user/$(id -u)/docker.sock")" docker ps -a \
               --format '{{.Names}} {{.Status}}' 2>/dev/null | awk '
           { name = $1; sub(/^workforce-deploy-/, "", name); sub(/-[0-9]+$/, "", name)
             if ($0 ~ /Exited \(0\)/) next
@@ -258,7 +263,6 @@ INV
       done
     ) &
     ticker_pid=$!
-    trap '[ -n "${ticker_pid:-}" ] && kill "$ticker_pid" 2>/dev/null' EXIT
   fi
 
   # Gateway config fallbacks for boxes whose .env predates (or whose template
@@ -286,26 +290,47 @@ INV
   # progress, not failures. Collapse them to one calm [wait] line per task (then every
   # 10th poll), keeping the real signal: TASK headers, ok/changed, and anything on
   # stderr (fatal errors) all pass through untouched. pipefail preserves the exit code.
+  # Extra-vars travel in a 0600 temp file (-e @file), never on the command line:
+  # argv is world-readable via ps//proc for the whole multi-minute converge, and
+  # the GitHub token + admin password used to sit there in clear. JSON-encoded
+  # by python (already a hard dependency) so no value can break the quoting.
+  # Removed on ANY exit by the trap below.
+  VARS_FILE="$(umask 077 && mktemp "${TMPDIR:-/tmp}/workforce-vars.XXXXXX")"
+  trap 'rm -f "${VARS_FILE:-}"; [ -n "${ticker_pid:-}" ] && kill "$ticker_pid" 2>/dev/null' EXIT
+  ANSIBLE_SOCK="$(docker_socket || echo "/run/user/$(id -u)/docker.sock")"
+  WFV_app_hostname="${APP_HOSTNAME}" \
+  WFV_auth_hostname="${AUTH_HOSTNAME}" \
+  WFV_env_name="${ENV_NAME:-prod}" \
+  WFV_service_user="${SERVICE_USER:-workforce_app_sa}" \
+  WFV_github_token="${GITHUB_TOKEN}" \
+  WFV_ak_admin_password="${ADMIN_PASSWORD}" \
+  WFV_acme_email="${ACME_EMAIL}" \
+  WFV_app_version="${APP_VERSION:-0.2.9}" \
+  WFV_gateway_image="${GW_IMAGE}" \
+  WFV_gateway_caddyfile="${GW_CADDYFILE}" \
+  WFV_duckdns_api_token="${DUCKDNS_API_TOKEN:-}" \
+  WFV_smtp_host="${SMTP_HOST:-}" \
+  WFV_smtp_port="${SMTP_PORT:-587}" \
+  WFV_smtp_username="${SMTP_USERNAME:-}" \
+  WFV_smtp_password="${SMTP_PASSWORD:-}" \
+  WFV_smtp_starttls="${SMTP_STARTTLS:-false}" \
+  WFV_smtp_from="${SMTP_FROM:-}" \
+  WFV_compose_profiles="${COMPOSE_PROFILES:-}" \
+  WFV_backup_target="${BACKUP_TARGET:-}" \
+  WFV_docker_sock="${ANSIBLE_SOCK}" \
+  python3 -c 'import json,os,sys; json.dump({k[4:]: v for k, v in os.environ.items() if k.startswith("WFV_")}, sys.stdout)' \
+    > "$VARS_FILE"
+
+  # Full, unfiltered playbook output is kept on disk (the console view below
+  # collapses retry noise) so a failure is always diagnosable after the fact.
+  mkdir -p logs
+  INSTALL_LOG="logs/install-$(date +%Y%m%d-%H%M%S).log"
+  : > "$INSTALL_LOG"; chmod 600 "$INSTALL_LOG"
+  set +e
   ansible-playbook -i inventories/local/hosts.yml ansible/site.yml \
     --connection=local -e "ansible_connection=local" \
-    -e "app_hostname=${APP_HOSTNAME}" \
-    -e "auth_hostname=${AUTH_HOSTNAME}" \
-    -e "env_name=${ENV_NAME:-prod}" \
-    -e "service_user=${SERVICE_USER:-workforce_app_sa}" \
-    -e "github_token=${GITHUB_TOKEN}" \
-    -e "ak_admin_password=${ADMIN_PASSWORD}" \
-    -e "acme_email=${ACME_EMAIL}" \
-    -e "app_version=${APP_VERSION:-0.2.9}" \
-    -e "gateway_image=${GW_IMAGE}" \
-    -e "gateway_caddyfile=${GW_CADDYFILE}" \
-    -e "duckdns_api_token=${DUCKDNS_API_TOKEN:-}" \
-    -e "smtp_host=${SMTP_HOST:-}" \
-    -e "smtp_port=${SMTP_PORT:-587}" \
-    -e "smtp_username=${SMTP_USERNAME:-}" \
-    -e "smtp_password=${SMTP_PASSWORD:-}" \
-    -e "smtp_starttls=${SMTP_STARTTLS:-false}" \
-    -e "smtp_from=${SMTP_FROM:-}" \
-    -e "compose_profiles=${COMPOSE_PROFILES:-}" \
+    -e "@${VARS_FILE}" 2>&1 \
+  | tee -a "$INSTALL_LOG" \
   | awk '
     {
       raw = $0; line = raw
@@ -322,10 +347,22 @@ INV
         printf "  [wait] %s — polling (%d/%d)\n", task, seen, start
       next
     }'
+  ANSIBLE_RC=${PIPESTATUS[0]}
+  set -e
 
+  rm -f "$VARS_FILE"
   if [ -n "$ticker_pid" ]; then
     kill "$ticker_pid" 2>/dev/null; wait "$ticker_pid" 2>/dev/null || true
-    trap - EXIT
+  fi
+  trap - EXIT
+
+  if [ "$ANSIBLE_RC" -ne 0 ]; then
+    FAILED_TASK="$(awk '/^TASK \[/ { t = $0 } /^(fatal|failed):|FAILED!/ { f = t } END { print f }' "$INSTALL_LOG")"
+    fail "The platform did not converge (ansible exit ${ANSIBLE_RC}).
+     Failed task : ${FAILED_TASK:-unknown — see the log}
+     Full log    : $(pwd)/${INSTALL_LOG}
+     Fix the cause, then resume (safe — already-converged steps are skipped):
+       cd $(pwd) && ${RESUME_CMD}"
   fi
 }
 
@@ -403,9 +440,6 @@ bootstrap() {
       fail "Rootless Docker setup failed. If this kernel lacks unprivileged user
      namespaces (some OpenVZ/LXC images), re-run with --system-docker."
     fi
-    # Fedora: Vagrant's embedded Ruby needs libxcrypt-compat (not shipped by default)
-    command -v dnf >/dev/null 2>&1 && rpm -q libxcrypt-compat >/dev/null 2>&1 \
-      || (command -v dnf >/dev/null 2>&1 && dnf install -y -q libxcrypt-compat) || true
     sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
       XDG_RUNTIME_DIR="/run/user/$(id -u "$SERVICE_USER")" \
       systemctl --user enable --now docker
@@ -459,9 +493,13 @@ PROF
   # Root phase: API_IMAGE/APP_VERSION are not defined yet — use the
   # literal published reference (same image the .env will pin).
   SUITE_IMAGE="ghcr.io/marlon-thomas/workforce-suite:${APP_VERSION:-0.2.9}"
+  # Socket via the shared helper: rootless (just set up above) or, under
+  # --system-docker, /var/run/docker.sock — the old hard-coded runtime-dir
+  # path pointed at a daemon that does not exist in system-docker mode.
+  SU_SOCK="$(docker_socket || echo "/run/user/$(id -u "$SERVICE_USER")/docker.sock")"
   DSU="sudo -u $SERVICE_USER env HOME=/home/$SERVICE_USER \
     XDG_RUNTIME_DIR=/run/user/$(id -u $SERVICE_USER) \
-    DOCKER_HOST=unix:///run/user/$(id -u $SERVICE_USER)/docker.sock"
+    DOCKER_HOST=unix://${SU_SOCK}"
   if [ ! -f secrets/api-truststore.jks ]; then
     echo "Creating the JVM truststore (secrets/api-truststore.jks)…"
     $DSU docker pull "${SUITE_IMAGE}" >/dev/null 2>&1 || true
@@ -542,9 +580,12 @@ if [ -f .env ]; then
     # and never reverts an existing admin password.
     ADMIN_PASSWORD="$(openssl rand -base64 18)"
     run_ansible_site
-    # informational report — the playbook already gated on health; never let
-    # a warn row abort a converged resume
-    ./bin/doctor.sh || true
+    # doctor exits non-zero only on FAIL rows (WARN rows never count), so a
+    # red health check is a failed install, not a footnote.
+    DOCTOR_ARGS=""; [ "${SMOKE}" -eq 1 ] && DOCTOR_ARGS="--smoke"
+    # shellcheck disable=SC2086
+    ./bin/doctor.sh $DOCTOR_ARGS || fail "Health check failed after converging — see the FAIL rows above.
+     Resume after fixing: cd $(pwd) && ${RESUME_CMD}"
     echo ""
     # Resume never re-prompts and never changes the admin password; if the
     # original was auto-generated it lives in the recoverable file (#15).
@@ -768,10 +809,13 @@ run_ansible_site
 
 # ---------------------------------------------------------------- health check
 say "Final health check:"
+# Captured, not ignored: the admin password below must still be shown/saved
+# (it is already live in authentik), THEN a red check fails the install.
+DOCTOR_RC=0
 if [ "${SMOKE}" -eq 1 ]; then
-  ./bin/doctor.sh --smoke || true
+  ./bin/doctor.sh --smoke || DOCTOR_RC=$?
 else
-  ./bin/doctor.sh || true
+  ./bin/doctor.sh || DOCTOR_RC=$?
 fi
 
 # ---------------------------------------------------------------- summary
@@ -807,4 +851,9 @@ if [ "${GENERATED_ADMIN}" -eq 1 ]; then
   echo "  Also saved to ./secrets/initial-admin-password — move it somewhere safe"
   echo "  and DELETE the file. deploy_to_test reprints it after the final update."
   echo ""
+fi
+
+if [ "${DOCTOR_RC}" -ne 0 ]; then
+  fail "Installed, but the final health check is RED (see the FAIL rows above).
+     Fix the cause, then resume: cd $(pwd) && ${RESUME_CMD}"
 fi

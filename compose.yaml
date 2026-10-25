@@ -428,18 +428,27 @@ services:
     restart: unless-stopped
     networks: [data, back]
     volumes:
-      - .:/work
+      # Mounted at the bundle's real host path (it always lives there — the
+      # ansible roles pin it): backup.sh drives `docker compose`, and the
+      # daemon resolves every relative bind/secret path (./secrets/...) on the
+      # HOST. Under the old /work mount those resolved to a non-existent
+      # /work/... on the host and the project name became "work".
+      - .:/opt/workforce-deploy
       # Rootless-compatible: the operator's docker socket, wherever it lives
       # (root: /var/run/docker.sock; rootless: /run/user/<uid>/docker.sock).
+      # install.sh writes DOCKER_SOCK into .env via bin/lib/common.sh.
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
     environment:
       TZ: Europe/London
+      COMPOSE_PROJECT_NAME: workforce-deploy
     entrypoint:
       - /bin/sh
       - -c
       - |
-        apk add -q dcron docker-cli >/dev/null
-        echo '0 2 * * * cd /work && ./bin/backup.sh >> backups/cron.log 2>&1' | crontab -
+        # bash: backup.sh is a bash script; docker-cli-compose: it drives
+        # `docker compose` (alpine's docker-cli ships without the plugin).
+        apk add -q dcron bash docker-cli docker-cli-compose >/dev/null
+        echo '0 2 * * * cd /opt/workforce-deploy && ./bin/backup.sh >> backups/cron.log 2>&1' | crontab -
         crond -f -L /dev/null
     logging: *default-logging
 
