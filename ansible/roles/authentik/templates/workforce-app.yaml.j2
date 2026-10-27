@@ -23,8 +23,10 @@ entries:
       name: Workforce invite claim
       scope_name: workforce
       description: Links this login to the staff record it was invited for
+      # authentik's user-write stage treats "_" in an attribute key as a path separator, so the
+      # invitation's `attributes.workforce_invite` is stored as attributes.workforce.invite.
       expression: |
-        return {"workforce_invite": request.user.attributes.get("workforce_invite")}
+        return {"workforce_invite": (request.user.attributes.get("workforce") or {}).get("invite")}
   - attrs:
       name: Workforce
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
