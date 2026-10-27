@@ -91,8 +91,11 @@ docker compose up -d || rollback "The new version would not start"
 
 say "Health check…"
 HEALTHY=0
-for _ in 1 2 3 4 5 6; do
-  sleep 20
+# Same ~2-minute budget as before, but probed every 5s: a fixed 20s sleep before the
+# first probe added up to 20s to every update that was already healthy.
+DEADLINE=$(( $(date +%s) + 120 ))
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+  sleep 5
   if ./bin/doctor.sh >/dev/null 2>&1; then HEALTHY=1; break; fi
 done
 ./bin/doctor.sh || true
