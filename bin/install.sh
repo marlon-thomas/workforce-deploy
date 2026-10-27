@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — Care Angels Workforce Suite, B-mode appliance installer
+# install.sh — Workforce, B-mode appliance installer
 # (deployment-spec §B2: "paste one line, answer four questions").
 #
 # Run as root on a fresh VPS:   ./bin/install.sh
@@ -378,7 +378,7 @@ bootstrap() {
   if id "$SERVICE_USER" >/dev/null 2>&1; then
     echo "   user '$SERVICE_USER' already exists."
   else
-    adduser --disabled-password --gecos "Care Angels Workforce service account,,," "$SERVICE_USER"
+    adduser --disabled-password --gecos "Workforce service account,,," "$SERVICE_USER"
     usermod -aG sudo "$SERVICE_USER"
     echo "   user '$SERVICE_USER' created (sudo member)."
     while true; do

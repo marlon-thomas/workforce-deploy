@@ -1,11 +1,25 @@
-# Care Angels Workforce — sign-in provisioning blueprint (deployment-spec §B2/B5).
+# Workforce — sign-in provisioning blueprint (deployment-spec §B2/B5).
 # install.sh renders this with the deployment's client credentials and hostname, and
 # mounts it into authentik's blueprint directory; authentik applies it natively on
 # startup (idempotent — safe on every boot).
 version: 1
 metadata:
-  name: Care Angels Workforce application
+  name: Workforce application
 entries:
+  # Sign-in, enrolment and sign-out pages look like Workforce, not authentik (ux-product-review
+  # R5): the browser-tab title, logo and icon. The logo and icon are the app's public build-time
+  # brand files (no tenant data); branding/authentik-custom.css does the page styling.
+  - model: authentik_brands.brand
+    identifiers:
+      domain: authentik-default
+    attrs:
+      branding_title: Workforce
+      branding_logo: https://${APP_HOSTNAME}/icons/wordmark.svg
+      branding_favicon: https://${APP_HOSTNAME}/icons/icon.svg
+      attributes:
+        settings:
+          theme:
+            base: light
   - model: authentik_blueprints.metaapplyblueprint
     attrs:
       identifiers:

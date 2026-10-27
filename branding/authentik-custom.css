@@ -1,0 +1,48 @@
+/*
+ * Workforce look for authentik's sign-in, enrolment and sign-out pages (ux-product-review R5).
+ * Mounted over authentik's /web/dist/custom.css, which its page skeleton loads. The logo, title
+ * and favicon come from the brand in the blueprint; this replaces authentik's photo background
+ * with Workforce's calm brand wash and matches the app's buttons and focus ring.
+ */
+:root {
+  --ak-flow-background: none;
+  --pf-global--primary-color--100: #4f46e5;
+  --pf-global--primary-color--200: #4038c0;
+  --pf-global--link--Color: #4038c0;
+  --pf-global--link--Color--hover: #2f2a96;
+}
+
+.pf-c-background-image {
+  display: none !important;
+}
+
+body,
+.pf-c-login {
+  background: linear-gradient(140deg, #eef0ff 0%, #f6f7fb 50%, #e8ebfb 100%) !important;
+}
+
+.pf-c-login__main {
+  border-radius: 16px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 12px 32px rgba(64, 56, 192, 0.12);
+}
+
+.pf-c-button.pf-m-primary {
+  background-color: #4f46e5;
+  border-radius: 10px;
+}
+
+.pf-c-button.pf-m-primary:hover {
+  background-color: #4038c0;
+}
+
+:focus-visible {
+  outline: 3px solid #4f46e5;
+  outline-offset: 2px;
+}
+
+/* The footer was white text for the photo; on the light wash it needs a readable grey (4.5:1+). */
+.pf-c-login__footer,
+.pf-c-login__footer a,
+.pf-c-login__footer .pf-c-list {
+  color: #475467 !important;
+}

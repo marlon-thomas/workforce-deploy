@@ -1,6 +1,6 @@
 version: 1
 metadata:
-  name: Care Angels Workforce application
+  name: Workforce application
 entries:
   - model: authentik_blueprints.metaapplyblueprint
     attrs:
@@ -15,6 +15,20 @@ entries:
   # ADR-0017: the invite claim. Written to the user's attributes from the invitation's fixed
   # data at enrolment (users cannot edit attributes); the app links the login to the invited
   # staff record by this id, never by email (authentik reports email_verified=true for all).
+  # Sign-in, enrolment and sign-out pages look like Workforce, not authentik (ux-product-review
+  # R5): the browser-tab title, logo and icon. The logo and icon are the app's public build-time
+  # brand files (no tenant data); branding/authentik-custom.css does the page styling.
+  - model: authentik_brands.brand
+    identifiers:
+      domain: authentik-default
+    attrs:
+      branding_title: Workforce
+      branding_logo: https://{{ app_hostname }}/icons/wordmark.svg
+      branding_favicon: https://{{ app_hostname }}/icons/icon.svg
+      attributes:
+        settings:
+          theme:
+            base: light
   - model: authentik_providers_oauth2.scopemapping
     id: workforce-invite-scope
     identifiers:

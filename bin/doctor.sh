@@ -17,7 +17,7 @@ row() { # row <label> <ok|warn|fail> <detail>
   esac
 }
 
-echo "Care Angels Workforce — health check ($(date '+%Y-%m-%d %H:%M'))"
+echo "Workforce — health check ($(date '+%Y-%m-%d %H:%M'))"
 echo "(first boot: api/authentik can take several minutes — re-run if FAILs persist)"
 echo "-------------------------------------------------------------"
 

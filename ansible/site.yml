@@ -1,12 +1,12 @@
 ---
-# Care Angels Workforce Suite — full provisioning (deployment-spec §B).
+# Workforce — full provisioning (deployment-spec §B).
 # One playbook, run on the box by install.sh (test = the Incus appliance, prod = the VPS).
 #
 #   ansible-playbook -i inventories/prod/hosts.yml site.yml
 #
 # Interactive elements (passwords, tokens) are prompted; everything else
 # converges idempotently — re-running is always safe.
-- name: Care Angels Workforce — provision
+- name: Workforce — provision
   hosts: all
   gather_facts: true
   vars_prompt:

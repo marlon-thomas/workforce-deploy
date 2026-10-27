@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 . ./bin/lib/common.sh
 use_docker_socket
 
-echo "This will stop the Care Angels Workforce system on this machine."
+echo "This will stop the Workforce system on this machine."
 echo "Data (database, evidence, configuration) is KEPT unless you choose removal below."
 echo ""
 echo "Step 1 — making a final backup…"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-bootstrap.py — one-command remote deployment for the Care Angels Workforce Suite.
+bootstrap.py — one-command remote deployment for the Workforce.
 
 Run this from ANYWHERE (your laptop, another server) with the target's root
 credentials; it connects over SSH and drives the entire first deployment:

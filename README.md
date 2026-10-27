@@ -1,7 +1,7 @@
-# Care Angels Workforce — Deployment Machinery
+# Workforce — Deployment Machinery
 
 **Public, single source of the deployment apparatus** (ADR-0010). Everything
-needed to install, update, heal and operate a Care Angels appliance lives in
+needed to install, update, heal and operate a Workforce appliance lives in
 this repository. The application source is closed: **versioned images are
 published to GHCR** and require a GitHub `read:packages` PAT — the same token
 the installer prompts for, and the licensing control point for customers.

@@ -508,6 +508,8 @@ services:
       - ./secrets/ak_config.yml:/etc/authentik/config.yml:ro
       # Rendered by install.sh from blueprints/workforce-app.yaml.template (§B5)
       - ./blueprints/workforce-app.yaml:/blueprints/workforce-app.yaml:ro
+      # Workforce look for the sign-in pages: authentik's page skeleton loads this file (R5).
+      - ./branding/authentik-custom.css:/web/dist/custom.css:ro
     logging: *default-logging
     stop_grace_period: 30s
     depends_on:

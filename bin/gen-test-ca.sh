@@ -49,7 +49,7 @@ if [ ! -f "$CA_CRT" ] || [ ! -f "$CA_KEY" ]; then
   say "Generating a new 10-year root CA…"
   openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
     -keyout "$CA_KEY" -out "$CA_CRT" \
-    -subj "/O=Care Angels Workforce/CN=Care Angels Test Root CA (do not use in production)" \
+    -subj "/O=Workforce/CN=Workforce Test Root CA (do not use in production)" \
     -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
     -addext "keyUsage=critical,keyCertSign,cRLSign"
   chmod 600 "$CA_KEY"
