@@ -20,7 +20,7 @@ Incus is the ONLY supported test platform. The devbox is a VPS without
           host's key authorised for root; interactive prompts on first install)
   STEP 5  converge to environments/test.env:APP_VERSION + verify
           (deploylib.converge — the SAME code deploy_to_prod.py runs; only the
-          transport differs: `incus exec … sudo -iu workforce_app_sa`)
+          transport differs: `incus exec … sudo -u workforce_app_sa -H bash -lc`)
 
 Usage (on the devbox, from a clone of this repo):
   python3 bin/deploy_to_test.py                 # full journey (idempotent)
@@ -212,7 +212,10 @@ def guest(cmd, as_service_user=False):
     """Run a shell command inside the guest (as root, or as the service user
     through a login shell — the same identity the installer and update.sh use).
     Returns (returncode, combined output)."""
-    inner = (["sudo", "-n", "-iu", SERVICE_USER, "bash", "-lc", cmd]
+    # sudo -u, not -i: -i re-parses the command through the target's shell, so $vars
+    # meant for an inner `sh -c '…'` (deploylib.GUARDED_PULL) were expanded one layer
+    # early — the guard became a no-op and `exit $rc` always exited 0.
+    inner = (["sudo", "-n", "-u", SERVICE_USER, "-H", "bash", "-lc", cmd]
              if as_service_user else ["bash", "-lc", cmd])
     r = sh_out(INCUS + ["exec", INSTANCE, "--project", PROJECT, "--"] + inner)
     return r.returncode, (r.stdout or "") + (r.stderr or "")
