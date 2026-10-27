@@ -12,6 +12,19 @@ entries:
       identifiers:
         name: Default - Invalidation flow
       required: false
+  # ADR-0017: the invite claim. Written to the user's attributes from the invitation's fixed
+  # data at enrolment (users cannot edit attributes); the app links the login to the invited
+  # staff record by this id, never by email (authentik reports email_verified=true for all).
+  - model: authentik_providers_oauth2.scopemapping
+    id: workforce-invite-scope
+    identifiers:
+      name: Workforce invite claim
+    attrs:
+      name: Workforce invite claim
+      scope_name: workforce
+      description: Links this login to the staff record it was invited for
+      expression: |
+        return {"workforce_invite": request.user.attributes.get("workforce_invite")}
   - attrs:
       name: Workforce
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
@@ -41,6 +54,7 @@ entries:
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+        - !KeyOf workforce-invite-scope
     identifiers:
       name: Workforce
     state: present
@@ -69,8 +83,125 @@ entries:
       # 'local-ca@invalid', which authentik's serializer rejects — a rejected
       # entry aborts the whole blueprint import (provider never created).
       email: admin@{{ auth_hostname }}
+{% if ak_admin_password | default('') | length > 0 %}
       password: {{ ak_admin_password }}
+{% endif %}
     identifiers:
       username: admin
     state: created
     model: authentik_core.user
+
+  # ---------- ADR-0017: staff enrolment by invitation only ----------
+  - model: authentik_stages_invitation.invitationstage
+    id: wf-invitation-stage
+    identifiers: { name: workforce-invitation }
+    attrs:
+      name: workforce-invitation
+      continue_flow_without_invitation: false
+  - model: authentik_stages_prompt.prompt
+    id: wf-prompt-name
+    identifiers: { name: workforce-enrollment-name }
+    attrs:
+      name: workforce-enrollment-name
+      field_key: name
+      label: Your full name
+      type: text
+      required: true
+      placeholder: As your manager knows you
+      order: 10
+  - model: authentik_stages_prompt.prompt
+    id: wf-prompt-password
+    identifiers: { name: workforce-enrollment-password }
+    attrs:
+      name: workforce-enrollment-password
+      field_key: password
+      label: Choose a password
+      type: password
+      required: true
+      placeholder: At least 10 characters
+      order: 20
+  - model: authentik_stages_prompt.prompt
+    id: wf-prompt-password-repeat
+    identifiers: { name: workforce-enrollment-password-repeat }
+    attrs:
+      name: workforce-enrollment-password-repeat
+      field_key: password_repeat
+      label: Type it again
+      type: password
+      required: true
+      placeholder: The same password
+      order: 30
+  - model: authentik_policies_password.passwordpolicy
+    id: wf-password-policy
+    identifiers: { name: workforce-password-policy }
+    attrs:
+      name: workforce-password-policy
+      password_field: password
+      length_min: 10
+      error_message: Use at least 10 characters.
+      check_static_rules: true
+      check_have_i_been_pwned: false
+      check_zxcvbn: false
+  - model: authentik_stages_prompt.promptstage
+    id: wf-enrollment-prompt
+    identifiers: { name: workforce-enrollment-prompt }
+    attrs:
+      name: workforce-enrollment-prompt
+      fields:
+        - !KeyOf wf-prompt-name
+        - !KeyOf wf-prompt-password
+        - !KeyOf wf-prompt-password-repeat
+      validation_policies:
+        - !KeyOf wf-password-policy
+  - model: authentik_stages_user_write.userwritestage
+    id: wf-enrollment-write
+    identifiers: { name: workforce-enrollment-write }
+    attrs:
+      name: workforce-enrollment-write
+      user_creation_mode: always_create
+      create_users_as_inactive: false
+      user_type: internal
+  - model: authentik_stages_user_login.userloginstage
+    id: wf-enrollment-login
+    identifiers: { name: workforce-enrollment-login }
+    attrs:
+      name: workforce-enrollment-login
+  - model: authentik_flows.flow
+    id: wf-enrollment-flow
+    identifiers: { slug: workforce-enrollment }
+    attrs:
+      name: Workforce enrolment
+      slug: workforce-enrollment
+      title: Set up your account
+      designation: enrollment
+      authentication: require_unauthenticated
+      layout: stacked
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-enrollment-flow, stage: !KeyOf wf-invitation-stage }
+    attrs: { order: 10 }
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-enrollment-flow, stage: !KeyOf wf-enrollment-prompt }
+    attrs: { order: 20 }
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-enrollment-flow, stage: !KeyOf wf-enrollment-write }
+    attrs: { order: 30 }
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-enrollment-flow, stage: !KeyOf wf-enrollment-login }
+    attrs: { order: 40 }
+
+  # ---------- Review R5: the sign-in page is ours, not authentik's ----------
+  - model: authentik_flows.flow
+    identifiers: { slug: default-authentication-flow }
+    attrs:
+      title: Sign in to Workforce
+    state: present
+
+  # ---------- ADR-0017: people cannot change their own email ----------
+  - model: authentik_stages_prompt.promptstage
+    identifiers: { name: default-user-settings }
+    attrs:
+      fields:
+        - !Find [authentik_stages_prompt.prompt, [name, default-user-settings-field-username]]
+        - !Find [authentik_stages_prompt.prompt, [name, default-user-settings-field-name]]
+        - !Find [authentik_stages_prompt.prompt, [name, default-user-settings-field-locale]]
+

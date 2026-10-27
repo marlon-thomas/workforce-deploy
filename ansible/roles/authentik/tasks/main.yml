@@ -125,3 +125,37 @@
   delay: 10
   environment:
     DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
+
+# ---------- ADR-0017: the app's invitation credential ----------
+# Generated once (the password lookup creates the file only when it is missing), so existing
+# installs gain it on their next converge and a re-run never rotates it.
+- name: invite token present
+  ansible.builtin.set_fact:
+    ak_invite_token: "{{ lookup('ansible.builtin.password', '/opt/workforce-deploy/secrets/ak_invite_token chars=ascii_letters,digits length=48') }}"
+  no_log: true
+
+- name: invite token file owned by the service user
+  ansible.builtin.file:
+    path: /opt/workforce-deploy/secrets/ak_invite_token
+    owner: "{{ service_user }}"
+    group: "{{ service_user }}"
+    mode: "0600"
+
+# Service account + invitation-only role + API token, converged inside authentik. The key goes
+# in on stdin (never argv or env); the script is idempotent.
+- name: invite service account converged
+  ansible.builtin.shell: >-
+    docker cp {{ role_path }}/files/invite-service-account.py
+    workforce-deploy-authentik-server-1:/tmp/invite-service-account.py &&
+    docker exec -i -w / workforce-deploy-authentik-server-1
+    ak shell -c "exec(open('/tmp/invite-service-account.py').read())"
+  args:
+    stdin: "{{ ak_invite_token }}"
+  register: ak_invite_sa
+  until: "'workforce-invites converged' in (ak_invite_sa.stdout | default(''))"
+  retries: 10
+  delay: 6
+  changed_when: false
+  no_log: true
+  environment:
+    DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"

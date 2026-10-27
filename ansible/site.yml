@@ -54,8 +54,10 @@
     # already did all of it, so skip the role.
     - role: common
       when: run_root_tasks | default(true)
-    - authentik
-    - workforce
+    - role: authentik
+      tags: [identity]
+    - role: workforce
+      tags: [app]
 
   post_tasks:
     - name: Deployment summary
