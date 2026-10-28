@@ -51,5 +51,5 @@ body,
 /* The language picker (authentik 2026.x) was white text for the photo, too. */
 ak-locale-select::part(label),
 ak-locale-select::part(select) {
-  color: #344054;
+  color: #344054 !important;
 }
