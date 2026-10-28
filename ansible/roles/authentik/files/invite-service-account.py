@@ -26,13 +26,15 @@ group, _ = Group.objects.get_or_create(name="workforce-invites")
 group.users.add(user)
 role, _ = Role.objects.get_or_create(name="workforce-invites")
 group.roles.add(role)
+# assign_permission became assign_perms in authentik 2025.x; the ladder runs both.
+assign = getattr(role, "assign_perms", None) or role.assign_permission
 for perm in (
     "authentik_stages_invitation.add_invitation",
     "authentik_stages_invitation.view_invitation",
     "authentik_stages_invitation.delete_invitation",
     "authentik_flows.view_flow",
 ):
-    role.assign_permission(perm)
+    assign(perm)
 
 Token.objects.update_or_create(
     identifier="workforce-invite-token",
