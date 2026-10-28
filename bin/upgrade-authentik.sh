@@ -35,9 +35,11 @@ fail() { printf '\033[1;31mXX\033[0m %s\n' "$*"; exit 1; }
 # 2026.8.0 is NOT optional: 2026.5.7 -> 2026.8.2 hit upstream #25996
 # (InconsistentMigrationHistory 0064-before-0063_actor, crash loop); going through 2026.8.0
 # applies 0063 first. Our first ladder run reproduced the bug and this hop avoided it.
+# 2025.2.3, not 2025.2.4: ghcr's 2025.2.4 tag is an arm64-only image (no amd64 variant).
 # When compose.yaml's pin moves, append the new version here.
-LADDER=(2024.12.5 2025.2.4 2025.4.4 2025.6.4 2025.8.6 2025.10.4 2025.12.6 2026.2.7 2026.5.8 2026.8.0 2026.8.5)
+LADDER=(2024.12.5 2025.2.3 2025.4.4 2025.6.4 2025.8.6 2025.10.4 2025.12.6 2026.2.7 2026.5.8 2026.8.0 2026.8.5)
 OVERRIDE=backups/authentik-ladder.override.yaml
+STATE=backups/authentik-version   # the last version seen running (its database is on it)
 SERVER=workforce-deploy-authentik-server-1
 
 MODE=up; HOLD=""
@@ -56,12 +58,14 @@ PIN="$(grep -m1 -oE 'goauthentik/server:[0-9.]+' compose.yaml | cut -d: -f2)"
 printf '%s\n' "${LADDER[@]}" | grep -qx "$PIN" \
   || fail "compose.yaml pins authentik $PIN, which is not on this script's ladder — add it to LADDER."
 
-# What the box actually runs: the version the server reports, else its image tag. Never the
-# compose pin, which moves the moment a newer bundle is pulled.
+# The version authentik's database is on: what the running server reports (recorded in
+# $STATE), else the last version recorded there. Never the compose pin, which moves the moment
+# a newer bundle is pulled, nor the container's image tag, which may never have started (an
+# image that cannot run is exactly that).
 running_version() {
   local v
   v="$(docker exec -w / "$SERVER" python -c 'from authentik import __version__; print(__version__)' 2>/dev/null || true)"
-  [ -n "$v" ] || v="$(docker inspect -f '{{.Config.Image}}' "$SERVER" 2>/dev/null | sed -n 's|.*goauthentik/server:||p')"
+  if [ -n "$v" ]; then printf '%s\n' "$v" > "$STATE"; else v="$(cat "$STATE" 2>/dev/null || true)"; fi
   printf '%s' "$v"
 }
 CURRENT="$(running_version)"
@@ -108,6 +112,10 @@ run_at() {
   local dc=(docker compose -f compose.yaml -f "$OVERRIDE")
   "${dc[@]}" pull -q authentik-server authentik-worker \
     || fail "could not pull authentik $v (disk full? network?) — authentik is still on ${CURRENT:-?}."
+  local want got
+  want="$(docker version -f '{{.Server.Arch}}')"
+  got="$(docker image inspect -f '{{.Architecture}}' "ghcr.io/goauthentik/server:$v")"
+  [ "$got" = "$want" ] || fail "the authentik $v image is built for $got, this host is $want — authentik is still on ${CURRENT:-?}; pick another patch of that line in LADDER."
   if older "$v" 2025.10; then "${dc[@]}" up -d ak-redis; fi
   "${dc[@]}" up -d authentik-postgres
   "${dc[@]}" up -d --no-deps authentik-server authentik-worker
@@ -132,13 +140,15 @@ if [ "$MODE" = hold ]; then
   printf '%s\n' "${LADDER[@]}" | grep -qx "$HOLD" || fail "$HOLD is not on the ladder: ${LADDER[*]}"
   say "Running authentik $HOLD (was ${CURRENT:-not running}). Restore the backup taken on $HOLD next."
   run_at "$HOLD"
+  printf '%s\n' "$HOLD" > "$STATE"
   exit 0
 fi
 
 if [ -z "$CURRENT" ]; then
-  # Not running: a fresh install starts the pin directly and needs no ladder.
-  [ "$MODE" = up ] && fail "authentik is not running here — start the stack first."
-  exit 0
+  # No container yet: a fresh install starts the pin directly and needs no ladder.
+  docker inspect "$SERVER" >/dev/null 2>&1 || { [ "$MODE" = up ] && fail "authentik is not installed here."; exit 0; }
+  fail "authentik is not answering and no earlier version is recorded in $STATE, so the version
+  of its database is unknown. Start it on that version (./bin/upgrade-authentik.sh --hold <ver>), then re-run."
 fi
 older "$CURRENT" "${LADDER[0]}" \
   && fail "authentik $CURRENT is older than ${LADDER[0]}; upgrade it to ${LADDER[0]} by hand first."
@@ -171,6 +181,7 @@ for VER in "${STEPS[@]}"; do
       docker rmi "$img" >/dev/null 2>&1 || true
     done
     CURRENT="$VER"
+    printf '%s\n' "$VER" > "$STATE"
   else
     docker logs --tail 40 "$SERVER" 2>&1 | tail -25 || true
     fail "step $VER did not become healthy within 10 minutes; authentik is left on $VER.
