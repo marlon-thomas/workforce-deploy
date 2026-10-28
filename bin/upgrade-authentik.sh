@@ -193,7 +193,7 @@ done
 
 say "Ladder complete at $CURRENT. Back to the plain compose.yaml…"
 # Same version without the override: Redis and the old mount go, the containers are recreated.
-docker compose -f compose.yaml -f "$OVERRIDE" rm -sf ak-redis >/dev/null 2>&1 || true
+docker rm -f workforce-deploy-ak-redis-1 >/dev/null 2>&1 || true
 rm -f "$OVERRIDE"
 docker compose up -d --no-deps authentik-server authentik-worker
 step_ok || fail "authentik $CURRENT did not come back healthy on the plain compose.yaml — inspect: docker logs $SERVER"
