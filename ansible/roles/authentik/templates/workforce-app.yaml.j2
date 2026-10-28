@@ -26,7 +26,7 @@ entries:
       branding_logo: https://{{ app_hostname }}/icons/wordmark.svg
       branding_favicon: https://{{ app_hostname }}/icons/icon.svg
       # branding/authentik-custom.css, mounted by compose.yaml; empty if the mount is missing.
-      branding_custom_css: !File [/branding/custom.css, ""]
+      branding_custom_css: !File [/branding/authentik-custom.css, ""]
       attributes:
         settings:
           theme:

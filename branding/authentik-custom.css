@@ -1,8 +1,9 @@
 /*
  * Workforce look for authentik's sign-in, enrolment and sign-out pages (ux-product-review R5).
- * Mounted over authentik's /web/dist/custom.css, which its page skeleton loads. The logo, title
- * and favicon come from the brand in the blueprint; this replaces authentik's photo background
- * with Workforce's calm brand wash and matches the app's buttons and focus ring.
+ * The blueprint loads this file into the brand's custom CSS (`!File /branding/...`), which
+ * authentik injects into the page and into each component's shadow root. The logo, title and
+ * favicon come from the brand too; this replaces authentik's photo background with Workforce's
+ * calm brand wash and matches the app's buttons and focus ring.
  */
 :root {
   --ak-flow-background: none;
@@ -45,4 +46,10 @@ body,
 .pf-c-login__footer a,
 .pf-c-login__footer .pf-c-list {
   color: #475467 !important;
+}
+
+/* The language picker (authentik 2026.x) was white text for the photo, too. */
+ak-locale-select::part(label),
+ak-locale-select::part(select) {
+  color: #344054;
 }
