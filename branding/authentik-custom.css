@@ -48,8 +48,9 @@ body,
   color: #475467 !important;
 }
 
-/* The language picker (authentik 2026.x) was white text for the photo, too. */
-ak-locale-select::part(label),
-ak-locale-select::part(select) {
-  color: #344054 !important;
+/* The language picker (authentik 2026.x) was white text for the photo, too; it is coloured
+   through these variables (the label inherits the first, the select reads the second). */
+[part="locale-select"] {
+  --ak-c-flow-executor__locale-select--Color: #344054 !important;
+  --ak-c-locale-select--Color: #344054 !important;
 }
