@@ -11,3 +11,6 @@ secrets/*
 backups/
 logs/
 inventories/local/
+
+# Rendered by the identity converge (holds the OIDC client secret).
+blueprints/workforce-app.yaml

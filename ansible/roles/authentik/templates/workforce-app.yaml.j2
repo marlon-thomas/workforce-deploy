@@ -46,7 +46,9 @@ entries:
   - attrs:
       name: Workforce
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
-      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      # Sign-out must end the authentik login too (#14): the provider-only flow left it alive, so
+      # the next tap on the app signed the previous user straight back in on a shared device.
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
       client_id: {{ oidc_client_id }}
       client_secret: {{ oidc_client_secret }}
       # Without a signing_key the provider publishes an EMPTY JWKS and
