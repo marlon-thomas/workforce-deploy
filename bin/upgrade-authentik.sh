@@ -1,21 +1,28 @@
 #!/usr/bin/env bash
-# upgrade-authentik.sh — walk the supported upgrade ladder on THIS box.
+# upgrade-authentik.sh — bring authentik on THIS box up to the version compose.yaml pins.
 #
-# authentik does not support downgrades and forbids skipping major (year)
-# lines: the docs require stepping every minor line (latest patch) in order
-# — workforce-deploy issue #1. This script encodes that ladder and refuses
-# to jump; each step must pass health + discovery before the next begins.
+# authentik does not support downgrades and refuses to skip major lines: every minor line
+# (latest patch) must be applied in order (workforce-deploy issue #1). compose.yaml pins only
+# the END of that ladder, so a plain `docker compose up -d` on a box several lines behind
+# would jump straight there. This script walks the steps in between instead, each one gated
+# on both containers healthy + OIDC discovery through the edge.
 #
-# Run as root on the appliance (it drives the service user's rootless docker
-# like update.sh does). A pre-flight backup is mandatory and automatic.
+# compose.yaml is never edited: each step runs with a generated override file that sets the
+# step's image and puts back what older lines still need (Redis before 2025.10, the /media
+# mount before 2025.12). The git checkout stays clean whatever happens.
 #
-# Usage: ./bin/upgrade-authentik.sh [target]     (default target: 2026.8.2)
+# Usage (on the appliance, as the service user or root; update.sh calls it with --if-needed):
+#   ./bin/upgrade-authentik.sh                walk the ladder up to the compose.yaml pin
+#   ./bin/upgrade-authentik.sh --if-needed    the same, silent when there is nothing to do
+#   ./bin/upgrade-authentik.sh --check        exit 0 if no step is needed, 3 if one is
+#   ./bin/upgrade-authentik.sh --hold <ver>   run authentik at an earlier ladder version — the
+#                                             rollback path: hold the version a backup was
+#                                             taken on, then ./bin/restore.sh that backup
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # shellcheck disable=SC1091
 . ./.env
-
 # Docker daemon selection (rootless-aware) lives in ONE place: bin/lib/common.sh.
 # shellcheck source=lib/common.sh
 . ./bin/lib/common.sh
@@ -24,61 +31,96 @@ use_docker_socket
 say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mXX\033[0m %s\n' "$*"; exit 1; }
 
-CURRENT_FULL="$(docker exec workforce-deploy-authentik-server-1 printenv AUTHENTIK_BOOTSTRAPPED_VERSION 2>/dev/null || true)"
-# The running version is stamped in the image tag; read it from compose (authoritative pin)
-CURRENT_TAG="$(grep -m1 -oE 'goauthentik/server:[0-9.]+' compose.yaml | cut -d: -f2)"
-TARGET="${1:-2026.8.2}"
+# The supported ladder: the latest patch of every minor line, in order (issue #1).
+# 2026.8.0 is NOT optional: 2026.5.7 -> 2026.8.2 hit upstream #25996
+# (InconsistentMigrationHistory 0064-before-0063_actor, crash loop); going through 2026.8.0
+# applies 0063 first. Our first ladder run reproduced the bug and this hop avoided it.
+# When compose.yaml's pin moves, append the new version here.
+LADDER=(2024.12.5 2025.2.4 2025.4.4 2025.6.4 2025.8.6 2025.10.4 2025.12.6 2026.2.7 2026.5.8 2026.8.0 2026.8.5)
+OVERRIDE=backups/authentik-ladder.override.yaml
+SERVER=workforce-deploy-authentik-server-1
 
-# The supported ladder: every minor line, latest patch, in order (issue #1).
-# 2026.8.0 is NOT optional: 2026.5.7 -> 2026.8.2 hits upstream #25996
-# (InconsistentMigrationHistory 0064-before-0063_actor, crash loop); going
-# through 2026.8.0 applies 0063 first and the history stays consistent.
-# Confirmed workaround in the issue thread; our ladder run reproduced the bug.
-LADDER=(2025.2.4 2025.4.4 2025.6.4 2025.8.6 2025.10.4 2025.12.6 2026.2.7 2026.5.7 2026.8.0 2026.8.2)
+MODE=up; HOLD=""
+case "${1:-}" in
+  "") ;;
+  --if-needed) MODE=if-needed ;;
+  --check) MODE=check ;;
+  --hold) MODE=hold; HOLD="${2:?--hold needs a ladder version}" ;;
+  *) fail "unknown argument: $1 (see the header of this script)" ;;
+esac
 
-# Where do we start? The max of the compose PIN and the RUNNING container tag:
-# a step can leave pin-ahead-of-runtime (crash mid-step, failed pull on a full
-# disk) and resuming from the pin alone would skip the un-applied step — the
-# exact #25996 trap. Compare against both, and realign the compose file.
-RUNNING_TAG="$(docker inspect -f '{{.Config.Image}}' workforce-deploy-authentik-server-1 2>/dev/null \
-  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+$' || true)"
-if [ -n "$RUNNING_TAG" ] && [[ "$(printf '%s\n%s\n' "$CURRENT_TAG" "$RUNNING_TAG" | sort -V | tail -1)" == "$RUNNING_TAG" ]]; then
-  CURRENT_TAG="$RUNNING_TAG"
-fi
-sed -i "s|image: ghcr.io/goauthentik/server:[0-9.]*|image: ghcr.io/goauthentik/server:$CURRENT_TAG|g" compose.yaml
+# older A B — A is a strictly earlier version than B.
+older() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
 
-STEPS=()
-for v in "${LADDER[@]}"; do
-  if [[ "$(printf '%s\n%s\n' "$CURRENT_TAG" "$v" | sort -V | head -1)" == "$CURRENT_TAG" && "$CURRENT_TAG" != "$v" ]]; then
-    STEPS+=("$v")
-  fi
-done
+PIN="$(grep -m1 -oE 'goauthentik/server:[0-9.]+' compose.yaml | cut -d: -f2)"
+printf '%s\n' "${LADDER[@]}" | grep -qx "$PIN" \
+  || fail "compose.yaml pins authentik $PIN, which is not on this script's ladder — add it to LADDER."
 
-if [ "${#STEPS[@]}" -eq 0 ]; then
-  say "authentik pin $CURRENT_TAG is already at/after every ladder entry — nothing to do."
-  exit 0
-fi
-if [[ "${STEPS[-1]}" != "$TARGET" && "$TARGET" != "2026.8.2" ]]; then
-  fail "target $TARGET is not the ladder end; edit the LADDER if you know better."
-fi
+# What the box actually runs: the version the server reports, else its image tag. Never the
+# compose pin, which moves the moment a newer bundle is pulled.
+running_version() {
+  local v
+  v="$(docker exec -w / "$SERVER" python -c 'from authentik import __version__; print(__version__)' 2>/dev/null || true)"
+  [ -n "$v" ] || v="$(docker inspect -f '{{.Config.Image}}' "$SERVER" 2>/dev/null | sed -n 's|.*goauthentik/server:||p')"
+  printf '%s' "$v"
+}
+CURRENT="$(running_version)"
 
-say "authentik ladder: $CURRENT_TAG -> ${STEPS[*]}"
-say "Backing up BEFORE anything (authentik does not support downgrades)…"
-./bin/backup.sh --tag pre-authentik-upgrade || fail "backup failed — upgrade aborted, nothing touched."
+# override <version> — the compose additions that version needs.
+override() {
+  local v="$1" svc
+  {
+    echo "# Generated by bin/upgrade-authentik.sh for authentik $v — not for hand edits."
+    echo "services:"
+    for svc in authentik-server authentik-worker; do
+      echo "  $svc:"
+      echo "    image: ghcr.io/goauthentik/server:$v"
+      if older "$v" 2025.10; then
+        echo "    environment:"
+        echo "      AUTHENTIK_REDIS__HOST: ak-redis"
+      fi
+      if older "$v" 2025.12; then
+        echo "    volumes:"
+        echo "      - ak_media:/media"
+      fi
+    done
+    if older "$v" 2025.10; then
+      cat <<'EOF'
+  ak-redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    networks: [data]
+    command: --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+EOF
+    fi
+  } > "$OVERRIDE"
+}
 
-step_ok() { # $1 = tag — gates on the signals that actually exist on this
-  # topology: the images' own healthchecks (9000 is never published to the
-  # host on a rootless daemon, so a host-side curl can only ever fail — the
-  # first ladder run learned that the hard way) + OIDC discovery through the
-  # edge, which proves gateway, TLS and issuer scheme end to end.
-  local tries=0
+# run_at <version> — (re)create authentik at that version.
+run_at() {
+  local v="$1"
+  override "$v"
+  local dc=(docker compose -f compose.yaml -f "$OVERRIDE")
+  "${dc[@]}" pull -q authentik-server authentik-worker \
+    || fail "could not pull authentik $v (disk full? network?) — authentik is still on ${CURRENT:-?}."
+  if older "$v" 2025.10; then "${dc[@]}" up -d ak-redis; fi
+  "${dc[@]}" up -d authentik-postgres
+  "${dc[@]}" up -d --no-deps authentik-server authentik-worker
+}
+
+step_ok() { # the images' own healthchecks + OIDC discovery through the edge (9000 is never
+  # published to the host on a rootless daemon, so a host-side curl on it can only fail).
+  local tries=0 up code
   while true; do
     sleep 10
     tries=$((tries + 1))
-    local up
     up="$(docker ps --filter name=workforce-deploy-authentik-server --filter name=workforce-deploy-authentik-worker --filter health=healthy --format '{{.Names}}' | wc -l)"
     if [ "$up" -ge 2 ]; then
-      local code
       code="$(curl -sk -o /dev/null -w '%{http_code}' "https://${AUTH_HOSTNAME}/application/o/workforce/.well-known/openid-configuration" || echo 0)"
       [ "$code" = "200" ] && return 0
     fi
@@ -86,54 +128,80 @@ step_ok() { # $1 = tag — gates on the signals that actually exist on this
   done
 }
 
+if [ "$MODE" = hold ]; then
+  printf '%s\n' "${LADDER[@]}" | grep -qx "$HOLD" || fail "$HOLD is not on the ladder: ${LADDER[*]}"
+  say "Running authentik $HOLD (was ${CURRENT:-not running}). Restore the backup taken on $HOLD next."
+  run_at "$HOLD"
+  exit 0
+fi
+
+if [ -z "$CURRENT" ]; then
+  # Not running: a fresh install starts the pin directly and needs no ladder.
+  [ "$MODE" = up ] && fail "authentik is not running here — start the stack first."
+  exit 0
+fi
+older "$CURRENT" "${LADDER[0]}" \
+  && fail "authentik $CURRENT is older than ${LADDER[0]}; upgrade it to ${LADDER[0]} by hand first."
+
+STEPS=()
+for v in "${LADDER[@]}"; do
+  if older "$CURRENT" "$v" && ! older "$PIN" "$v"; then STEPS+=("$v"); fi
+done
+
+if [ "${#STEPS[@]}" -eq 0 ]; then
+  older "$PIN" "$CURRENT" && fail "authentik runs $CURRENT, newer than the compose.yaml pin $PIN — authentik cannot be downgraded; pull a bundle that pins $CURRENT or later."
+  [ "$MODE" = up ] && say "authentik already runs $CURRENT (the compose.yaml pin) — nothing to do."
+  exit 0
+fi
+[ "$MODE" = check ] && { echo "authentik $CURRENT -> ${STEPS[*]}"; exit 3; }
+
+say "authentik ladder: $CURRENT -> ${STEPS[*]}"
+say "Backing up BEFORE anything (authentik does not support downgrades)…"
+./bin/backup.sh --tag pre-authentik-upgrade || fail "backup failed — upgrade aborted, nothing touched."
+
 for VER in "${STEPS[@]}"; do
-  say "Step: $CURRENT_TAG -> $VER"
-  sed -i "s|image: ghcr.io/goauthentik/server:[0-9.]*|image: ghcr.io/goauthentik/server:$VER|g" compose.yaml
-  docker compose pull authentik-server authentik-worker >/dev/null 2>&1 || true
-  docker compose up -d authentik-postgres ak-redis >/dev/null
-  docker compose up -d authentik-server authentik-worker
-  if step_ok "$VER"; then
+  say "Step: $CURRENT -> $VER"
+  run_at "$VER"
+  if step_ok; then
     say "  $VER healthy + discovery OK through the edge."
-    # GC: every authentik/server tag except the just-confirmed one (~1.8GB
-    # each; a 9-step ladder without this filled the rootless disk to 98% and
-    # failed a pull mid-run).
+    # Every other authentik/server tag goes (~1.8 GB each; a 9-step ladder without this
+    # filled the rootless disk to 98% and failed a pull mid-run).
     for img in $(docker images --format '{{.Repository}}:{{.Tag}}' \
                  | grep '^ghcr.io/goauthentik/server:' | grep -v ":$VER$"); do
-        docker rmi "$img" >/dev/null 2>&1 || true
+      docker rmi "$img" >/dev/null 2>&1 || true
     done
-    CURRENT_TAG="$VER"
+    CURRENT="$VER"
   else
-    docker logs --tail 40 workforce-deploy-authentik-server-1 2>&1 | tail -25 || true
-    fail "step $VER did not become healthy within 10 minutes. The pin is still on $VER — inspect the logs above, fix, restore from the pre-authentik-upgrade backup if needed, then re-run."
+    docker logs --tail 40 "$SERVER" 2>&1 | tail -25 || true
+    fail "step $VER did not become healthy within 10 minutes; authentik is left on $VER.
+  Inspect the logs above and re-run this script once fixed (it resumes from what is running).
+  To go back instead: ./bin/upgrade-authentik.sh --hold <authentik_version in the backup's MANIFEST>,
+  then ./bin/restore.sh $(ls -1t backups/*pre-authentik-upgrade*.tar.gz 2>/dev/null | head -1)"
   fi
 done
 
-say "Ladder complete at $CURRENT_TAG. Final assertions…"
-# Force-reapply the blueprint: the rendered file is unchanged, so the worker's
-# content-hash discovery would skip it — yet 2026.8 adds provider fields
-# (post_logout_redirect_uris!) the stored blueprint must now actually land.
+say "Ladder complete at $CURRENT. Back to the plain compose.yaml…"
+# Same version without the override: Redis and the old mount go, the containers are recreated.
+docker compose -f compose.yaml -f "$OVERRIDE" rm -sf ak-redis >/dev/null 2>&1 || true
+rm -f "$OVERRIDE"
+docker compose up -d --no-deps authentik-server authentik-worker
+step_ok || fail "authentik $CURRENT did not come back healthy on the plain compose.yaml — inspect: docker logs $SERVER"
+
+# Force-reapply the blueprint: an unchanged rendered file would be skipped by the worker's
+# content-hash discovery, but newer lines add provider fields the stored rows must now carry.
 APPLIED=0
 for _ in 1 2 3 4 5 6 7 8; do
   sleep 15
-  if docker exec -w / workforce-deploy-authentik-server-1 python /manage.py apply_blueprint \
+  if docker exec -w / "$SERVER" python /manage.py apply_blueprint \
        /blueprints/workforce-app.yaml >/dev/null 2>&1; then APPLIED=1; break; fi
 done
-[ "$APPLIED" = 1 ] || fail "apply_blueprint never succeeded on $CURRENT_TAG — inspect server logs (blueprint schema drift?)."
+[ "$APPLIED" = 1 ] || fail "apply_blueprint never succeeded on $CURRENT — inspect server logs (blueprint schema drift?)."
 sleep 5
-BP="$(docker exec workforce-deploy-authentik-server-1 python /manage.py shell -c "
+BP="$(docker exec -w / "$SERVER" python /manage.py shell -c "
 from authentik.blueprints.models import BlueprintInstance as B
 print(next(iter(B.objects.filter(path='workforce-app.yaml').values_list('status', flat=True)), 'missing'))" 2>/dev/null | tail -1)"
 if [ "$BP" != "successful" ]; then
   docker logs --tail 30 workforce-deploy-authentik-worker-1 2>&1 | tail -15 || true
-  fail "blueprint status on $CURRENT_TAG is '$BP' (expected successful) — managed-flow slugs or provider schema likely changed; fix the blueprint, re-run the playbook (apply is deterministic), then re-run this script with no steps remaining."
+  fail "blueprint status on $CURRENT is '$BP' (expected successful) — managed-flow slugs or provider schema likely changed; fix the blueprint, re-run the playbook (apply is deterministic), then re-run this script."
 fi
-
-say "authentik is on $CURRENT_TAG, blueprint applied, discovery live through the edge."
-# Show the 2026.8-only prize: the provider must now carry the post-logout allow-list.
-docker exec workforce-deploy-authentik-server-1 python /manage.py shell -c "
-from authentik.providers.oauth2.models import OAuth2Provider
-p = OAuth2Provider.objects.first()
-print('post_logout_redirect_uris:', [str(u) for u in getattr(p, 'post_logout_redirect_uris', [])])
-" 2>/dev/null | tail -1
-say "Now verify RP-Initiated Logout return-to-app (issue #14/#1): sign out from the app → you should land back at the app root."
-
+say "authentik is on $CURRENT, blueprint applied, discovery live through the edge."

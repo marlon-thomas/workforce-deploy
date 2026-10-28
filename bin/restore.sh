@@ -42,6 +42,19 @@ HAVE_EV=0; [ -f "$TMP/evidence.tar" ] && HAVE_EV=1
 [ "$HAVE_AK" -eq 1 ] || echo "NOTE: this archive has no sign-in database (older backup) — sign-in data is left as is."
 [ "$HAVE_EV" -eq 1 ] || echo "NOTE: this archive has no evidence (older backup) — evidence is left as is."
 
+# authentik migrates its database forward only, one line at a time: a sign-in database from
+# another version must be loaded into that same version (upgrade-authentik.sh --hold <ver>).
+if [ "$HAVE_AK" -eq 1 ] && [ -f "$TMP/MANIFEST" ]; then
+  AK_WAS="$(sed -n 's/^authentik_version=//p' "$TMP/MANIFEST")"
+  AK_NOW="$(docker exec -w / workforce-deploy-authentik-server-1 python -c 'from authentik import __version__; print(__version__)' 2>/dev/null || true)"
+  if [ -n "$AK_WAS" ] && [ "$AK_WAS" != unknown ] && [ -n "$AK_NOW" ] && [ "$AK_WAS" != "$AK_NOW" ]; then
+    echo "This backup's sign-in database is from authentik $AK_WAS; this box runs $AK_NOW."
+    echo "Run ./bin/upgrade-authentik.sh --hold $AK_WAS first, restore, then ./bin/upgrade-authentik.sh."
+    echo "Nothing was changed."
+    exit 1
+  fi
+fi
+
 echo "This will REPLACE the current database$( [ "$HAVE_AK" -eq 1 ] && echo ', sign-in database')$( [ "$HAVE_EV" -eq 1 ] && echo ' and evidence') with the contents of:"
 echo "  $ARCHIVE"
 if [ "$YES" -ne 1 ]; then

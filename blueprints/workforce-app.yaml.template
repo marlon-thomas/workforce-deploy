@@ -16,6 +16,8 @@ entries:
       branding_title: Workforce
       branding_logo: https://${APP_HOSTNAME}/icons/wordmark.svg
       branding_favicon: https://${APP_HOSTNAME}/icons/icon.svg
+      # branding/authentik-custom.css, mounted by compose.yaml; empty if the mount is missing.
+      branding_custom_css: !File [/branding/custom.css, ""]
       attributes:
         settings:
           theme:

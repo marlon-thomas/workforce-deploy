@@ -151,6 +151,18 @@ recorded here as it was done on 2026-10-11:
 5. `python3 bin/deploy_to_test.py` — Tailscale + DuckDNS, the interactive
    install, converge, verify — then `--snapshot` for the `clean` baseline.
 
+## Upgrading authentik (the sign-in server)
+
+authentik cannot skip versions or go back. `compose.yaml` pins the version to end on, and
+`bin/upgrade-authentik.sh` walks every minor line in between, one healthy step at a time, after
+taking a backup. `update.sh` runs it automatically when a new bundle pins a newer authentik.
+To move the pin, append the new version to `LADDER` in that script.
+
+If a step fails, fix the cause and re-run the script: it resumes from the version that is running.
+To go back instead, read `authentik_version` from the `pre-authentik-upgrade` backup's `MANIFEST`,
+then run `./bin/upgrade-authentik.sh --hold <that version>` and `./bin/restore.sh <that backup>`.
+`restore.sh` refuses a sign-in database from a different authentik version.
+
 ## Restore drill (deployment-spec D-DEP9)
 
 Prove a backup restores — on an operator machine with Incus, never on the

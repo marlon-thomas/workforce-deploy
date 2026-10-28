@@ -43,6 +43,11 @@ PREV="$APP_VERSION"
 say "Backing up before touching anything…"
 ./bin/backup.sh --tag pre-update || fail "Backup failed — update aborted (nothing was changed)."
 
+# authentik cannot skip versions: when this bundle pins a newer authentik than the box runs,
+# walk the ladder up to it now (it takes its own backup), before anything starts the pin directly.
+./bin/upgrade-authentik.sh --if-needed \
+  || fail "The sign-in server (authentik) upgrade did not complete — update aborted; the application was not touched."
+
 # ADR-0017: converge the identity plane first — sign-in/enrolment flows, the invitation service
 # account and its token (compose refuses to start the api without the token file). Idempotent:
 # unchanged blueprints and an existing token are left alone. No admin password is passed, so the
