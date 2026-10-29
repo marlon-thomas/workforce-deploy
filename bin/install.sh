@@ -713,6 +713,10 @@ mkdir -p secrets backups blueprints
 gen() { [ -s "secrets/$1" ] || openssl rand -base64 32 | tr -d '\n' > "secrets/$1"; }
 gen db_password; gen minio_access; gen minio_secret
 gen ak_db_password; gen ak_secret
+# ADR-0021: the key that encrypts organisations' own AI keys (32 random bytes, base64), and an
+# empty server-wide AI key — fill it (and AI_* in .env) to give every organisation an AI service.
+gen ai_credential_key
+[ -e secrets/ai_api_key ] || : > secrets/ai_api_key
 {
   echo "secret_key: $(cat secrets/ak_secret)"
   echo "postgresql:"

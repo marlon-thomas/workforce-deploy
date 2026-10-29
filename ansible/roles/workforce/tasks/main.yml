@@ -76,6 +76,26 @@
   changed_when: "'vapid: generated' in vapid_gen.stdout"
 
 
+# ADR-0021: the AI assistant's secrets, for servers installed before they existed. The credential
+# key encrypts organisations' own AI keys; regenerating it would make those unreadable (they would
+# have to be entered again), so it is created only when absent. The server-wide key starts empty.
+- name: Create the AI assistant secrets if absent
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cd /opt/workforce-deploy
+    made=""
+    if [ ! -s secrets/ai_credential_key ]; then
+      openssl rand -base64 32 | tr -d '\n' > secrets/ai_credential_key; made="key"
+    fi
+    if [ ! -e secrets/ai_api_key ]; then : > secrets/ai_api_key; made="$made api"; fi
+    chown {{ service_user }}:{{ service_user }} secrets/ai_credential_key secrets/ai_api_key
+    chmod 600 secrets/ai_credential_key secrets/ai_api_key
+    echo "ai secrets: ${made:-unchanged}"
+  args:
+    executable: /bin/bash
+  register: ai_secrets
+  changed_when: "'unchanged' not in ai_secrets.stdout"
+
 - name: Service user uid
   ansible.builtin.command: id -u {{ service_user }}
   register: su_uid

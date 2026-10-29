@@ -149,6 +149,24 @@ contract & onboarding magic links) go through a durable ledger: rows are only
   catcher (loopback UI at `http://127.0.0.1:8025` on the box; `SMTP_HOST=mailpit`).
   Nothing leaves the machine.
 
+## The AI assistant (ADR-0021)
+
+The assistant is off until an AI service is set up, in either place:
+
+- **For every organisation on this server**: set `AI_PROVIDER` (`ANTHROPIC`, `OPENAI_COMPATIBLE`
+  or `AZURE_OPENAI`), `AI_MODEL` and, if needed, `AI_ENDPOINT` in `environments/<env>.env`, put the
+  key in `secrets/ai_api_key` (mode 600, never committed), and re-run the deployer. `AI_LOCKED=true`
+  stops organisations choosing their own; `AI_ALLOWED_PROVIDERS` limits which kinds they may choose.
+- **By an organisation itself**: its registered manager or a director enters a provider, model and
+  key in Setup → AI assistant. Keys are encrypted with `secrets/ai_credential_key`, which the
+  installer and every update create if absent. **Keep that file with the server's other secrets**:
+  backups hold the database but not the secrets, and without the same key organisations must enter
+  their AI keys again (the app says so).
+- **An AI machine on the customer's network** (a DGX Spark, a Ryzen AI box running an
+  OpenAI-compatible server): either set it server-wide with `AI_ENDPOINT=http://dgx-spark.lan:8000/v1`,
+  or list it in `AI_TRUSTED_ENDPOINTS` (host names or CIDR ranges, comma-separated) so organisations
+  may choose it. Never set `AI_TRUSTED_ENDPOINTS` on the hosted platform.
+
 ## If a deploy says "the guest has no outbound internet"
 
 STEP 2 probes HTTPS from inside the container. The known devbox cause is the
