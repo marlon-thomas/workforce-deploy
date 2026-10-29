@@ -7,8 +7,9 @@ deploy_to_test.py and deploy_to_prod.py own everything environment-specific
 and post-deploy verification live HERE so test and prod execute literally
 the same steps and cannot drift:
 
-    converge(run, target)        — drive a box to a pinned version
-                                   (bundle git pull + update.sh when behind)
+    converge(run, target, ref)   — drive a box to a pinned version
+                                   (bundle git pull, or checkout of the release
+                                   tag `ref`, + update.sh when behind)
     verify_buildmeta(url, want)  — ask the running application what version
                                    it believes it is
 
@@ -40,6 +41,24 @@ GUARDED_PULL = (
     'git pull -q --ff-only; rc=$?; '
     'if [ -f "$k" ]; then mv -f "$k" "$f"; fi; exit $rc'
 )
+
+
+# A deploy-repo release tag (environments/prod.env DEPLOY_REF): plain tag characters only,
+# because it is spliced into shell.
+REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def bundle_update(ref=None):
+    """Shell that updates the box's bundle checkout: with no ref, GUARDED_PULL (the test
+    loop follows main); with a release tag, the same guard around a fetch + detached
+    checkout of exactly that tag, so production runs reviewed, tagged apparatus only."""
+    if not ref:
+        return GUARDED_PULL
+    if not REF_RE.fullmatch(ref):
+        fail(f"DEPLOY_REF {ref!r} is not a plain tag name")
+    return GUARDED_PULL.replace(
+        "git pull -q --ff-only",
+        f"git fetch -q --tags --force origin && git checkout -q --detach refs/tags/{ref}")
 
 
 def say(msg):
@@ -90,19 +109,30 @@ def box_version(run):
     return m.group(1) if m else ""
 
 
-def converge(run, target):
-    """Bring the box to `target` using its bundle checkout. Idempotent:
-    already-there is a no-op; anything else goes through update.sh (which
-    backs up first and auto-rolls-back on a red health check)."""
+def box_ref(run):
+    """The release tag the box's bundle checkout sits on exactly (empty if none)."""
+    rc, out = run(f"git -C {WORKDIR} describe --tags --exact-match HEAD 2>/dev/null || true")
+    lines = (out or "").strip().splitlines()
+    return lines[-1].strip() if lines else ""
+
+
+def converge(run, target, ref=None):
+    """Bring the box to `target` using its bundle checkout — at release tag `ref` when given
+    (production), else main (test). Idempotent: already-there is a no-op; anything else goes
+    through update.sh (which backs up first and auto-rolls-back on a red health check)."""
     current = box_version(run)
     if not current:
         fail(f"cannot read APP_VERSION from {WORKDIR}/.env on the box — "
              "is the suite installed there? (run bootstrap.py / deploy_to_test.py first)")
-    say(f"  bundle pins {target}; box runs {current}")
-    if current == target:
+    on_ref = box_ref(run) if ref else ""
+    if ref:
+        say(f"  bundle pins {target} at {ref}; box runs {current} at {on_ref or 'an untagged checkout'}")
+    else:
+        say(f"  bundle pins {target}; box runs {current}")
+    if current == target and (not ref or on_ref == ref):
         ok("box already on the pinned version — nothing to deploy")
         return current
-    ok_rc, out = run(f"cd {WORKDIR} && sh -c '{GUARDED_PULL}' && ./bin/update.sh {target}")
+    ok_rc, out = run(f"cd {WORKDIR} && sh -c '{bundle_update(ref)}' && ./bin/update.sh {target}")
     if ok_rc != 0:
         fail(f"update.sh {target} exited {ok_rc}. update.sh rolls itself back on "
              "failure — check its output above, then run ./bin/doctor.sh on the box.")
@@ -110,6 +140,8 @@ def converge(run, target):
     if after != target:
         fail(f"update ran but the box still reports {after!r}, not {target!r} — "
              "investigate with ./bin/doctor.sh before trusting this deploy")
+    if ref and box_ref(run) != ref:
+        fail(f"update ran but the bundle checkout is not on {ref} — inspect `git -C {WORKDIR} status` on the box")
     ok(f"box updated {current} -> {target}")
     return target
 

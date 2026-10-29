@@ -124,10 +124,12 @@ write access to deploy — the deploy scripts run from a clone of this repo.
 **3. Deploy to PROD** — `python3 bin/deploy_to_prod.py`
    same shared converge/verify code (bin/deploylib.py) against the box in
    `ansible/inventories/prod/hosts.yml`, converging to
-   `environments/prod.env:APP_VERSION`. The only differences are
-   environment-specific (no VM/tailnet; real TLS). Prod deploys always ask
-   you to TYPE the version before changing anything. Bumping prod.env is a
-   deliberate commit — that commit IS the sign-off.
+   `environments/prod.env:APP_VERSION`, with this repo checked out on the box
+   at the release tag `environments/prod.env:DEPLOY_REF` (test follows `main`;
+   production never does). The other differences are environment-specific
+   (no VM/tailnet; real TLS). Prod deploys always ask you to TYPE the version
+   before changing anything. Bumping prod.env is a deliberate commit — that
+   commit, tagged, IS the sign-off (RUNBOOK.md, "Cutting a production release").
 
 **4. Find versions** — on either box: `./bin/versions.sh` (newest first).
 

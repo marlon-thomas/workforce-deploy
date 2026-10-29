@@ -46,7 +46,7 @@ except ImportError:
 
 import shlex
 
-from deploylib import GUARDED_PULL, explain_bad_host_key, verified_ssh_client
+from deploylib import REF_RE, bundle_update, explain_bad_host_key, verified_ssh_client
 
 BUNDLE_REPO = "https://github.com/marlon-thomas/workforce-deploy.git"
 INSTALL_CMD = "cd /opt/workforce-deploy && ./bin/install.sh --env {env}"
@@ -89,7 +89,7 @@ else
 fi
 else
   rm -rf /root/workforce-deploy
-  git clone -q {repo} /opt/workforce-deploy
+  git clone -q {branch}{repo} /opt/workforce-deploy
 fi
 echo "==> Bundle ready. Handing over to the installer (answer its prompts below)."
 """
@@ -289,6 +289,9 @@ def main():
                     help="deployment bundle repo to clone inside the target "
                          "(default: the public bundle; deploy_to_test passes "
                          "the origin of the bundle it runs from)")
+    ap.add_argument("--ref", metavar="TAG",
+                    help="deployment bundle release tag to install from (deploy_to_prod "
+                         "passes environments/prod.env DEPLOY_REF); default: main")
     ap.add_argument("--smoke", action="store_true",
                     help="no-TLS smoke install (OIDC-less, HTTP)")
     args = ap.parse_args()
@@ -319,7 +322,11 @@ def main():
         install_cmd = INSTALL_CMD.format(env=args.env)
         # repo chosen via --repo (or the public bundle default), formatted
         # into the prep templates at use-site
-        rc = run_quiet(client, prep_cmd.format(repo=args.repo, pull=shlex.quote(GUARDED_PULL)))
+        if args.ref and not REF_RE.fullmatch(args.ref):
+            sys.exit(f"error: --ref {args.ref!r} is not a plain tag name")
+        branch = f"--branch {args.ref} " if args.ref else ""
+        rc = run_quiet(client, prep_cmd.format(repo=args.repo, branch=branch,
+                                               pull=shlex.quote(bundle_update(args.ref))))
         if rc != 0:
             sys.exit(f"Host preparation failed (exit {rc}).")
         ship_env_files(client, args.env, "/root")

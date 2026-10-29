@@ -151,6 +151,22 @@ recorded here as it was done on 2026-10-11:
 5. `python3 bin/deploy_to_test.py` — Tailscale + DuckDNS, the interactive
    install, converge, verify — then `--snapshot` for the `clean` baseline.
 
+## Cutting a production release
+
+Production runs this repo at a release tag, never at `main`: `bin/deploy_to_prod.py` refuses
+to start without `DEPLOY_REF` in `environments/prod.env`, installs with `bootstrap.py --ref`, and
+on every update checks the box's bundle out at exactly that tag before `update.sh` runs.
+
+1. Deploy the app version to the TEST appliance first and check it there (the test pin).
+2. On a branch, set `APP_VERSION` (the app release) and `DEPLOY_REF` (the tag about to be
+   made, `vMAJOR.MINOR.PATCH`) in `environments/prod.env`. Merge it once CI is green.
+3. Tag that merge commit and push the tag: `git tag v1.0.0 && git push origin v1.0.0`.
+4. `git checkout v1.0.0 && python3 bin/deploy_to_prod.py` — it checks the tag is on origin,
+   asks you to type the version, then converges and verifies the live app.
+
+Rolling back the apparatus is the same steps with the previous tag; rolling back the app data
+is `restore.sh` on the box (see "Upgrading authentik" for the sign-in database).
+
 ## Upgrading authentik (the sign-in server)
 
 authentik cannot skip versions or go back. `compose.yaml` pins the version to end on, and

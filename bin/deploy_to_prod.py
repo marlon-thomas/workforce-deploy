@@ -11,12 +11,15 @@ the SHARED functions in deploylib.py, so test and prod cannot drift:
             (already there -> nothing happens; fresh -> hand over to
              bootstrap.py --env prod, the same installer the test path uses)
     STEP 2  human gate: type the target version to confirm a prod change
-    STEP 3  converge: deploylib.converge() -> update.sh <prod pin> (backup,
-            pull image, migrate, health check, auto-rollback)
+    STEP 3  converge: deploylib.converge() -> the bundle checked out at the
+            release tag DEPLOY_REF, then update.sh <prod pin> (backup, pull
+            image, migrate, health check, auto-rollback)
     STEP 4  verify: https://<app>/api/v1/build-meta reports the pinned version
 
-The prod version is environments/prod.env:APP_VERSION — bumping it is the
-deliberate, committed human decision; this script never edits it.
+The prod version is environments/prod.env:APP_VERSION and the deployment
+apparatus it runs with is the deploy-repo release tag DEPLOY_REF (never
+whatever is on main) — bumping them is the deliberate, committed human
+decision; this script never edits either. Cutting a release: RUNBOOK.md.
 
 Usage:
   python3 deploy_to_prod.py                # full journey
@@ -141,13 +144,23 @@ def ssh_or_prompt(host, user):
 
 # ---------------------------------------------------------------- steps
 
-def step0(inv, target):
+def step0(inv, target, ref):
     say("\n───────── STEP 0: prerequisites ─────────")
     if not os.path.isfile(PROD_ENV):
         fail(f"{PROD_ENV} missing — the prod pin must exist before deploying")
     if not target:
         fail("environments/prod.env has no APP_VERSION — pin a version first")
     ok(f"prod pin: {target}")
+    if not ref:
+        fail("environments/prod.env has no DEPLOY_REF — production installs only from a "
+             "release tag of this repo (RUNBOOK.md, 'Cutting a production release')")
+    if not deploylib.REF_RE.fullmatch(ref):
+        fail(f"DEPLOY_REF {ref!r} is not a plain tag name")
+    tagged = subprocess.run(["git", "-C", ROOT, "ls-remote", "--exit-code", "--tags", "origin",
+                             f"refs/tags/{ref}"], capture_output=True, text=True)
+    if tagged.returncode != 0:
+        fail(f"release tag {ref} is not on origin — push it first (git push origin {ref})")
+    ok(f"bundle release tag: {ref}")
     try:
         with socket.create_connection((inv["host"], 22), timeout=8):
             ok(f"ssh reachable at {inv['host']}:22")
@@ -155,7 +168,7 @@ def step0(inv, target):
         fail(f"{inv['host']}:22 unreachable ({exc})")
 
 
-def step1_ensure_installed(inv):
+def step1_ensure_installed(inv, ref):
     say("\n───────── STEP 1: bundle present on the box? ─────────")
     ssh = ssh_or_prompt(inv["host"], inv["service_user"])
     if ssh:
@@ -169,7 +182,7 @@ def step1_ensure_installed(inv):
          "the root password and, on a fresh box, installer questions.")
     input("  Press Enter to start the installer (Ctrl+C to abort)… ")
     rc = subprocess.run([sys.executable, BOOTSTRAP,
-                         "--host", inv["host"], "--env", "prod"]).returncode
+                         "--host", inv["host"], "--env", "prod", "--ref", ref]).returncode
     if rc != 0:
         fail("bootstrap.py failed — fix its complaint and re-run this script")
     ssh = ssh_or_prompt(inv["host"], inv["service_user"])
@@ -180,9 +193,10 @@ def step1_ensure_installed(inv):
     return ssh
 
 
-def step2_gate(current, target):
+def step2_gate(current, target, on_ref, ref):
     say("\n───────── STEP 2: CONFIRM PRODUCTION CHANGE ─────────")
-    say(f"  production is about to move {current} -> {target}")
+    say(f"  production is about to move {current} -> {target}"
+        f" (bundle {on_ref or 'untagged'} -> {ref})")
     typed = input("  type the target version to proceed (anything else aborts): ").strip()
     if typed != target:
         say("  Aborted — nothing was changed.")
@@ -190,9 +204,9 @@ def step2_gate(current, target):
     ok("confirmed")
 
 
-def step3_converge(ssh, target):
+def step3_converge(ssh, target, ref):
     say("\n───────── STEP 3: converge to the pinned version ─────────")
-    return converge(ssh.run, target)
+    return converge(ssh.run, target, ref)
 
 
 def step4_verify(inv, target):
@@ -214,28 +228,31 @@ def main():
     inv = parse_inventory()
     if args.host:
         inv["host"] = args.host
-    target = deploylib.read_env_file(PROD_ENV).get("APP_VERSION")
+    prod_env = deploylib.read_env_file(PROD_ENV)
+    target = prod_env.get("APP_VERSION")
+    ref = prod_env.get("DEPLOY_REF")
 
     say("═══════════════════════════════════════════════════════")
     say(f"  Workforce Suite → PRODUCTION ({inv['host']})")
     say("═══════════════════════════════════════════════════════")
 
-    step0(inv, target)
+    step0(inv, target, ref)
     if args.check_only:
         say("\nCheck complete — nothing was run.")
         return
 
-    ssh = step1_ensure_installed(inv)
+    ssh = step1_ensure_installed(inv, ref)
     try:
         current = deploylib.box_version(ssh.run)
         if not current:
             fail(f"no APP_VERSION readable in {WORKDIR}/.env on the box")
-        if current == target:
-            ok(f"box already on the pinned version {target} — "
+        on_ref = deploylib.box_ref(ssh.run)
+        if current == target and on_ref == ref:
+            ok(f"box already on the pinned version {target} at {ref} — "
                "STEP 2/3 skipped, STEP 4 still verifies")
         else:
-            step2_gate(current, target)
-            step3_converge(ssh, target)
+            step2_gate(current, target, on_ref, ref)
+            step3_converge(ssh, target, ref)
         step4_verify(inv, target)
     finally:
         ssh.close()
