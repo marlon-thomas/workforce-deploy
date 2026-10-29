@@ -64,7 +64,7 @@ printf '%s\n' "${LADDER[@]}" | grep -qx "$PIN" \
 # image that cannot run is exactly that).
 running_version() {
   local v
-  v="$(docker exec -w / "$SERVER" python -c 'from authentik import __version__; print(__version__)' 2>/dev/null || true)"
+  v="$(authentik_version)"
   if [ -n "$v" ]; then printf '%s\n' "$v" > "$STATE"; else v="$(cat "$STATE" 2>/dev/null || true)"; fi
   printf '%s' "$v"
 }

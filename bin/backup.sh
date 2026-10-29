@@ -64,7 +64,8 @@ fi
   echo "authentik_image=$(grep -m1 -oE 'goauthentik/server:[0-9.]+' compose.yaml || echo unknown)"
   # What the sign-in database was actually on (the pin can be ahead mid-upgrade); restore.sh
   # refuses to load it into a different authentik version.
-  echo "authentik_version=$(docker exec -w / workforce-deploy-authentik-server-1 python -c 'from authentik import __version__; print(__version__)' 2>/dev/null || echo unknown)"
+  AK_VER="$(authentik_version)"
+  echo "authentik_version=${AK_VER:-unknown}"
   ( cd "$TMP" && sha256sum database.dump authentik.dump evidence.tar )
 } > "${TMP}/MANIFEST"
 

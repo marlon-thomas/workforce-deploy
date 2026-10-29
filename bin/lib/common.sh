@@ -114,3 +114,10 @@ evidence_import() {
     mc mirror --quiet --overwrite --remove /tmp/evidence "local/${MINIO_BUCKET}" >&2
     mc anonymous set none "local/${MINIO_BUCKET}" >/dev/null'
 }
+
+# authentik_version — the version the running authentik server reports, or nothing when it is
+# not answering. 2026.8 dropped authentik.__version__ for authentik.VERSION; ask for either.
+authentik_version() {
+  docker exec -w / workforce-deploy-authentik-server-1 python -c \
+    'import authentik as a; print(getattr(a, "VERSION", None) or a.__version__)' 2>/dev/null || true
+}
