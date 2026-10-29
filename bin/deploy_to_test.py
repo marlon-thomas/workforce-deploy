@@ -678,14 +678,15 @@ def step5_version():
     require_hostnames()
     deploylib.verify_buildmeta(f"https://{APP_HOSTNAME}/api/v1/build-meta",
                                target, cafile=ca, insecure=True)
-    # #15: reprint the one-time admin password record while the operator is
-    # reading this terminal (only exists for installs that auto-generated it).
-    _rc, initial = guest(f"cat {WORKDIR}/secrets/initial-admin-password 2>/dev/null || true")
-    initial = initial.strip()
-    if initial and len(initial) >= 8 and "\\" not in initial:
-        warn("initial admin password (auto-generated at install): " + initial)
-        say(f"  (in the guest: {WORKDIR}/secrets/initial-admin-password —"
-            " move it to your password manager, then delete the file)")
+    # #15: remind the operator while the one-time admin password record is still on the box
+    # (only installs that auto-generated it). The value itself is never printed: deploy output
+    # ends up in logs, CI artefacts and pasted transcripts.
+    rc, _ = guest(f"test -s {WORKDIR}/secrets/initial-admin-password")
+    if rc == 0:
+        warn(f"the auto-generated admin password is still on the box: {WORKDIR}/secrets/initial-admin-password")
+        say(f"  read it with: sudo incus exec --project {PROJECT} {INSTANCE} -- cat "
+            f"{WORKDIR}/secrets/initial-admin-password")
+        say("  then store it in your password manager, change it after first sign-in, and delete the file")
 
 
 def take_snapshot():
