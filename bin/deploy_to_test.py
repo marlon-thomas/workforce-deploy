@@ -684,7 +684,7 @@ def step5_version():
     rc, _ = guest(f"test -s {WORKDIR}/secrets/initial-admin-password")
     if rc == 0:
         warn(f"the auto-generated admin password is still on the box: {WORKDIR}/secrets/initial-admin-password")
-        say(f"  read it with: sudo incus exec --project {PROJECT} {NAME} -- cat "
+        say(f"  read it with: sudo incus exec --project {PROJECT} {INSTANCE} -- cat "
             f"{WORKDIR}/secrets/initial-admin-password")
         say("  then store it in your password manager, change it after first sign-in, and delete the file")
 
