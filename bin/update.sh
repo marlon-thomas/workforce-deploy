@@ -40,6 +40,19 @@ say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mXX\033[0m %s\n' "$*"; exit 1; }
 PREV="$APP_VERSION"
 
+# Secrets added by later releases, created when absent BEFORE anything else: compose refuses to
+# start any service (including a rollback) while a secret file it references is missing.
+# ADR-0021: the AI credential key is generated only when absent — regenerating it would make
+# organisations' stored AI keys unreadable; the server-wide AI key starts empty.
+ensure_secrets() {
+  if [ ! -s secrets/ai_credential_key ]; then
+    ( umask 077; openssl rand -base64 32 | tr -d '\n' > secrets/ai_credential_key )
+    say "Created secrets/ai_credential_key (keep it with the server's other secrets)"
+  fi
+  [ -e secrets/ai_api_key ] || ( umask 077; : > secrets/ai_api_key )
+}
+ensure_secrets
+
 say "Backing up before touching anything…"
 ./bin/backup.sh --tag pre-update || fail "Backup failed — update aborted (nothing was changed)."
 
