@@ -50,6 +50,8 @@ ensure_secrets() {
     say "Created secrets/ai_credential_key (keep it with the server's other secrets)"
   fi
   [ -e secrets/ai_api_key ] || ( umask 077; : > secrets/ai_api_key )
+  # feedback-spec: the GitHub App key for filing reports; empty until the operator adds it.
+  [ -e secrets/feedback_github_key ] || ( umask 077; : > secrets/feedback_github_key )
 }
 ensure_secrets
 

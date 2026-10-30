@@ -167,6 +167,21 @@ The assistant is off until an AI service is set up, in either place:
   or list it in `AI_TRUSTED_ENDPOINTS` (host names or CIDR ranges, comma-separated) so organisations
   may choose it. Never set `AI_TRUSTED_ENDPOINTS` on the hosted platform.
 
+## Reports from inside the app (feedback)
+
+Staff can report a problem or suggest an improvement from the account menu. Reports always stay
+with the organisation; a redacted copy (names, NHS/NI numbers, phone numbers and other personal
+details removed — screenshots never) is filed as a GitHub issue for Care Angels Software when:
+
+- `FEEDBACK_GITHUB_REPO`, `FEEDBACK_GITHUB_APP_ID` and `FEEDBACK_GITHUB_INSTALLATION_ID` are set in
+  `.env` (ansible: `feedback_github_repo`, `feedback_github_app_id`, `feedback_github_installation_id`),
+- the GitHub App's private key (`.pem`) is in `secrets/feedback_github_key` (mode 600, never
+  committed; the installer and every update create it empty), and
+- the organisation leaves "Send reports to Care Angels Software" on (Setup → Feedback).
+
+The App needs only **Issues: read and write** on the one repository. `FEEDBACK_ENGINEER_LOGIN` is the
+GitHub account whose `**For the reporter:**` comments are relayed to the reporter.
+
 ## If a deploy says "the guest has no outbound internet"
 
 STEP 2 probes HTTPS from inside the container. The known devbox cause is the

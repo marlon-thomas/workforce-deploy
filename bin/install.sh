@@ -717,6 +717,8 @@ gen ak_db_password; gen ak_secret
 # empty server-wide AI key — fill it (and AI_* in .env) to give every organisation an AI service.
 gen ai_credential_key
 [ -e secrets/ai_api_key ] || : > secrets/ai_api_key
+# Reports from inside the app go to GitHub once the installation's App key is put here (feedback-spec).
+[ -e secrets/feedback_github_key ] || : > secrets/feedback_github_key
 {
   echo "secret_key: $(cat secrets/ak_secret)"
   echo "postgresql:"

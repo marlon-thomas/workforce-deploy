@@ -88,8 +88,9 @@
       openssl rand -base64 32 | tr -d '\n' > secrets/ai_credential_key; made="key"
     fi
     if [ ! -e secrets/ai_api_key ]; then : > secrets/ai_api_key; made="$made api"; fi
-    chown {{ service_user }}:{{ service_user }} secrets/ai_credential_key secrets/ai_api_key
-    chmod 600 secrets/ai_credential_key secrets/ai_api_key
+    if [ ! -e secrets/feedback_github_key ]; then : > secrets/feedback_github_key; made="$made feedback"; fi
+    chown {{ service_user }}:{{ service_user }} secrets/ai_credential_key secrets/ai_api_key secrets/feedback_github_key
+    chmod 600 secrets/ai_credential_key secrets/ai_api_key secrets/feedback_github_key
     echo "ai secrets: ${made:-unchanged}"
   args:
     executable: /bin/bash

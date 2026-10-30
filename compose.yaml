@@ -221,6 +221,15 @@ services:
       AI_LOCKED: ${AI_LOCKED:-false}
       AI_ALLOWED_PROVIDERS: ${AI_ALLOWED_PROVIDERS:-}
       AI_TRUSTED_ENDPOINTS: ${AI_TRUSTED_ENDPOINTS:-}
+      # Reports from inside the app (feedback-spec.md): filed as GitHub issues by the installation's
+      # GitHub App when FEEDBACK_GITHUB_APP_ID/INSTALLATION_ID are set and secrets/feedback_github_key
+      # holds its private key; otherwise reports stay with the organisation.
+      FEEDBACK_INSTALLATION: ${FEEDBACK_INSTALLATION:-unnamed}
+      FEEDBACK_GITHUB_REPO: ${FEEDBACK_GITHUB_REPO:-}
+      FEEDBACK_GITHUB_APP_ID: ${FEEDBACK_GITHUB_APP_ID:-}
+      FEEDBACK_GITHUB_INSTALLATION_ID: ${FEEDBACK_GITHUB_INSTALLATION_ID:-}
+      FEEDBACK_GITHUB_KEY_FILE: /run/secrets/feedback_github_key
+      FEEDBACK_ENGINEER_LOGIN: ${FEEDBACK_ENGINEER_LOGIN:-}
       # ADR-0017: staff invitations — authentik's API on the internal network, and the public
       # enrolment page the invitation email links to.
       WORKFORCE_AUTHENTIK_API_URL: http://authentik-server:9000/api/v3
@@ -255,6 +264,10 @@ services:
         mode: 0444
       - source: ai_api_key
         target: workforce.assistant.api-key
+        mode: 0444
+      # The installation's GitHub App private key (feedback); an empty file = not connected.
+      - source: feedback_github_key
+        target: feedback_github_key
         mode: 0444
       # Web push (#30): VAPID pair as dotted-target configtree keys the app imports
       # (workforce.push.public-key / .private-key). Absent/empty -> app self-disables
@@ -335,7 +348,20 @@ services:
       WORKFORCE_REPORTS_GOTENBERG_URL: http://gotenberg:3000
       BRAND_DATA_DIR: /app/data/branding
       WORKFORCE_TLS_TRUSTSTORE: /app/api-truststore.jks
+      # Reports from inside the app (feedback-spec.md): filed as GitHub issues by the installation's
+      # GitHub App when FEEDBACK_GITHUB_APP_ID/INSTALLATION_ID are set and secrets/feedback_github_key
+      # holds its private key; otherwise reports stay with the organisation.
+      FEEDBACK_INSTALLATION: ${FEEDBACK_INSTALLATION:-unnamed}
+      FEEDBACK_GITHUB_REPO: ${FEEDBACK_GITHUB_REPO:-}
+      FEEDBACK_GITHUB_APP_ID: ${FEEDBACK_GITHUB_APP_ID:-}
+      FEEDBACK_GITHUB_INSTALLATION_ID: ${FEEDBACK_GITHUB_INSTALLATION_ID:-}
+      FEEDBACK_GITHUB_KEY_FILE: /run/secrets/feedback_github_key
+      FEEDBACK_ENGINEER_LOGIN: ${FEEDBACK_ENGINEER_LOGIN:-}
     secrets:
+      # The installation's GitHub App private key (feedback); an empty file = not connected.
+      - source: feedback_github_key
+        target: feedback_github_key
+        mode: 0444
       - source: db_password
         target: spring.datasource.password
         mode: 0444
@@ -606,6 +632,8 @@ secrets:
     file: ./secrets/ai_credential_key
   ai_api_key:
     file: ./secrets/ai_api_key
+  feedback_github_key:
+    file: ./secrets/feedback_github_key
 
 volumes:
   caddy_data:
