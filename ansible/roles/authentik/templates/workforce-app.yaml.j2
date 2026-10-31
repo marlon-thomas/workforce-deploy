@@ -27,8 +27,6 @@ entries:
       branding_favicon: https://{{ app_hostname }}/icons/icon.svg
       # branding/authentik-custom.css, mounted by compose.yaml; empty if the mount is missing.
       branding_custom_css: !File [/branding/authentik-custom.css, ""]
-      # ADR-0024: the flow a reset link opens (the app asks for links; this server sends no mail).
-      flow_recovery: !Find [authentik_flows.flow, [slug, workforce-recovery]]
       attributes:
         settings:
           theme:
@@ -280,6 +278,13 @@ entries:
   - model: authentik_flows.flowstagebinding
     identifiers: { target: !KeyOf wf-password-change-flow, stage: !KeyOf wf-password-write }
     attrs: { order: 20 }
+  # The flow a reset link opens (the app asks for links; this server sends no mail). Set here,
+  # after the flow is defined: earlier in the file the lookup finds nothing on a first apply.
+  - model: authentik_brands.brand
+    identifiers:
+      domain: authentik-default
+    attrs:
+      flow_recovery: !KeyOf wf-recovery-flow
   # "Forgot your password?" on the sign-in page goes to Workforce's own page, which asks for an
   # email address and sends the link from Workforce's mail (this server sends no email).
   - model: authentik_stages_redirect.redirectstage
@@ -302,10 +307,13 @@ entries:
   - model: authentik_flows.flowstagebinding
     identifiers: { target: !KeyOf wf-forgot-flow, stage: !KeyOf wf-forgot-redirect }
     attrs: { order: 10 }
+  # authentik validates the whole stage on update, so its sign-in fields are restated (as the
+  # default flow sets them); the flow is found by slug — !KeyOf fails authentik's validation pass.
   - model: authentik_stages_identification.identificationstage
     identifiers: { name: default-authentication-identification }
     attrs:
-      recovery_flow: !KeyOf wf-forgot-flow
+      user_fields: [email, username]
+      recovery_flow: !Find [authentik_flows.flow, [slug, workforce-forgot-password]]
     state: present
 
   # ---------- Review R5: the sign-in page is ours, not authentik's ----------
