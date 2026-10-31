@@ -266,13 +266,20 @@ services:
       ROUNDCUBEMAIL_SKIN: elastic
       ROUNDCUBEMAIL_PLUGINS: archive,zipdownload,markasjunk
       ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE: 25M
+    # Its entrypoint (root) reads the OAuth client secret natively; the session key is read again
+    # by Apache's user at every request, which can't open a secret file under the rootless daemon,
+    # so it is handed over as the environment variable the image also supports.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        export ROUNDCUBEMAIL_DES_KEY="$$(cat /run/secrets/webmail_des_key)"
+        exec /docker-entrypoint.sh apache2-foreground
     secrets:
-      # The image reads these two names natively (its entrypoint runs as root).
       - source: webmail_oidc_secret
         target: roundcube_oauth_client_secret
         mode: 0444
       - source: webmail_des_key
-        target: roundcube_des_key
         mode: 0444
     volumes:
       - webmail_data:/var/roundcube/db
