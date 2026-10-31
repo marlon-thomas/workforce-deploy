@@ -27,6 +27,8 @@ entries:
       branding_favicon: https://{{ app_hostname }}/icons/icon.svg
       # branding/authentik-custom.css, mounted by compose.yaml; empty if the mount is missing.
       branding_custom_css: !File [/branding/authentik-custom.css, ""]
+      # ADR-0024: the flow a reset link opens (the app asks for links; this server sends no mail).
+      flow_recovery: !Find [authentik_flows.flow, [slug, workforce-recovery]]
       attributes:
         settings:
           theme:
@@ -208,6 +210,103 @@ entries:
   - model: authentik_flows.flowstagebinding
     identifiers: { target: !KeyOf wf-enrollment-flow, stage: !KeyOf wf-enrollment-login }
     attrs: { order: 40 }
+
+  # ---------- ADR-0024: passwords — reset by link, never set by someone else ----------
+  # Workforce asks for a one-time link (POST /core/users/{pk}/recovery/) and emails it from its
+  # own mail; the person chooses the password here, under the same rule as enrolment.
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-recovery-staff-only
+    identifiers: { name: workforce-recovery-staff-only }
+    attrs:
+      name: workforce-recovery-staff-only
+      # The link is planned for one person (pending_user). Never for this server's own
+      # administrators or service accounts: the app's credential must not open a way in here.
+      expression: |
+        user = request.user
+        return (getattr(user, "type", "") == "internal" and not user.is_superuser
+                and not ak_is_group_member(user, name="authentik Admins"))
+  - model: authentik_stages_prompt.promptstage
+    id: wf-new-password-prompt
+    identifiers: { name: workforce-new-password }
+    attrs:
+      name: workforce-new-password
+      fields:
+        - !KeyOf wf-prompt-password
+        - !KeyOf wf-prompt-password-repeat
+      validation_policies:
+        - !KeyOf wf-password-policy
+  - model: authentik_stages_user_write.userwritestage
+    id: wf-password-write
+    identifiers: { name: workforce-password-write }
+    attrs:
+      name: workforce-password-write
+      user_creation_mode: never_create
+  - model: authentik_flows.flow
+    id: wf-recovery-flow
+    identifiers: { slug: workforce-recovery }
+    attrs:
+      name: Workforce password reset
+      slug: workforce-recovery
+      title: Choose a new password
+      designation: recovery
+      authentication: none
+      layout: stacked
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-recovery-flow, policy: !KeyOf wf-recovery-staff-only }
+    attrs: { order: 0, enabled: true }
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-recovery-flow, stage: !KeyOf wf-new-password-prompt }
+    attrs: { order: 10 }
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-recovery-flow, stage: !KeyOf wf-password-write }
+    attrs: { order: 20 }
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-recovery-flow, stage: !KeyOf wf-enrollment-login }
+    attrs: { order: 30 }
+  # Signed in, from the account menu: the same rule, then back to Workforce (?next=).
+  - model: authentik_flows.flow
+    id: wf-password-change-flow
+    identifiers: { slug: workforce-password-change }
+    attrs:
+      name: Workforce change password
+      slug: workforce-password-change
+      title: Change your password
+      designation: stage_configuration
+      authentication: require_authenticated
+      layout: stacked
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-password-change-flow, stage: !KeyOf wf-new-password-prompt }
+    attrs: { order: 10 }
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-password-change-flow, stage: !KeyOf wf-password-write }
+    attrs: { order: 20 }
+  # "Forgot your password?" on the sign-in page goes to Workforce's own page, which asks for an
+  # email address and sends the link from Workforce's mail (this server sends no email).
+  - model: authentik_stages_redirect.redirectstage
+    id: wf-forgot-redirect
+    identifiers: { name: workforce-forgot-password-redirect }
+    attrs:
+      name: workforce-forgot-password-redirect
+      mode: static
+      target_static: https://{{ app_hostname }}/forgot-password
+      keep_context: false
+  - model: authentik_flows.flow
+    id: wf-forgot-flow
+    identifiers: { slug: workforce-forgot-password }
+    attrs:
+      name: Workforce forgot password
+      slug: workforce-forgot-password
+      title: Forgot your password?
+      designation: recovery
+      authentication: none
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-forgot-flow, stage: !KeyOf wf-forgot-redirect }
+    attrs: { order: 10 }
+  - model: authentik_stages_identification.identificationstage
+    identifiers: { name: default-authentication-identification }
+    attrs:
+      recovery_flow: !KeyOf wf-forgot-flow
+    state: present
 
   # ---------- Review R5: the sign-in page is ours, not authentik's ----------
   - model: authentik_flows.flow

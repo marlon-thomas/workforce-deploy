@@ -1,6 +1,7 @@
 # ADR-0017: the Workforce app's invitation credential, converged idempotently inside authentik
 # (`ak shell`). Reads the token key from stdin (never argv/env). The account can create, view
-# and delete invitations — nothing else (no users, flows, settings or other tokens).
+# and delete invitations, and (ADR-0024) look up a user and make them a password reset link —
+# nothing else (no flows, settings, groups or other tokens).
 import sys
 
 from authentik.core.models import Group, Token, TokenIntents, User, UserTypes
@@ -33,6 +34,10 @@ for perm in (
     "authentik_stages_invitation.view_invitation",
     "authentik_stages_invitation.delete_invitation",
     "authentik_flows.view_flow",
+    # ADR-0024: find a staff member's account and make them a one-time reset link. The recovery
+    # flow's own policy refuses superusers, service accounts and authentik Admins.
+    "authentik_core.view_user",
+    "authentik_core.reset_user_password",
 ):
     assign(perm)
 
@@ -43,7 +48,7 @@ Token.objects.update_or_create(
         "intent": TokenIntents.INTENT_API,
         "expiring": False,
         "key": key,
-        "description": "Workforce app: create and revoke staff invitations (ADR-0017)",
+        "description": "Workforce app: staff invitations (ADR-0017) and password reset links (ADR-0024)",
     },
 )
 print("workforce-invites converged")
