@@ -89,8 +89,16 @@
     fi
     if [ ! -e secrets/ai_api_key ]; then : > secrets/ai_api_key; made="$made api"; fi
     if [ ! -e secrets/feedback_github_key ]; then : > secrets/feedback_github_key; made="$made feedback"; fi
-    chown {{ service_user }}:{{ service_user }} secrets/ai_credential_key secrets/ai_api_key secrets/feedback_github_key
-    chmod 600 secrets/ai_credential_key secrets/ai_api_key secrets/feedback_github_key
+    for f in mail_admin_password mail_db_password mail_lookup_key webmail_oidc_secret webmail_des_key; do
+      if [ ! -s "secrets/$f" ]; then openssl rand -hex 24 | tr -d '\n' > "secrets/$f"; made="$made $f"; fi
+    done
+    if [ ! -e secrets/mail_relay_password ]; then : > secrets/mail_relay_password; made="$made relay"; fi
+    chown {{ service_user }}:{{ service_user }} secrets/ai_credential_key secrets/ai_api_key secrets/feedback_github_key \
+      secrets/mail_admin_password secrets/mail_db_password secrets/mail_lookup_key secrets/mail_relay_password \
+      secrets/webmail_oidc_secret secrets/webmail_des_key
+    chmod 600 secrets/ai_credential_key secrets/ai_api_key secrets/feedback_github_key \
+      secrets/mail_admin_password secrets/mail_db_password secrets/mail_lookup_key secrets/mail_relay_password \
+      secrets/webmail_oidc_secret secrets/webmail_des_key
     echo "ai secrets: ${made:-unchanged}"
   args:
     executable: /bin/bash

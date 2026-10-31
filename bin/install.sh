@@ -719,6 +719,12 @@ gen ai_credential_key
 [ -e secrets/ai_api_key ] || : > secrets/ai_api_key
 # Reports from inside the app go to GitHub once the installation's App key is put here (feedback-spec).
 [ -e secrets/feedback_github_key ] || : > secrets/feedback_github_key
+# Staff email (mail-calendar-spec §11): always present so compose finds them, used once staff email is on.
+for s in mail_admin_password mail_db_password mail_lookup_key webmail_oidc_secret webmail_des_key; do
+  [ -s "secrets/$s" ] || openssl rand -hex 24 | tr -d '\n' > "secrets/$s"
+done
+[ -e secrets/mail_relay_password ] || : > secrets/mail_relay_password
+[ -e blueprints/webmail-app.yaml ] || printf 'version: 1\nentries: []\n' > blueprints/webmail-app.yaml
 {
   echo "secret_key: $(cat secrets/ak_secret)"
   echo "postgresql:"

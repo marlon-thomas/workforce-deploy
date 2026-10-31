@@ -89,6 +89,22 @@ if [ "$HAVE_AK" -eq 1 ]; then
   pg_replace_db authentik-postgres "$AK_DB_USER" "$AK_DB_NAME" "$TMP/authentik.dump"
 fi
 
+# Staff email (mail-calendar-spec §11): the mail server's database, owned by its own role.
+if [ -f "$TMP/mail.dump" ]; then
+  if docker compose exec -T postgres psql -U "$DB_USER" -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname = 'stalwart'" | grep -q 1; then
+    echo "Restoring the staff mail database…"
+    docker compose stop mail webmail >/dev/null 2>&1 || true
+    docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -q -U "$DB_USER" -d postgres \
+      -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='stalwart' AND pid <> pg_backend_pid()" >/dev/null
+    docker compose exec -T postgres dropdb -U "$DB_USER" --if-exists stalwart
+    docker compose exec -T postgres createdb -U "$DB_USER" -O stalwart stalwart
+    docker compose exec -T postgres pg_restore -U "$DB_USER" -d stalwart --no-owner --role=stalwart --exit-on-error < "$TMP/mail.dump"
+    docker compose start mail webmail >/dev/null 2>&1 || true
+  else
+    echo "NOTE: this backup has staff mail, but staff email isn't set up on this box — mail was not restored."
+  fi
+fi
+
 if [ "$HAVE_EV" -eq 1 ]; then
   echo "Restoring evidence…"
   evidence_import < "$TMP/evidence.tar"

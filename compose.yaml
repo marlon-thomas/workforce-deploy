@@ -27,6 +27,8 @@ services:
       TZ: Europe/London
       APP_HOSTNAME: ${APP_HOSTNAME:-app.example.com}
       AUTH_HOSTNAME: ${AUTH_HOSTNAME:-auth.example.com}
+      # Staff webmail (COMPOSE_PROFILES=staffmail). Unset = a local-only name nobody reaches.
+      WEBMAIL_HOSTNAME: ${WEBMAIL_HOSTNAME:-webmail.localhost}
       ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
       # Only consumed by the duckdns gateway build (TLS_MODE=dns01); empty is
       # harmless for the stock HTTP-01 image.
@@ -166,6 +168,121 @@ services:
     volumes:
       - mailpit_data:/data
 
+  # ---------- Staff email (COMPOSE_PROFILES=staffmail; mail-calendar-spec §11, ADR-0022) ----------
+  # Stalwart (AGPL-3.0, unmodified) holds the mailboxes; Workforce configures it through its
+  # management API from Setup -> Email (domains, accounts, who may send outside, sign-in, relay).
+  # Only SMTP port 25 is published (mail arriving from the internet; it offers no sign-in);
+  # webmail is Roundcube behind the gateway at WEBMAIL_HOSTNAME.
+
+  # One-shot: the mail server's own role and database on the suite's PostgreSQL, so mail is in
+  # the nightly backup. Idempotent; the password is the mail_db_password secret.
+  mail-db-init:
+    image: postgres:16.4
+    restart: "no"
+    profiles: ["staffmail"]
+    networks: [data]
+    environment:
+      TZ: Europe/London
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+    secrets:
+      - source: db_password
+        mode: 0444
+      - source: mail_db_password
+        mode: 0444
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        export PGPASSWORD="$$(cat /run/secrets/db_password)"
+        until pg_isready -h postgres -U "$$DB_USER" -d "$$DB_NAME" >/dev/null 2>&1; do sleep 2; done
+        psql -h postgres -U "$$DB_USER" -d "$$DB_NAME" -v ON_ERROR_STOP=1 -v mp="$$(cat /run/secrets/mail_db_password)" <<'SQL'
+        SELECT 'CREATE ROLE stalwart LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'stalwart')\gexec
+        ALTER ROLE stalwart WITH LOGIN PASSWORD :'mp';
+        SELECT 'CREATE DATABASE stalwart OWNER stalwart' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'stalwart')\gexec
+        SQL
+        echo "mail database ready"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mail:
+    image: stalwartlabs/stalwart@sha256:b9da4df8b4efc06bc926dd6e990bdeb0ad7b9261a7c3893d74b0461a00bb389b  # tag: v1.0.1
+    restart: unless-stopped
+    # Secrets are bind mounts readable only by the container's root (compose ignores `mode` outside
+    # Swarm); under the rootless daemon that root is the unprivileged service user on the host.
+    user: "0:0"
+    profiles: ["staffmail"]
+    networks: [data]
+    ports:
+      - "25:25"
+    environment:
+      TZ: Europe/London
+      STALWART_HOSTNAME: ${MAIL_HOSTNAME:-mail.localhost}
+    # Workforce administers the server as the recovery administrator, whose password is the
+    # mail_admin_password secret. Its management port (8080) is on the private network only.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        export STALWART_RECOVERY_ADMIN="workforce:$$(cat /run/secrets/mail_admin_password)"
+        exec /usr/local/bin/stalwart --config /etc/stalwart/config.json
+    secrets:
+      - source: mail_admin_password
+        mode: 0444
+      - source: mail_db_password
+        mode: 0444
+      - source: mail_relay_password
+        mode: 0444
+    volumes:
+      - ./mail:/etc/stalwart:ro
+    logging: *default-logging
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz/ready || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      mail-db-init:
+        condition: service_completed_successfully
+
+  webmail:
+    image: roundcube/roundcubemail@sha256:a6ef4cff166b5e2056238bb400ca84210bd796c83d859495ab67e60101ff2c55  # tag: 1.7.5-apache
+    restart: unless-stopped
+    profiles: ["staffmail"]
+    networks: [back, data]
+    environment:
+      TZ: Europe/London
+      AUTH_HOSTNAME: ${AUTH_HOSTNAME}
+      MAIL_TLS_VERIFY: ${MAIL_TLS_VERIFY:-true}
+      ROUNDCUBEMAIL_DEFAULT_HOST: ssl://mail
+      ROUNDCUBEMAIL_DEFAULT_PORT: "993"
+      ROUNDCUBEMAIL_SMTP_SERVER: ssl://mail
+      ROUNDCUBEMAIL_SMTP_PORT: "465"
+      ROUNDCUBEMAIL_DB_TYPE: sqlite
+      ROUNDCUBEMAIL_SKIN: elastic
+      ROUNDCUBEMAIL_PLUGINS: archive,zipdownload,markasjunk
+      ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE: 25M
+    secrets:
+      # The image reads these two names natively (its entrypoint runs as root).
+      - source: webmail_oidc_secret
+        target: roundcube_oauth_client_secret
+        mode: 0444
+      - source: webmail_des_key
+        target: roundcube_des_key
+        mode: 0444
+    volumes:
+      - webmail_data:/var/roundcube/db
+      - ./webmail:/var/roundcube/config:ro
+    logging: *default-logging
+    stop_grace_period: 20s
+    depends_on:
+      mail:
+        condition: service_started
+
   api:
     # Pulled by default (deployment-spec §B1: orgs run published images, pinned by
     # APP_VERSION). Building from source is a dev override:
@@ -230,6 +347,23 @@ services:
       FEEDBACK_GITHUB_INSTALLATION_ID: ${FEEDBACK_GITHUB_INSTALLATION_ID:-}
       FEEDBACK_GITHUB_KEY_FILE: /run/secrets/feedback_github_key
       FEEDBACK_ENGINEER_LOGIN: ${FEEDBACK_ENGINEER_LOGIN:-}
+      # Staff email (mail-calendar-spec §11): the mail server Workforce configures, and where staff
+      # read their mail. Empty MAIL_SERVER_URL = this installation has no staff email.
+      MAIL_SERVER_URL: ${MAIL_SERVER_URL:-}
+      MAIL_SERVER_ADMIN_USER: workforce
+      MAIL_SERVER_ADMIN_PASSWORD_FILE: /run/secrets/mail_admin_password
+      MAIL_HOSTNAME: ${MAIL_HOSTNAME:-}
+      WEBMAIL_URL: ${WEBMAIL_URL:-}
+      MAIL_SIGN_IN_ISSUER: https://${AUTH_HOSTNAME}/application/o/webmail/
+      MAIL_SIGN_IN_AUDIENCE: workforce-webmail
+      MAIL_SIGN_IN_ALLOW_INVALID_CERTS: ${MAIL_SIGN_IN_ALLOW_INVALID_CERTS:-false}
+      MAIL_SIGN_IN_LOOKUP_KEY_FILE: /run/secrets/mail_lookup_key
+      MAIL_RELAY_HOST: ${MAIL_RELAY_HOST:-}
+      MAIL_RELAY_PORT: ${MAIL_RELAY_PORT:-587}
+      MAIL_RELAY_USER: ${MAIL_RELAY_USER:-}
+      MAIL_RELAY_PASSWORD_FILE: /run/secrets/mail_relay_password
+      MAIL_RELAY_IMPLICIT_TLS: ${MAIL_RELAY_IMPLICIT_TLS:-false}
+      MAIL_RELAY_SPF_INCLUDE: ${MAIL_RELAY_SPF_INCLUDE:-}
       # ADR-0017: staff invitations — authentik's API on the internal network, and the public
       # enrolment page the invitation email links to.
       WORKFORCE_AUTHENTIK_API_URL: http://authentik-server:9000/api/v3
@@ -268,6 +402,12 @@ services:
       # The installation's GitHub App private key (feedback); an empty file = not connected.
       - source: feedback_github_key
         target: feedback_github_key
+        mode: 0444
+      # Staff email: the mail server's administrator password and the key the sign-in server
+      # presents when it asks which mailbox belongs to a login (both generated, never shown).
+      - source: mail_admin_password
+        mode: 0444
+      - source: mail_lookup_key
         mode: 0444
       # Web push (#30): VAPID pair as dotted-target configtree keys the app imports
       # (workforce.push.public-key / .private-key). Absent/empty -> app self-disables
@@ -357,10 +497,33 @@ services:
       FEEDBACK_GITHUB_INSTALLATION_ID: ${FEEDBACK_GITHUB_INSTALLATION_ID:-}
       FEEDBACK_GITHUB_KEY_FILE: /run/secrets/feedback_github_key
       FEEDBACK_ENGINEER_LOGIN: ${FEEDBACK_ENGINEER_LOGIN:-}
+      # Staff email (mail-calendar-spec §11): the mail server Workforce configures, and where staff
+      # read their mail. Empty MAIL_SERVER_URL = this installation has no staff email.
+      MAIL_SERVER_URL: ${MAIL_SERVER_URL:-}
+      MAIL_SERVER_ADMIN_USER: workforce
+      MAIL_SERVER_ADMIN_PASSWORD_FILE: /run/secrets/mail_admin_password
+      MAIL_HOSTNAME: ${MAIL_HOSTNAME:-}
+      WEBMAIL_URL: ${WEBMAIL_URL:-}
+      MAIL_SIGN_IN_ISSUER: https://${AUTH_HOSTNAME}/application/o/webmail/
+      MAIL_SIGN_IN_AUDIENCE: workforce-webmail
+      MAIL_SIGN_IN_ALLOW_INVALID_CERTS: ${MAIL_SIGN_IN_ALLOW_INVALID_CERTS:-false}
+      MAIL_SIGN_IN_LOOKUP_KEY_FILE: /run/secrets/mail_lookup_key
+      MAIL_RELAY_HOST: ${MAIL_RELAY_HOST:-}
+      MAIL_RELAY_PORT: ${MAIL_RELAY_PORT:-587}
+      MAIL_RELAY_USER: ${MAIL_RELAY_USER:-}
+      MAIL_RELAY_PASSWORD_FILE: /run/secrets/mail_relay_password
+      MAIL_RELAY_IMPLICIT_TLS: ${MAIL_RELAY_IMPLICIT_TLS:-false}
+      MAIL_RELAY_SPF_INCLUDE: ${MAIL_RELAY_SPF_INCLUDE:-}
     secrets:
       # The installation's GitHub App private key (feedback); an empty file = not connected.
       - source: feedback_github_key
         target: feedback_github_key
+        mode: 0444
+      # Staff email: the mail server's administrator password and the key the sign-in server
+      # presents when it asks which mailbox belongs to a login (both generated, never shown).
+      - source: mail_admin_password
+        mode: 0444
+      - source: mail_lookup_key
         mode: 0444
       - source: db_password
         target: spring.datasource.password
@@ -542,6 +705,7 @@ services:
       - ./secrets/ak_config.yml:/etc/authentik/config.yml:ro
       # Rendered by the identity converge from ansible/roles/authentik/templates/workforce-app.yaml.j2
       - ./blueprints/workforce-app.yaml:/blueprints/workforce-app.yaml:ro
+      - ./blueprints/webmail-app.yaml:/blueprints/webmail-app.yaml:ro
       # Workforce look for the sign-in pages (R5): the blueprint loads authentik-custom.css into
       # the brand's custom CSS (`!File`); authentik stopped reading /web/dist/custom.css in 2025.
       # A directory, not the file: a single-file mount keeps the old inode after `git pull`.
@@ -576,6 +740,7 @@ services:
       # The WORKER applies blueprints — same mount as the server (the earlier
       # deployment failed exactly here: provider never created).
       - ./blueprints/workforce-app.yaml:/blueprints/workforce-app.yaml:ro
+      - ./blueprints/webmail-app.yaml:/blueprints/webmail-app.yaml:ro
       - ./secrets/ak_config.yml:/etc/authentik/config.yml:ro
     logging: *default-logging
     stop_grace_period: 30s
@@ -634,6 +799,19 @@ secrets:
     file: ./secrets/ai_api_key
   feedback_github_key:
     file: ./secrets/feedback_github_key
+  # Staff email (generated by install.sh / update.sh; relay password empty until there is a relay).
+  mail_admin_password:
+    file: ./secrets/mail_admin_password
+  mail_db_password:
+    file: ./secrets/mail_db_password
+  mail_lookup_key:
+    file: ./secrets/mail_lookup_key
+  mail_relay_password:
+    file: ./secrets/mail_relay_password
+  webmail_oidc_secret:
+    file: ./secrets/webmail_oidc_secret
+  webmail_des_key:
+    file: ./secrets/webmail_des_key
 
 volumes:
   caddy_data:
@@ -647,6 +825,7 @@ volumes:
   ak_geoip:
   ak_pg_data:
   mailpit_data:
+  webmail_data:
 
 networks:
   front:

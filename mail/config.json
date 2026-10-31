@@ -1,0 +1,1 @@
+{"@type":"PostgreSql","host":"postgres","port":5432,"database":"stalwart","authUsername":"stalwart","authSecret":{"@type":"File","filePath":"/run/secrets/mail_db_password"}}

@@ -61,8 +61,9 @@ say "Issuing the leaf certificate (re-issued every run to match the hostnames)â€
 openssl req -newkey rsa:2048 -sha256 -nodes \
   -keyout "$LEAF_KEY" -out "${CA_DIR}/tls.csr" \
   -subj "/CN=${APP_HOST}"
-printf 'subjectAltName=DNS:%s,DNS:%s\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n' \
-  "$APP_HOST" "$AUTH_HOST" > "${CA_DIR}/leaf.ext"
+# *.APP_HOST covers the staff webmail (webmail.<app host>; bin/staff-mail.sh --private-ca).
+printf 'subjectAltName=DNS:%s,DNS:%s,DNS:*.%s\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n' \
+  "$APP_HOST" "$AUTH_HOST" "$APP_HOST" > "${CA_DIR}/leaf.ext"
 openssl x509 -req -in "${CA_DIR}/tls.csr" -CA "$CA_CRT" -CAkey "$CA_KEY" \
   -CAcreateserial -days 825 -sha256 -extfile "${CA_DIR}/leaf.ext" \
   -out "$LEAF_CRT"

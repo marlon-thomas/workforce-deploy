@@ -47,11 +47,19 @@ docker compose exec -T authentik-postgres pg_dump -U "${AK_DB_USER}" -d "${AK_DB
   > "${TMP}/authentik.dump"
 [ -s "${TMP}/authentik.dump" ] || { echo "Sign-in database dump is empty — backup FAILED."; exit 1; }
 
+# Staff email (mail-calendar-spec §11): the mail server's database, when this installation has one.
+if docker compose exec -T postgres psql -U "${DB_USER}" -d "${DB_NAME}" -tAc "SELECT 1 FROM pg_database WHERE datname = 'stalwart'" 2>/dev/null | grep -q 1; then
+  echo "Dumping the staff mail database…"
+  docker compose exec -T postgres pg_dump -U "${DB_USER}" -d stalwart -Fc > "${TMP}/mail.dump"
+  [ -s "${TMP}/mail.dump" ] || { echo "Staff mail database dump is empty — backup FAILED."; exit 1; }
+fi
+
 echo "Copying evidence…"
 evidence_export > "${TMP}/evidence.tar" \
   || { echo "Evidence copy FAILED — no archive written (evidence is never silently dropped)."; exit 1; }
 
 PARTS="MANIFEST database.dump authentik.dump evidence.tar"
+[ -s "${TMP}/mail.dump" ] && PARTS="${PARTS} mail.dump"
 if docker compose cp api:/app/data/branding "${TMP}/branding" >/dev/null 2>&1; then
   PARTS="${PARTS} branding"
 else
@@ -67,6 +75,7 @@ fi
   AK_VER="$(authentik_version)"
   echo "authentik_version=${AK_VER:-unknown}"
   ( cd "$TMP" && sha256sum database.dump authentik.dump evidence.tar )
+  if [ -s "${TMP}/mail.dump" ]; then ( cd "$TMP" && sha256sum mail.dump ); fi
 } > "${TMP}/MANIFEST"
 
 # shellcheck disable=SC2086  # PARTS is a word list on purpose

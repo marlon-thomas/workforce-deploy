@@ -182,6 +182,35 @@ details removed — screenshots never) is filed as a GitHub issue for Care Angel
 The App needs only **Issues: read and write** on the one repository. `FEEDBACK_ENGINEER_LOGIN` is the
 GitHub account whose `**For the reporter:**` comments are relayed to the reporter.
 
+## Staff email (Stalwart + Roundcube)
+
+Staff mailboxes on this server, with webmail, following the staff records (mail-calendar-spec §11
+in the source repo). Off until switched on:
+
+```bash
+./bin/staff-mail.sh on --webmail-host mail.<your domain> --relay <relay host>:587 --relay-user <user> \
+    --relay-spf-include <the relay's SPF include>
+# the relay password goes in secrets/mail_relay_password (never .env), then run the command again
+```
+
+- `--webmail-host` must be its own name (never a path of the app: email is untrusted HTML). By
+  default the same name is the mail host the MX record points at — give it an A record for this
+  server, and open **port 25** inbound. Nothing else is published; the mail server's management
+  port stays on the private network.
+- **The organisation's domains are not set here.** In Workforce: Setup → Email — the staff domain
+  (normally a subdomain, e.g. `staff.<your domain>`, so existing email such as Microsoft 365 is
+  untouched), the organisation's other domains, who has a mailbox and who may email outside. It then
+  shows the DNS records to add (MX, SPF, DKIM, DMARC).
+- Secrets (generated, never displayed): `mail_admin_password` (Workforce administers the mail
+  server with it), `mail_db_password` (its own `stalwart` database on the suite's PostgreSQL —
+  in the nightly backup and `restore.sh`), `mail_lookup_key` (the sign-in server asks Workforce which
+  mailbox a login has), `webmail_oidc_secret`, `webmail_des_key`; `mail_relay_password` starts empty.
+- Webmail signs in through the suite's sign-in server only; people without a working mailbox are
+  refused there. `./bin/staff-mail.sh off` stops the mail server and webmail and keeps their data.
+- Test appliance: `--private-ca` (the private CA, ADR-0014) and a host under the app's name, e.g.
+  `--webmail-host webmail.<app host> --relay mailpit:1025` so nothing leaves; `bin/gen-test-ca.sh`
+  covers `*.<app host>`.
+
 ## If a deploy says "the guest has no outbound internet"
 
 STEP 2 probes HTTPS from inside the container. The known devbox cause is the

@@ -14,6 +14,8 @@
 }
 
 {$APP_HOSTNAME} {
+	# Asked only by the sign-in server on the private network (staff webmail); never from outside.
+	respond /api/public/mail/* 404
 	reverse_proxy api:8080 {
 		header_up X-Forwarded-Proto {scheme}
 	}
@@ -31,6 +33,21 @@
 	reverse_proxy authentik-server:9000
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}
+
+# Staff webmail (COMPOSE_PROFILES=staffmail; mail-calendar-spec §11). Its own host name, never a
+# path of the app: email is untrusted HTML, so webmail must not share the app's origin.
+# WEBMAIL_HOSTNAME unset = webmail.localhost, a local-only name with an internal certificate.
+{$WEBMAIL_HOSTNAME:webmail.localhost} {
+	reverse_proxy webmail:80 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
 		-Server
 	}
 }

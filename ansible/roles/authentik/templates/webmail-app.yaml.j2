@@ -1,0 +1,92 @@
+version: 1
+metadata:
+  name: Workforce webmail
+{% if webmail_hostname | default('') | length == 0 %}
+# Staff email is off on this installation (no WEBMAIL_HOSTNAME): nothing to set up.
+entries: []
+{% else %}
+# Staff webmail sign-in (mail-calendar-spec §11). Roundcube signs people in here; the mail server
+# accepts the access token. Which mailbox a login has is the suite's to say: the claim asks the
+# app over the private network, with the installation's lookup key, so no mail password exists.
+entries:
+  - model: authentik_providers_oauth2.scopemapping
+    id: webmail-mailbox-scope
+    identifiers:
+      name: Workforce mailbox claim
+    attrs:
+      name: Workforce mailbox claim
+      scope_name: workforce_mail
+      description: Your work email address
+      expression: |
+        try:
+            r = requests.get("http://api:8080/api/public/mail/sign-in-identity",
+                             params={"subject": request.user.email},
+                             headers={"X-Workforce-Mail-Key": "{{ mail_lookup_key }}"}, timeout=5)
+            if r.status_code == 200:
+                return {"workforce_mailbox": r.json().get("mailbox")}
+        except Exception as e:
+            ak_logger.warning("workforce mailbox lookup failed", error=str(e))
+        return {}
+  # Only people with a working mailbox reach webmail: everyone else gets authentik's plain refusal.
+  - model: authentik_policies_expression.expressionpolicy
+    id: webmail-has-mailbox
+    identifiers:
+      name: workforce-webmail-has-mailbox
+    attrs:
+      name: workforce-webmail-has-mailbox
+      expression: |
+        try:
+            r = requests.get("http://api:8080/api/public/mail/sign-in-identity",
+                             params={"subject": request.user.email},
+                             headers={"X-Workforce-Mail-Key": "{{ mail_lookup_key }}"}, timeout=5)
+            if r.status_code == 200:
+                return True
+        except Exception as e:
+            ak_logger.warning("workforce mailbox lookup failed", error=str(e))
+        ak_message("You don't have a work email address here. Ask your manager.")
+        return False
+  - model: authentik_providers_oauth2.oauth2provider
+    id: webmail-provider
+    identifiers:
+      name: Workforce webmail
+    attrs:
+      name: Workforce webmail
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
+      client_type: confidential
+      client_id: workforce-webmail
+      client_secret: {{ webmail_oidc_secret }}
+      # Asymmetric keys: the mail server refuses HMAC-signed tokens.
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, "authentik Self-signed Certificate"]]
+      sub_mode: user_email
+      access_token_validity: hours=1
+      refresh_token_validity: hours=8
+      redirect_uris:
+        - matching_mode: strict
+          url: https://{{ webmail_hostname }}/index.php/login/oauth
+        - matching_mode: strict
+          redirect_uri_type: logout
+          url: https://{{ webmail_hostname }}/
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+        - !KeyOf webmail-mailbox-scope
+  - model: authentik_core.application
+    id: webmail-app
+    identifiers:
+      slug: webmail
+    attrs:
+      name: Email
+      slug: webmail
+      meta_launch_url: https://{{ webmail_hostname }}/
+      provider: !KeyOf webmail-provider
+      policy_engine_mode: all
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf webmail-app
+      policy: !KeyOf webmail-has-mailbox
+    attrs:
+      order: 0
+      enabled: true
+{% endif %}

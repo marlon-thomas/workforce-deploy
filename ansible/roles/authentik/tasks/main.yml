@@ -42,6 +42,32 @@
   register: blueprint_render
   no_log: true   # renders the OIDC client secret + first admin password (--diff would print them)
 
+# Staff webmail sign-in (mail-calendar-spec §11): rendered always (empty while staff email is
+# off) because the authentik containers bind-mount the file.
+- name: Staff webmail secrets read
+  ansible.builtin.set_fact:
+    webmail_oidc_secret: "{{ lookup('ansible.builtin.password', '/opt/workforce-deploy/secrets/webmail_oidc_secret chars=hexdigits length=48') }}"
+    mail_lookup_key: "{{ lookup('ansible.builtin.password', '/opt/workforce-deploy/secrets/mail_lookup_key chars=hexdigits length=48') }}"
+  no_log: true
+
+- name: Staff webmail secret files owned by the service user
+  ansible.builtin.file:
+    path: "/opt/workforce-deploy/secrets/{{ item }}"
+    owner: "{{ service_user }}"
+    group: "{{ service_user }}"
+    mode: "0600"
+  loop: [webmail_oidc_secret, mail_lookup_key]
+
+- name: webmail blueprint rendered
+  ansible.builtin.template:
+    src: webmail-app.yaml.j2
+    dest: /opt/workforce-deploy/blueprints/webmail-app.yaml
+    owner: "{{ service_user }}"
+    group: "{{ service_user }}"
+    mode: "0644"
+  register: webmail_blueprint_render
+  no_log: true   # renders the webmail client secret and the lookup key
+
 - name: Service user uid (rootless docker socket lives in their runtime dir)
   ansible.builtin.command: id -u {{ service_user }}
   register: ak_su_uid
@@ -91,7 +117,7 @@
       - authentik-worker
     recreate: always
     state: present
-  when: blueprint_render is changed
+  when: blueprint_render is changed or webmail_blueprint_render is changed
   environment:
     DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
 
@@ -107,6 +133,18 @@
   until: (ak_bp.rc | default(1)) == 0 and 'Blueprint invalid' not in (ak_bp.stdout | default(''))
   retries: 40
   delay: 10
+  environment:
+    DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
+
+- name: webmail blueprint applied
+  ansible.builtin.command: >-
+    docker exec -w / workforce-deploy-authentik-server-1
+    python /manage.py apply_blueprint /blueprints/webmail-app.yaml
+  register: ak_wbp
+  until: (ak_wbp.rc | default(1)) == 0 and 'Blueprint invalid' not in (ak_wbp.stdout | default(''))
+  retries: 10
+  delay: 10
+  changed_when: false
   environment:
     DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
 

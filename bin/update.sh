@@ -52,6 +52,15 @@ ensure_secrets() {
   [ -e secrets/ai_api_key ] || ( umask 077; : > secrets/ai_api_key )
   # feedback-spec: the GitHub App key for filing reports; empty until the operator adds it.
   [ -e secrets/feedback_github_key ] || ( umask 077; : > secrets/feedback_github_key )
+  # Staff email (mail-calendar-spec §11): generated whether or not staff email is switched on, so
+  # compose always finds them; the relay password stays empty until there is a relay.
+  for s in mail_admin_password mail_db_password mail_lookup_key webmail_oidc_secret webmail_des_key; do
+    [ -s "secrets/$s" ] || ( umask 077; openssl rand -hex 24 | tr -d '\n' > "secrets/$s" )
+  done
+  [ -e secrets/mail_relay_password ] || ( umask 077; : > secrets/mail_relay_password )
+  # The authentik containers bind-mount the webmail blueprint; the identity converge renders it.
+  mkdir -p blueprints
+  [ -e blueprints/webmail-app.yaml ] || printf 'version: 1\nentries: []\n' > blueprints/webmail-app.yaml
 }
 ensure_secrets
 
@@ -72,6 +81,7 @@ if [ -f inventories/local/hosts.yml ] && command -v ansible-playbook >/dev/null 
   ansible-playbook -i inventories/local/hosts.yml ansible/site.yml --tags identity \
       -e github_token=unused -e ak_admin_password= \
       -e "app_hostname=${APP_HOSTNAME}" -e "auth_hostname=${AUTH_HOSTNAME}" \
+      -e "webmail_hostname=${WEBMAIL_HOSTNAME:-}" \
       >"backups/identity-converge.log" 2>&1 \
     || fail "Identity converge failed — update aborted (nothing else was changed). See backups/identity-converge.log"
 fi
