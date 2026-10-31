@@ -431,9 +431,13 @@ bootstrap() {
     usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$SERVICE_USER"
     loginctl enable-linger "$SERVICE_USER"
     apt-get -qq install -y uidmap dbus-user-session >/dev/null 2>&1 || true
-    sysctl -w net.ipv4.ip_unprivileged_port_start=80 >/dev/null
-    grep -q "ip_unprivileged_port_start" /etc/sysctl.conf 2>/dev/null \
-      || echo "net.ipv4.ip_unprivileged_port_start=80" >> /etc/sysctl.conf
+    # 25: staff email's SMTP port (bin/staff-mail.sh); 80/443: the gateway.
+    sysctl -w net.ipv4.ip_unprivileged_port_start=25 >/dev/null
+    if grep -q "ip_unprivileged_port_start" /etc/sysctl.conf 2>/dev/null; then
+      sed -i 's/^net.ipv4.ip_unprivileged_port_start=.*/net.ipv4.ip_unprivileged_port_start=25/' /etc/sysctl.conf
+    else
+      echo "net.ipv4.ip_unprivileged_port_start=25" >> /etc/sysctl.conf
+    fi
     if ! sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
         XDG_RUNTIME_DIR="/run/user/$(id -u "$SERVICE_USER")" \
         dockerd-rootless-setuptool.sh install; then

@@ -47,18 +47,18 @@
     groups: docker
     append: true
 
-- name: Unprivileged port floor 80 (rootless binds 80/443)
+- name: Unprivileged port floor 25 (rootless binds 80/443, and 25 for staff email)
   ansible.posix.sysctl:
     name: net.ipv4.ip_unprivileged_port_start
-    value: "80"
+    value: "25"
     sysctl_set: true
     reload: true
 
-- name: Firewall allows web (ufw)
+- name: Firewall allows web, and SMTP for staff email (ufw)
   community.general.ufw:
     rule: allow
     port: "{{ item }}"
     proto: tcp
-  loop: ["80", "443"]
+  loop: ["80", "443", "25"]
   when: ansible_facts.packages['ufw'] is defined
   failed_when: false

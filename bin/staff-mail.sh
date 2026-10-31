@@ -102,6 +102,9 @@ case "$cmd" in
     if [ -n "$RELAY" ]; then
       RELAY_HOST="${RELAY%%:*}"; [ "$RELAY" != "$RELAY_HOST" ] && RELAY_PORT="${RELAY##*:}"
     fi
+    floor="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 0)"
+    [ "$floor" -le 25 ] || fail "This server can't receive mail yet: as root run
+    sysctl -w net.ipv4.ip_unprivileged_port_start=25 and set it in /etc/sysctl.conf (the ansible common role does this), then run this again."
     ensure_secrets
     set_env WEBMAIL_HOSTNAME "$WEBMAIL"
     set_env WEBMAIL_URL "https://$WEBMAIL"
