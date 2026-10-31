@@ -325,7 +325,9 @@ def step0(attempts=0, check_only=False):
             ca_dir = os.path.expanduser(
                 tenv.get("TLS_CA_DIR", "~/.config/workforce-dev/testca"))
             want_hosts = {f"{tenv.get('WF_SUBDOMAIN')}.{tenv.get('BASE_DOMAIN')}",
-                          f"{tenv.get('AUTH_SUBDOMAIN')}.{tenv.get('BASE_DOMAIN')}"}
+                          f"{tenv.get('AUTH_SUBDOMAIN')}.{tenv.get('BASE_DOMAIN')}",
+                          # staff webmail under the app's name (bin/staff-mail.sh --private-ca)
+                          f"*.{tenv.get('WF_SUBDOMAIN')}.{tenv.get('BASE_DOMAIN')}"}
             leaf = os.path.join(ca_dir, "tls.crt")
 
             def _san_hosts():
