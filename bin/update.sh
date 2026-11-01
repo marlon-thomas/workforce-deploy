@@ -86,6 +86,7 @@ if [ -f inventories/local/hosts.yml ] && command -v ansible-playbook >/dev/null 
       >"backups/identity-converge.log" 2>&1 \
     || fail "Identity converge failed — update aborted (nothing else was changed). See backups/identity-converge.log"
 fi
+secret_modes   # again: the converge may (re)write secret files; the app must still read them
 
 say "Fetching version $TARGET (the current version keeps running meanwhile)…"
 APP_VERSION="$TARGET" docker compose pull api worker migrate \
