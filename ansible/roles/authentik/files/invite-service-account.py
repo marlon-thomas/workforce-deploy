@@ -38,6 +38,8 @@ for perm in (
     # flow's own policy refuses superusers, service accounts and authentik Admins.
     "authentik_core.view_user",
     "authentik_core.reset_user_password",
+    # authentik 2026.8 also checks POST users/{pk}/recovery/ against the "add" permission
+    "authentik_core.add_user",
 ):
     assign(perm)
 
