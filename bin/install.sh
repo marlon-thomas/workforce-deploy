@@ -765,8 +765,8 @@ if [ ! -s secrets/push_vapid_public ] || [ ! -s secrets/push_vapid_private ]; th
   fi
   rm -f "$VAPID_TMP"
 fi
-chmod 600 secrets/*
-chmod 444 secrets/ak_config.yml   # bind-mounted into authentik (rootless uid mapping)
+# Readable inside the containers (the app runs unprivileged), folder closed: bin/lib/common.sh.
+secret_modes
 
 say "Writing configuration…"
 GATEWAY_IMAGE_DEFAULT="caddy:2.8.4"

@@ -63,6 +63,7 @@ ensure_secrets() {
   [ -e blueprints/webmail-app.yaml ] || printf 'version: 1\nentries: []\n' > blueprints/webmail-app.yaml
 }
 ensure_secrets
+secret_modes   # existing installs: secrets created 0600 were unreadable to the app (common.sh)
 
 say "Backing up before touching anything…"
 ./bin/backup.sh --tag pre-update || fail "Backup failed — update aborted (nothing was changed)."

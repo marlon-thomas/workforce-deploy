@@ -121,3 +121,17 @@ authentik_version() {
   docker exec -w / workforce-deploy-authentik-server-1 python -c \
     'import authentik as a; print(getattr(a, "VERSION", None) or a.__version__)' 2>/dev/null || true
 }
+
+# secret_modes — make the secret files readable inside the containers, keep the folder closed.
+# Compose bind-mounts file-based secrets as they are on disk (its `mode:` applies to swarm only),
+# and the application runs as an unprivileged user (uid 999), so 0600 files were unreadable to it:
+# staff email, invitations/password resets, the AI assistant's key store, push and feedback were
+# silently off (found 2026-11-01). The secrets folder itself stays 0700 to the service account, so
+# no other account on the host can reach the files. The one-time admin password stays owner-only.
+secret_modes() {
+  [ -d secrets ] || return 0
+  chmod 700 secrets
+  find secrets -maxdepth 1 -type f ! -name initial-admin-password -exec chmod 644 {} +
+  [ -e secrets/initial-admin-password ] && chmod 400 secrets/initial-admin-password
+  return 0
+}

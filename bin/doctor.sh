@@ -95,6 +95,15 @@ else
     && row "object storage" ok "health endpoint live" || row "object storage" fail "unreachable"
 fi
 
+# --- the application can read its secrets (it runs unprivileged; a 0600 file silently switches a
+#     feature off: staff email, invitations, the assistant, push). Names only, never contents.
+UNREADABLE=$(docker compose exec -T -u 999 api sh -c 'for f in /run/secrets/*; do [ -r "$f" ] || printf "%s " "$(basename "$f")"; done' 2>/dev/null)
+if [ -z "$UNREADABLE" ]; then
+  row "app secrets" ok "all readable by the application"
+else
+  row "app secrets" fail "unreadable: ${UNREADABLE}(run ./bin/update.sh, which fixes the permissions)"
+fi
+
 # --- antivirus
 CV=$(docker compose exec -T clamav sh -c "nc -z localhost 3310" >/dev/null 2>&1 && echo ok || echo no)
 [ "$CV" = ok ] && row "antivirus" ok "ClamAV listening" || row "antivirus" warn "not answering (it can take minutes on first ever start)"
