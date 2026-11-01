@@ -316,6 +316,7 @@ INV
   WFV_smtp_starttls="${SMTP_STARTTLS:-false}" \
   WFV_smtp_from="${SMTP_FROM:-}" \
   WFV_compose_profiles="${COMPOSE_PROFILES:-}" \
+  WFV_ai_test_services="${AI_TEST_SERVICES:-false}" \
   WFV_backup_target="${BACKUP_TARGET:-}" \
   WFV_docker_sock="${ANSIBLE_SOCK}" \
   python3 -c 'import json,os,sys; json.dump({k[4:]: v for k, v in os.environ.items() if k.startswith("WFV_")}, sys.stdout)' \

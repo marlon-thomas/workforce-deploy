@@ -104,6 +104,15 @@ else
   row "app secrets" fail "unreadable: ${UNREADABLE}(run ./bin/update.sh, which fixes the permissions)"
 fi
 
+# --- AI services listed for testing only (ADR-0021 §6): offered only on the test appliance.
+if [ "${AI_TEST_SERVICES:-false}" = "true" ]; then
+  if [ "${ENV_NAME:-prod}" = "test" ]; then
+    row "AI test services" warn "offered (test appliance): fictitious people only"
+  else
+    row "AI test services" fail "AI_TEST_SERVICES=true on '${ENV_NAME:-prod}': set it to false in .env — never in production"
+  fi
+fi
+
 # --- antivirus
 CV=$(docker compose exec -T clamav sh -c "nc -z localhost 3310" >/dev/null 2>&1 && echo ok || echo no)
 [ "$CV" = ok ] && row "antivirus" ok "ClamAV listening" || row "antivirus" warn "not answering (it can take minutes on first ever start)"

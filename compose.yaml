@@ -345,6 +345,10 @@ services:
       AI_LOCKED: ${AI_LOCKED:-false}
       AI_ALLOWED_PROVIDERS: ${AI_ALLOWED_PROVIDERS:-}
       AI_TRUSTED_ENDPOINTS: ${AI_TRUSTED_ENDPOINTS:-}
+      # AI_TEST_SERVICES=true offers the AI services listed for TESTING ONLY (ADR-0021 §6, e.g.
+      # B.AI): no data processing agreement, fictitious people only. Test appliance only — never
+      # set it in production.
+      AI_TEST_SERVICES: ${AI_TEST_SERVICES:-false}
       # Reports from inside the app (feedback-spec.md): filed as GitHub issues by the installation's
       # GitHub App when FEEDBACK_GITHUB_APP_ID/INSTALLATION_ID are set and secrets/feedback_github_key
       # holds its private key; otherwise reports stay with the organisation.
