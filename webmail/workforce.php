@@ -22,7 +22,10 @@ $config['smtp_conn_options'] = ['ssl' => ['verify_peer' => false, 'verify_peer_n
 $config['product_name'] = getenv('WEBMAIL_PRODUCT_NAME') ?: 'Workforce Mail';
 $config['support_url'] = '';
 $config['use_https'] = true;
-$config['session_lifetime'] = 30;
+// Shared devices (workflow audit 2026-10-31): a short webmail session. While the person is still
+// signed in to the suite, an expired session signs them straight back in (oauth_login_redirect);
+// after they sign out of Workforce it stops working within minutes.
+$config['session_lifetime'] = 15;
 $config['login_autocomplete'] = 0;
 // One identity per person; the address itself can't be changed (no sending as someone else).
 $config['identities_level'] = 3;

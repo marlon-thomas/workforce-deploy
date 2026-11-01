@@ -61,8 +61,10 @@ entries:
       # Asymmetric keys: the mail server refuses HMAC-signed tokens.
       signing_key: !Find [authentik_crypto.certificatekeypair, [name, "authentik Self-signed Certificate"]]
       sub_mode: user_email
-      access_token_validity: hours=1
-      refresh_token_validity: hours=8
+      # Short-lived on purpose (shared devices): webmail must stop working soon after the person
+      # signs out of Workforce. While they're signed in, renewal is silent.
+      access_token_validity: minutes=5
+      refresh_token_validity: hours=1
       redirect_uris:
         - matching_mode: strict
           url: https://{{ webmail_hostname }}/index.php/login/oauth
