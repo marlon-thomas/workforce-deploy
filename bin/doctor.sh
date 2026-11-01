@@ -80,7 +80,7 @@ fi
 DB_OK=$(docker compose exec -T postgres pg_isready -U "${DB_USER}" -d "${DB_NAME}" >/dev/null 2>&1 && echo yes || echo no)
 [ "$DB_OK" = yes ] && row "database" ok "accepting connections" || row "database" fail "not accepting"
 FW=$(docker compose exec -T postgres psql -U "${DB_USER}" -d "${DB_NAME}" -tAc \
-  "select coalesce(max(version),'none') from flyway_schema_history where success" 2>/dev/null || echo "?")
+  "select coalesce((select version from flyway_schema_history where success and version is not null order by installed_rank desc limit 1),'none')" 2>/dev/null || echo "?")
 case "$FW" in
   none|\?) row "schema migrations" fail "no successful migration history" ;;
   *)       row "schema migrations" ok "at version $FW" ;;
