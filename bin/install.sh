@@ -8,7 +8,7 @@
 #
 # This script is the INTERACTIVE front door only:
 #   root phase  : service user, bundle relocation, Docker, registry login
-#   prompts     : domain, email, admin password, backup target
+#   prompts     : domain, email, admin password, backup target and its encryption key
 #   convergent  : EVERYTHING else is delegated to the Ansible playbook
 #                 (deploy/ansible/) — declarative, idempotent, re-runnable.
 set -euo pipefail
@@ -65,7 +65,8 @@ read_mandatory() {
 
 # ============================================================ helpers
 
-# The installer's mail questions (relay, alert address, uptime check): bin/lib/questions.sh.
+# The installer's mail and off-site backup questions (relay, alert address, uptime check, backup
+# target and key): bin/lib/questions.sh.
 # shellcheck source=lib/questions.sh
 . ./bin/lib/questions.sh
 
@@ -332,6 +333,7 @@ INV
   WFV_server_actions_plain_relay="${SERVER_ACTIONS_PLAIN_RELAY:-}" \
   WFV_admin_recovery_email="${ADMIN_RECOVERY_EMAIL:-}" \
   WFV_backup_target="${BACKUP_TARGET:-}" \
+  WFV_backup_encrypt_recipient="${BACKUP_ENCRYPT_RECIPIENT:-}" \
   WFV_docker_sock="${ANSIBLE_SOCK}" \
   python3 -c 'import json,os,sys; json.dump({k[4:]: v for k, v in os.environ.items() if k.startswith("WFV_")}, sys.stdout)' \
     > "$VARS_FILE"
@@ -742,8 +744,7 @@ else
 fi
 ask_recovery_email
 
-printf '4/6  Off-site backups — paste a target (rsync host:path or s3://bucket) or press Enter for local-only: '
-read -r BACKUP_TARGET
+ask_backup_target || fail "No answer to the off-site backup question, so nothing was saved. Run me again."
 
 ask_relay
 ask_alert_address
@@ -849,6 +850,9 @@ APP_VERSION=${APP_VERSION:-0.2.9}
 ADMIN_RECOVERY_EMAIL=${ADMIN_RECOVERY_EMAIL:-}
 
 BACKUP_TARGET=${BACKUP_TARGET}
+# The public half of the age key off-site copies are encrypted to; the private half stays off this
+# server. With a target and no usable recipient, nothing goes off-site (RUNBOOK).
+BACKUP_ENCRYPT_RECIPIENT=${BACKUP_ENCRYPT_RECIPIENT:-}
 ENV
 chmod 600 .env
 
@@ -877,6 +881,11 @@ else
 fi
 
 # ---------------------------------------------------------------- summary
+OFFSITE_WORDS=""
+if [ -n "${BACKUP_TARGET}" ]; then
+  if [ -n "${BACKUP_ENCRYPT_RECIPIENT:-}" ]; then OFFSITE_WORDS=" and, encrypted, off-site to ${BACKUP_TARGET}"
+  else OFFSITE_WORDS=" (nothing goes off-site until BACKUP_ENCRYPT_RECIPIENT is set in .env)"; fi
+fi
 cat <<DONE
 
 ------------------------------------------------------------------------
@@ -884,7 +893,7 @@ cat <<DONE
   First sign-in:   https://${AUTH_HOSTNAME}  (user: admin)
   Then the setup wizard inside the app completes your organisation.
 
-  Backups run nightly to ./backups${BACKUP_TARGET:+ and off-site to ${BACKUP_TARGET}}.
+  Backups run nightly to ./backups${OFFSITE_WORDS}.
   Useful commands (from this directory):
     ./bin/doctor.sh    health check (send output to support when something looks wrong)
     ./bin/update.sh    upgrade when a new version is announced

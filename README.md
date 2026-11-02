@@ -17,7 +17,7 @@ You do NOT need the private source repo to deploy or operate the product.
 | `bin/update.sh` / `doctor.sh` / `backup.sh` / `smoke.sh` | versioned updates with rollback, health check, backups, OIDC-less smoke run |
 | `bin/healthwatch.sh` | every 15 min (backup container): runs `doctor.sh`, emails `OPS_ALERT_EMAIL` outside the server when checks fail, remind daily, resolved; pings `OPS_HEARTBEAT_URL` for the outside uptime check; leaves `status/health.json` (masked, read-only to the `api` container) for the app's Setup → Server health page (RUNBOOK.md §7b, §7c) |
 | `bin/tests/` | hermetic shell self-tests, run by `ci-validate.sh` |
-| `bin/restore.sh` / `restore-drill.sh` | restore an archive (app DB + sign-in DB + evidence); prove an archive restores in a scratch Incus container (operator machine only) |
+| `bin/restore.sh` / `restore-drill.sh` | restore an archive (app DB + sign-in DB + evidence), plain or an encrypted off-site copy; prove an archive restores in a scratch Incus container (operator machine only) |
 | `bin/ci-validate.sh` | static checks run by `.github/workflows/validate.yml` (bash -n, python, `docker compose config`) — run before pushing |
 | `bin/lib/common.sh` | shared helpers: the ONE Docker-socket discovery (`docker_socket`) and the backup/restore data-plane functions |
 | `bin/deploy_to_test.py` | devbox orchestrator for the TEST appliance — the Incus container `workforce-test` (Tailscale + DuckDNS + installer + version converge) |
@@ -198,6 +198,17 @@ contract & onboarding magic links) go through a durable ledger: rows are only
   Nothing leaves the machine.
 - **Server alerts** (`OPS_ALERT_EMAIL`) use the same relay settings but are sent by
   `bin/healthwatch.sh` directly, not by the app — see RUNBOOK.md, "Server alerts".
+
+## Off-site backups are encrypted
+
+Off-site copies hold staff and care records, so they're encrypted with [age](https://age-encryption.org) before they leave
+the server. The server holds only the public key (`BACKUP_ENCRYPT_RECIPIENT` in `.env`), so someone who takes it over can't
+read them, and neither can the server. With a target and no usable key, nothing goes off-site, plaintext never does, and the
+health check FAILS in plain words. Copies in `backups/` here stay as they are, on the same disk as the live data.
+
+**Lose the private key and the off-site backups are lost.** Keep it in a password manager and a printed copy somewhere safe,
+both off the server, and never in this repo or the private one. Check it each year with `./bin/backup.sh --verify-key -`.
+RUNBOOK.md, "Off-site backup targets", has setup on an existing installation, rotation and restore.
 
 ## Server health in the app
 

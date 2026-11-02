@@ -5,21 +5,28 @@
 # scratch database FIRST — a bad archive changes nothing.
 #
 #   ./bin/restore.sh backups/<archive>.tar.gz              (asks for RESTORE)
+#   ./bin/restore.sh --identity <key file> <archive>.tar.gz.age
+#   ./bin/restore.sh --identity - <archive>.tar.gz.age     (the key on stdin; paste it when asked)
+#        an off-site copy: the private key is read from there, never from the command line, and
+#        is never written down or logged. The wrong key changes nothing.
 #   ./bin/restore.sh --yes --data-only <archive>           (restore-drill.sh only:
 #        data plane only — no app/sign-in containers are stopped or started)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-YES=0; DATA_ONLY=0
+YES=0; DATA_ONLY=0; IDENTITY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes) YES=1; shift ;;
     --data-only) DATA_ONLY=1; shift ;;
+    --identity)
+      [ $# -ge 2 ] || { echo "--identity needs a key file, or - to give the key on stdin."; exit 1; }
+      IDENTITY="$2"; shift 2 ;;
     *) break ;;
   esac
 done
 ARCHIVE="${1:-}"
-[ -z "$ARCHIVE" ] && { echo "Usage: ./bin/restore.sh backups/<archive>.tar.gz"; exit 1; }
+[ -z "$ARCHIVE" ] && { echo "Usage: ./bin/restore.sh [--identity <key file>] backups/<archive>.tar.gz[.age]"; exit 1; }
 [ -f "$ARCHIVE" ] || { echo "No such archive: $ARCHIVE"; exit 1; }
 # shellcheck disable=SC1091
 [ -f .env ] && . ./.env
@@ -29,11 +36,38 @@ use_docker_socket
 DB_USER="${DB_USER:-workforce_app}"; DB_NAME="${DB_NAME:-workforce}"
 AK_DB_USER="${AK_DB_USER:-authentik}"; AK_DB_NAME="${AK_DB_NAME:-authentik}"
 
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-tar -xzf "$ARCHIVE" -C "$TMP"
+TMP="$(mktemp -d)"; AGE_ERR="$(mktemp)"; trap 'rm -rf "$TMP" "$AGE_ERR"' EXIT
+if is_age_file "$ARCHIVE"; then
+  if [ -z "$IDENTITY" ]; then
+    echo "This backup is encrypted, so it needs the private key kept off the server when it was set up."
+    echo "Usage: ./bin/restore.sh --identity <key file> $ARCHIVE    (or --identity - to give the key on stdin)"
+    exit 1
+  fi
+  read_age_identity "$IDENTITY" || { echo "Nothing was changed."; exit 1; }
+  set +e
+  age_decrypt < "$ARCHIVE" 2>"$AGE_ERR" | tar -xzf - -C "$TMP" 2>/dev/null
+  DECRYPT_RC=("${PIPESTATUS[@]}")
+  set -e
+  if grep -q 'no identity matched' "$AGE_ERR"; then
+    echo "This key doesn't open this backup: it was encrypted for a different key. If the key has been"
+    echo "rotated since, this backup needs the older one. Nothing was changed."
+    exit 1
+  fi
+  if [ "${DECRYPT_RC[0]}" -ne 0 ] || [ "${DECRYPT_RC[1]}" -ne 0 ]; then
+    echo "This backup couldn't be decrypted and unpacked: the file is damaged or incomplete, or age"
+    echo "couldn't run here (it uses a helper container if it isn't installed). Nothing was changed."
+    exit 1
+  fi
+else
+  case "$ARCHIVE" in
+    *.age) echo "This file is named as an encrypted backup but isn't one: wrong file, or damaged? Nothing was changed."; exit 1 ;;
+  esac
+  [ -z "$IDENTITY" ] || echo "NOTE: this backup isn't encrypted, so the key wasn't needed."
+  tar -xzf "$ARCHIVE" -C "$TMP"
+fi
 [ -f "$TMP/database.dump" ] || { echo "Archive has no database.dump — wrong file?"; exit 1; }
 if [ -f "$TMP/MANIFEST" ]; then
-  ( cd "$TMP" && grep -E '^[0-9a-f]{64}  ' MANIFEST | sha256sum -c --quiet ) \
+  ( cd "$TMP" && grep -E '^[0-9a-f]{64}  ' MANIFEST | sha256sum -c >/dev/null ) \
     || { echo "Archive contents do not match its MANIFEST checksums — nothing was changed."; exit 1; }
 fi
 # Archives from before the authentik/evidence fix hold the app DB only.

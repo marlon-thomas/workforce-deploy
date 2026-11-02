@@ -1,8 +1,9 @@
-# questions.sh — the installer's mail questions (bin/install.sh questions 5 and 6, and the
-# recovery email after question 3), kept apart so
+# questions.sh — the installer's off-site backup and mail questions (bin/install.sh questions 4, 5 and
+# 6, and the recovery email after question 3), kept apart so
 # bin/tests/install-questions-test.sh can answer them from a script. Sourced after bin/lib/common.sh;
-# uses install.sh's say, warn and read_mandatory. Sets SMTP_*, OPS_ALERT_EMAIL / OPS_HEARTBEAT_URL and ADMIN_RECOVERY_EMAIL.
-# shellcheck shell=bash disable=SC2034  # the SMTP_* and OPS_* answers are read by install.sh
+# uses install.sh's say, warn and read_mandatory. Sets BACKUP_TARGET / BACKUP_ENCRYPT_RECIPIENT,
+# SMTP_*, OPS_ALERT_EMAIL / OPS_HEARTBEAT_URL and ADMIN_RECOVERY_EMAIL.
+# shellcheck shell=bash disable=SC2034  # the answers are read by install.sh
 
 # Question 6: who outside this server is emailed when a health check fails (bin/healthwatch.sh).
 # Pre-filled from the environment file (test: a mailpit-caught address); Enter keeps it.
@@ -198,4 +199,88 @@ ask_recovery_email() {
     ADMIN_RECOVERY_EMAIL="$ans"
     return 0
   done
+}
+
+# Question 4: where off-site copies go and, if anywhere, the key they're encrypted to. Returns 1 if
+# the answers run out.
+ask_backup_target() {
+  printf '4/6  Off-site backups — paste a target (rsync host:path or s3://bucket) or press Enter for local-only: '
+  read -r BACKUP_TARGET || return 1
+  BACKUP_TARGET="${BACKUP_TARGET// /}"
+  if [ -z "$BACKUP_TARGET" ]; then
+    BACKUP_ENCRYPT_RECIPIENT=""
+    return 0
+  fi
+  ask_backup_recipient
+}
+
+# Follow-up to question 4. This server only ever holds the public half, so someone who takes it over
+# can't read the off-site copies. Pre-filled from the environment file.
+ask_backup_recipient() {
+  local ans rc
+  if age_recipient_usable "${BACKUP_ENCRYPT_RECIPIENT:-}"; then
+    say "Off-site copies will be encrypted to the public key from the environment file: ${BACKUP_ENCRYPT_RECIPIENT}"
+    return 0
+  fi
+  BACKUP_ENCRYPT_RECIPIENT=""
+  echo "     Off-site copies hold staff and care records, so they're encrypted before they leave this"
+  echo "     server. This server keeps only a public key; the private key that opens them stays with you."
+  while :; do
+    read -r -p "     Public key (age1…), Enter = generate a key pair now, - = no off-site copies yet: " ans || return 1
+    ans="${ans// /}"
+    case "$ans" in
+      "")
+        rc=0; generate_backup_key || rc=$?
+        [ "$rc" -eq 0 ] && return 0
+        [ "$rc" -ne 2 ] || return 1
+        ;;
+      -)
+        warn "Nothing will be copied off-site until BACKUP_ENCRYPT_RECIPIENT is set in .env, and the health
+     check will say so (RUNBOOK, \"Off-site backup targets\")."
+        return 0 ;;
+      *)
+        if age_recipient_usable "$ans"; then
+          BACKUP_ENCRYPT_RECIPIENT="$ans"
+          say "Off-site copies will be encrypted to ${BACKUP_ENCRYPT_RECIPIENT}"
+          return 0
+        fi
+        echo "     That isn't an age public key: they start age1 and are 62 characters long." >&2 ;;
+    esac
+  done
+}
+
+# Makes a key pair where the installer is running, shows the private key once, and keeps only the
+# public one. The private key is only ever in this function's variables and on the screen: no
+# here-document or here-string, which older bash keeps in a temp file. Returns 1 if a pair can't be
+# made (ask again), 2 if the answers run out before it's confirmed as saved.
+generate_backup_key() {
+  local text line key="" recipient="" ans
+  text="$(age_keygen_text 2>/dev/null)" || text=""
+  while IFS= read -r line; do
+    case "$line" in
+      AGE-SECRET-KEY-*) key="$line" ;;
+      "# public key: "*) recipient="${line#"# public key: "}" ;;
+    esac
+  done < <(printf '%s\n' "$text")
+  if [ -z "$key" ] || ! age_recipient_usable "$recipient"; then
+    echo "     Couldn't generate a key pair here. Make one on your own computer with age-keygen" >&2
+    echo "     (https://age-encryption.org) and paste its public key." >&2
+    return 1
+  fi
+  echo
+  echo "     ------------------------------- PRIVATE KEY -------------------------------"
+  printf '     %s\n' "$key"
+  echo "     ---------------------------------------------------------------------------"
+  echo "     This is the only time it is shown, and it isn't saved on this server. Store it OFF this"
+  echo "     server now: in a password manager, and a printed copy somewhere safe. Then clear this"
+  echo "     terminal's scrollback if anyone else uses this computer."
+  echo "     WITHOUT IT THE OFF-SITE BACKUPS CAN'T BE RESTORED. Nobody can recover it for you."
+  echo
+  while :; do
+    read -r -p "     Type SAVED once it's stored off this server: " ans || return 2
+    [ "$ans" = SAVED ] && break
+    echo "     It won't be shown again after this, so please save it before going on." >&2
+  done
+  BACKUP_ENCRYPT_RECIPIENT="$recipient"
+  say "Off-site copies will be encrypted to ${BACKUP_ENCRYPT_RECIPIENT}"
 }

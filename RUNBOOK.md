@@ -92,7 +92,9 @@ The wizard asks **six questions**:
 2. Email for certificate notices
 3. Administrator password (Enter = generate one and show it once), then the emergency
    administrator's **recovery email**: an address you control that is not hosted on this server
-4. Off-site backup target (Enter = local only — fine for the test)
+4. Off-site backup target (Enter = local only — fine for the test). With a target, it then asks for
+   the public key off-site copies are encrypted to, or generates a key pair and shows the private key
+   once: store it off the server before typing `SAVED`. See "Off-site backup targets".
 5. **Outgoing email**: the relay that delivers Workforce's email (reminders, invitations,
    password resets, server alerts). Pick Microsoft 365, Google Workspace, Brevo, SMTP2GO,
    Amazon SES (London), Mailgun (EU) or another provider's host and port (STARTTLS, usually 587;
@@ -232,7 +234,7 @@ tried again 15 minutes later.
 |---|---|---|
 | `service …`, `database`, `sign-in server`, … | a container is down, the app or sign-in is not answering | — |
 | `last backup` | the newest archive in `backups/` is over 26 h old (or there is none, 26 h after install) | none yet on a new install |
-| `off-site backup` | — | no `BACKUP_TARGET`, or the last nightly off-site copy failed |
+| `off-site backup` | a target with no usable `BACKUP_ENCRYPT_RECIPIENT`, so nothing is going off-site (at most WARN under `--gate`) | no `BACKUP_TARGET`, or the last off-site copy failed |
 | `disk space`, `disk space (docker)` | under 5 % free | under 15 % free |
 | `mail server`, `mail sync` (staff email on) | the mail server is down/unhealthy, an organisation's mail sync fails, or every mailbox fails to sync | some mailboxes have a sync error |
 | `notifications` | 3 or more emails failed in 24 h and none were sent | any email failed in 24 h (people without an address are not counted) |
@@ -298,7 +300,7 @@ what Setup → Server health and the server items in Setup status read:
   "version": { "running": "0.2.98", "configured": "0.2.98" },
   "checks": [ { "status": "OK", "check": "database", "detail": "accepting connections" } ],
   "backup": { "lastAt": "2026-11-02T02:00:41Z", "sizeBytes": 73741824, "kept": 9,
-              "offsite": { "configured": true, "kind": "S3", "lastCopy": "OK" } }
+              "offsite": { "configured": true, "kind": "S3", "encrypted": true, "lastCopy": "OK" } }
 }
 ```
 
@@ -321,7 +323,9 @@ what Setup → Server health and the server items in Setup status read:
   because a tenant must not see server details.
 - **The off-site result** comes from the newest run in `backups/cron.log`: the nightly one, or a backup
   or off-site test started from the app, which log there too. A copy made by running `./bin/backup.sh`
-  by hand doesn't change it.
+  by hand doesn't change it. `encrypted` is true when there's a target and a usable recipient. A target
+  without one sends nothing, so `lastCopy` is then `FAILED` whatever an older run logged, and the
+  `off-site backup` row says why.
 
 ## 7c. Outside uptime check
 
@@ -422,6 +426,12 @@ appliance. Copy an archive off the box (or from the off-site target), then:
     GHCR_TOKEN_FILE=~/.config/workforce-dev/ghcr-read.token \
       ./bin/restore-drill.sh backups/<archive>.tar.gz
 
+An encrypted off-site copy also needs its private key, in a file on the machine running the drill.
+It reaches the drill container through stdin only; delete that file afterwards:
+
+    GHCR_TOKEN_FILE=~/.config/workforce-dev/ghcr-read.token BACKUP_IDENTITY_FILE=<key file> \
+      ./bin/restore-drill.sh <archive>.tar.gz.age
+
 It restores into a throw-away container with `bin/restore.sh --data-only`
 and checks app DB, sign-in DB and evidence object counts; exit 0 = PASS.
 Not yet scheduled — run it at least monthly (nightly once automated).
@@ -431,7 +441,7 @@ Not yet scheduled — run it at least monthly (nightly once automated).
 - ~~Rootless Docker~~ — **implemented**: the daemon runs as the `workforce_app_sa` user by default (no root-equivalent daemon). `--system-docker` reverts for hosts without userns.
 - The installer creates a user-level deployment; nothing it installs runs as root
   (containers run as `app`/`authentik`/`postgres` users with read-only root filesystems)
-- Off-site backups: provide an S3/rsync target at install time
+- Off-site backups: provide an S3/rsync target at install time, and keep the private key off the server
 - License enforcement arrives with deployment-spec backlog #5
 
 ## Off-site backup targets
@@ -443,6 +453,69 @@ target's host key is remembered on first use. The target needs `rsync`. Restrict
 takes over this server can't read or delete your older backups: in the target account's `authorized_keys`, put
 `command="/usr/bin/rrsync -wo /srv/backups",restrict ssh-ed25519 AAAA…` (`rrsync` also needs `python3`). Then
 `BACKUP_TARGET=user@host:`; copies land in `/srv/backups/backups/`. Nothing prunes the target, so it keeps growing
-until you remove old copies there. An rsync copy is not encrypted, so the target must be somewhere you'd trust with
-staff and care records. After changing either, use **Test the off-site copy** on Setup → Server
+until you remove old copies there. After changing either, use **Test the off-site copy** on Setup → Server
 health (or `./bin/backup.sh --offsite-only`), which sends the newest archive by the same code as the nightly run.
+
+### Encryption
+
+Off-site copies hold database dumps, evidence files and mail, so staff and care records. They're encrypted with
+[age](https://age-encryption.org) before they leave the server and arrive as `<name>.tar.gz.age`. This server holds only
+the public key (the recipient), as `BACKUP_ENCRYPT_RECIPIENT=age1…` in `.env`. The private key that opens them is never
+on it.
+
+- **What this protects against.** Anyone who gets at the target, or a stolen copy of it, or who takes over this server,
+  can't read the off-site copies. Neither can this server. The copies in `backups/` here stay unencrypted, because they
+  sit on the same disk as the live data they copy. They're protected by the server's own access, not by this.
+- **No recipient means no off-site copy.** With a target and no usable recipient, nothing leaves the server and nothing
+  is ever sent as plaintext. `backups/cron.log` says why, the `off-site backup` row of `./bin/doctor.sh` FAILS, the health
+  watch emails `OPS_ALERT_EMAIL`, and Setup → Server health shows it. Backups carry on here.
+- **Losing the private key loses the off-site backups.** Nobody can recover it for you. Keep it in a password manager
+  **and** a printed copy somewhere safe, both off this server.
+- **Disk.** S3 copies are streamed. rsync can only send a file, so an rsync copy briefly needs free space the size of the
+  archive, for an encrypted file in `backups/.offsite-send/` that goes as soon as the copy ends.
+
+**On a new installation,** question 4 asks for it. Paste a public key you made yourself, or press Enter to generate a pair:
+the private key is shown once, and only on the screen. Store it, then type `SAVED`.
+
+**On an existing installation,** on a computer of your own with [age installed](https://age-encryption.org) (or, on the
+server, `docker run --rm --log-driver none alpine:3.20 sh -c 'apk add -q age && age-keygen'`, which keeps nothing), make
+a pair:
+
+    age-keygen -o workforce-backup-key.txt     # prints "Public key: age1…"
+
+Store that file off the server as above. Then, on the server:
+
+    printf 'BACKUP_ENCRYPT_RECIPIENT=age1…\n' >> .env     # the public key, and nothing else from that file
+    docker compose up -d backup                           # adds age to the backup container
+    ./bin/backup.sh --verify-key -                         # paste the private key; proves it matches
+    ./bin/backup.sh --offsite-only                         # sends the newest backup, encrypted
+
+**Older copies on the target** that aren't encrypted stay readable by anyone who can reach them. Remove them yourself once
+an encrypted copy is there (a name ending `.tar.gz` without `.age`); nothing here deletes them, and a write-only key
+couldn't.
+
+**Check the key once a year, without a restore:**
+
+    ./bin/backup.sh --verify-key -                                  # paste it when asked; or give a file instead of -
+    ./bin/backup.sh --verify-key - <a copy fetched from the target>  # and that this copy opens with it
+
+The key is read from stdin or a file, never the command line, and never kept. It encrypts a test blob to the recipient and
+opens it with the key, which proves the pair. It then decrypts the first bytes of a real copy, if there is one to reach: the
+newest on an S3 target whose credentials can read it, or one you fetched and named. A write-only rsync key can't read
+back, so fetch one with your own access to the target. Exit 0 = they match, 6 = they don't, 1 = it couldn't check. Off the
+server, `age-keygen -y <key file>` prints the public key, to compare with `.env` by eye.
+
+**Rotating the key** (it may have been exposed, or someone who knew it has left): make a new pair, store it, replace the
+line in `.env`, run `./bin/backup.sh --verify-key -`, then `./bin/backup.sh --offsite-only`. No restart is needed, since `.env`
+is read at every run. Copies already on the target stay encrypted to the older key, so keep that key for as long as you keep
+those copies. If it was exposed, remove them from the target once new copies are there.
+
+**Restoring from an off-site copy.** Fetch it from the target with your own access (a write-only key can't), then:
+
+    ./bin/restore.sh --identity - <archive>.tar.gz.age       # paste the key when asked, or pipe it in
+    ./bin/restore.sh --identity <key file> <archive>.tar.gz.age
+
+Neither `--identity` nor anything else ever takes the key itself on the command line, and it isn't logged. On a server, prefer
+`-`, so that the key never lands on its disk. No `age` needs installing: without it, a throw-away container decrypts, with
+the key held in memory. It verifies the decrypted archive exactly as it does a plain one. The wrong key is refused before
+anything changes, as is a damaged file. To prove a copy restores without touching a live system, see "Restore drill".
