@@ -10,6 +10,9 @@
 # The email goes straight to SMTP_HOST:SMTP_PORT with curl — never through Workforce and never
 # through this server's own mail server (Stalwart) — so it still arrives when those are what broke.
 # OPS_ALERT_EMAIL empty = problems are only logged. Log: logs/healthwatch.log.
+# OPS_HEARTBEAT_URL (optional): after every run, a ping to an outside uptime service (e.g.
+# Healthchecks.io), which emails you when the pings stop — the server is off or offline. The URL is
+# passed to curl through stdin, never on its command line, and never logged.
 #
 #   ./bin/healthwatch.sh            one watch run (what the schedule does)
 #   ./bin/healthwatch.sh --test     send a test alert now (proves the whole mail path)
@@ -325,9 +328,24 @@ watch_once() {
     rm -f "$body"
     hw_log "$summary — $action: \"$subject\" — $DELIVER_NOTE"
   fi
+  HEARTBEAT_NOTE=""
+  heartbeat
+  [ -z "$HEARTBEAT_NOTE" ] || hw_log "$HEARTBEAT_NOTE"
   [ "$rc" -eq 0 ] || return "$rc"
   [ -z "$cur" ] || return 1
   return 0
+}
+
+# heartbeat — "this server and its health watch are alive" to the outside uptime service. Never
+# fails the run: a missed ping is exactly what that service is there to notice.
+heartbeat() {
+  [ -n "${OPS_HEARTBEAT_URL:-}" ] || return 0
+  local u="${OPS_HEARTBEAT_URL//\\/\\\\}"; u="${u//\"/\\\"}"
+  if printf 'url = "%s"\n' "$u" | curl -fsS -m 10 --retry 2 -o /dev/null -K - 2>/dev/null; then
+    HEARTBEAT_NOTE="heartbeat sent"
+  else
+    HEARTBEAT_NOTE="heartbeat NOT sent (the uptime service will report it if this continues)"
+  fi
 }
 
 send_test() { # send_test <dry 0|1>

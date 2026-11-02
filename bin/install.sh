@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install.sh — Workforce, B-mode appliance installer
-# (deployment-spec §B2: "paste one line, answer four questions").
+# (deployment-spec §B2: "paste one line, answer six questions").
 #
 # Run as root on a fresh VPS:   ./bin/install.sh
 # Local/no-TLS test run:        ./bin/install.sh --smoke
@@ -64,6 +64,10 @@ read_mandatory() {
 }
 
 # ============================================================ helpers
+
+# The installer's mail questions (relay, alert address, uptime check): bin/lib/questions.sh.
+# shellcheck source=lib/questions.sh
+. ./bin/lib/questions.sh
 
 open_port() {
   PORT="$1"
@@ -320,6 +324,7 @@ INV
   WFV_compose_profiles="${COMPOSE_PROFILES:-}" \
   WFV_ops_alert_email="${OPS_ALERT_EMAIL}" \
   WFV_ops_alert_from="${OPS_ALERT_FROM:-}" \
+  WFV_ops_heartbeat_url="${OPS_HEARTBEAT_URL:-}" \
   WFV_ai_test_services="${AI_TEST_SERVICES:-false}" \
   WFV_backup_target="${BACKUP_TARGET:-}" \
   WFV_docker_sock="${ANSIBLE_SOCK}" \
@@ -615,12 +620,12 @@ if [ -f .env ]; then
 bootstrap
 resume_or_start
 
-# ---------------------------------------------------------------- the four questions
+# ---------------------------------------------------------------- the six questions
 PUBLIC_IP="$(curl -4 -fsS --max-time 8 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
 if [ -n "${BASE_DOMAIN:-}" ]; then
-  echo "1/4  Organisation web domain (from environment file): ${BASE_DOMAIN}"
+  echo "1/6  Organisation web domain (from environment file): ${BASE_DOMAIN}"
 else
-  read_mandatory BASE_DOMAIN "1/4  What is your organisation's web domain? (e.g. carehome.org.uk): "
+  read_mandatory BASE_DOMAIN "1/6  What is your organisation's web domain? (e.g. carehome.org.uk): "
 fi
 BASE_DOMAIN="${BASE_DOMAIN#http://}"; BASE_DOMAIN="${BASE_DOMAIN#https://}"
 BASE_DOMAIN="${BASE_DOMAIN%/}"
@@ -692,12 +697,12 @@ fi
 if [ "${TLS_MODE:-http01}" = "certs" ]; then
   # No ACME account exists in local-CA mode — the notice email is unused.
   ACME_EMAIL="local-ca@invalid"
-  say "2/4  Email for certificate notices — skipped (no public CA in test mode)."
+  say "2/6  Email for certificate notices — skipped (no public CA in test mode)."
 else
-  read_mandatory ACME_EMAIL "2/4  Email for security-certificate notices: "
+  read_mandatory ACME_EMAIL "2/6  Email for security-certificate notices: "
 fi
 
-printf '3/4  Pick a password for the first administrator (Enter = generate a strong one): '
+printf '3/6  Pick a password for the first administrator (Enter = generate a strong one): '
 read -rs ADMIN_PASSWORD
 echo ""
 if [ -z "${ADMIN_PASSWORD}" ]; then
@@ -714,8 +719,11 @@ else
   done
 fi
 
-printf '4/4  Off-site backups — paste a target (rsync host:path or s3://bucket) or press Enter for local-only: '
+printf '4/6  Off-site backups — paste a target (rsync host:path or s3://bucket) or press Enter for local-only: '
 read -r BACKUP_TARGET
+
+ask_relay
+ask_alert_address
 
 # ---------------------------------------------------------------- secrets + config
 say "Generating secrets (they are never displayed)…"
@@ -873,6 +881,16 @@ if [ "${GENERATED_ADMIN}" -eq 1 ]; then
   echo "  Also saved to ./secrets/initial-admin-password — move it somewhere safe"
   echo "  and DELETE the file. deploy_to_test reprints it after the final update."
   echo ""
+fi
+
+# Prove the alert path end to end (relay + address) while the operator is still here.
+if [ "${DOCTOR_RC}" -eq 0 ] && [ "${SMOKE}" -eq 0 ] && [ -n "${OPS_ALERT_EMAIL:-}" ] && [ -n "${SMTP_HOST:-}" ]; then
+  say "Sending a test alert to ${OPS_ALERT_EMAIL}…"
+  if ./bin/healthwatch.sh --test; then
+    echo "  Check that it arrived. If it didn't, look in spam, then check the relay settings in .env."
+  else
+    warn "The test alert could not be sent — check the relay settings in .env, then: ./bin/healthwatch.sh --test"
+  fi
 fi
 
 if [ "${DOCTOR_RC}" -ne 0 ]; then

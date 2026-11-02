@@ -192,5 +192,25 @@ check "no starttls flag on 465" "$(grep -c -- '--ssl-reqd' "$WORK/argv")" 0
 check "ascii header" "$(encode_header 'plain')" "plain"
 contains "utf8 header" "$(encode_header 'disk — full')" "=?UTF-8?B?"
 
+# 18. the outside heartbeat: the URL goes to curl on stdin (never argv); a failed ping never fails the run
+mkdir -p "$WORK/hb"
+cat > "$WORK/hb/curl" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FAKE_DIR/hb-argv"; cat > "$FAKE_DIR/hb-stdin"; exit "${HB_RC:-0}"
+FAKE
+chmod +x "$WORK/hb/curl"
+OPS_HEARTBEAT_URL="https://hc-ping.example/uuid-123"; HEARTBEAT_NOTE=""
+PATH="$WORK/hb:$PATH" heartbeat
+check "heartbeat note" "$HEARTBEAT_NOTE" "heartbeat sent"
+check "url not in argv" "$(grep -c 'uuid-123' "$WORK/hb-argv")" 0
+check "url on stdin" "$(cat "$WORK/hb-stdin")" 'url = "https://hc-ping.example/uuid-123"'
+HB_RC=7; export HB_RC; HEARTBEAT_NOTE=""
+PATH="$WORK/hb:$PATH" heartbeat; RC=$?
+check "failed ping returns 0" "$RC" 0
+contains "failed ping noted" "$HEARTBEAT_NOTE" "NOT sent"
+unset HB_RC; OPS_HEARTBEAT_URL=""; HEARTBEAT_NOTE=""; rm -f "$WORK/hb-argv"
+PATH="$WORK/hb:$PATH" heartbeat
+check "no url, no ping" "$( [ -e "$WORK/hb-argv" ] && echo pinged || echo none)" none
+
 echo "healthwatch self-test: ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]

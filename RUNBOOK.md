@@ -61,7 +61,7 @@ The installer bootstraps the whole machine by itself:
 2. Installs **Docker** if missing, adds the service user to the docker group
 3. Asks for the **GitHub token** (`read:packages`) and logs in to the image registry
 4. Opens the **firewall** (80/443) on the machine
-5. Asks the **four questions** (hostname, email, admin password, backup target)
+5. Asks the **six questions** (hostname, email, admin password, backup target, outgoing email, alert address)
 6. Starts everything and ends with the green/red health table
 
 That's the whole deployment. The remaining manual steps are DNS (step 2) and the
@@ -84,7 +84,7 @@ cd workforce_suite/deploy
 ./bin/install.sh
 ```
 
-The wizard asks **four questions**:
+The wizard asks **six questions**:
 
 1. Your organisation's **domain** → `your-domain.co.uk` — the installer derives
    `workforce.<domain>` (staff) and `auth.<domain>` (sign-in), shows both, and
@@ -92,6 +92,15 @@ The wizard asks **four questions**:
 2. Email for certificate notices
 3. Administrator password (Enter = generate one and show it once)
 4. Off-site backup target (Enter = local only — fine for the test)
+5. **Outgoing email**: the relay that delivers Workforce's email (reminders, invitations,
+   password resets, server alerts). Pick Microsoft 365, Google Workspace, Brevo, SMTP2GO,
+   Amazon SES (London), Mailgun (EU) or another provider's host and port (STARTTLS, usually 587;
+   465 doesn't work), then the user name, password or SMTP key, and the From address. Enter =
+   none for now (emails are only logged). Ask the provider for the sender domain's SPF and DKIM
+   records, or the email lands in spam. Skipped when the environment file sets `SMTP_HOST`.
+6. **Server alerts**: an address *not* hosted on this server for health alerts (§7b), and
+   optionally an outside uptime check's ping URL (§7c). When both a relay and an alert address
+   are set, the installer sends a test alert at the end.
 
 Then it opens the firewall, generates all secrets, pulls the published images
 (`ghcr.io/marlon-thomas/workforce-suite:0.2.0` — the registry login from step 5
@@ -198,8 +207,30 @@ recreates the backup container itself.) The watch reads `.env` at every run, so 
 to `OPS_ALERT_EMAIL` need no restart. New installs take it from `environments/<env>.env`.
 
 **What it cannot do.** A server that is off, or has lost its network, cannot send email about
-it. Pair this with an outside uptime check (any uptime monitoring service polling
-`https://<app host>/`) for "the whole server is gone".
+it. That is what the outside uptime check (§7c) is for.
+
+## 7c. Outside uptime check
+
+Two free outside services cover "the whole server is gone". Both are accounts the operator
+creates; both email the same outside address as §7b.
+
+1. **Heartbeat (works for every server, including the tailnet-only test appliance).** The health
+   watch pings a URL every 15 minutes; the outside service emails you when the pings stop —
+   server off, out of disk, network down, or the watch itself broken.
+   - Create a free account at [Healthchecks.io](https://healthchecks.io) (any service with
+     "cron job" / "heartbeat" checks works), add a check with **period 15 minutes** and **grace
+     15 minutes**, and set its email to your alert address.
+   - Copy the check's **ping URL** into `OPS_HEARTBEAT_URL` (the installer asks for it after the
+     alert address). It is sent to curl on stdin and never written to logs; treat it like a
+     password, since anyone holding it can ping on your behalf.
+   - Existing installation: `echo 'OPS_HEARTBEAT_URL=https://hc-ping.com/<your-uuid>' >> .env` —
+     the next watch run pings it (no restart). `./bin/doctor.sh` shows "uptime check".
+2. **Outside monitor of the public address (production only — the test appliance is not
+   reachable from the internet).** A free monitor such as [UptimeRobot](https://uptimerobot.com)
+   requests the site every 5 minutes from outside and emails you when it fails:
+   - `https://<app host>/api/v1/build-meta` — the app is up (answers JSON with the version);
+   - `https://<auth host>/-/health/live/` — sign-in is up.
+   This also catches DNS, certificate and firewall problems the server can't see from inside.
 
 ## 8. Finished testing?
 

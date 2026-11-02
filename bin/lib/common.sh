@@ -135,3 +135,39 @@ secret_modes() {
   [ -e secrets/initial-admin-password ] && chmod 400 secrets/initial-admin-password
   return 0
 }
+
+# alert_address_problems "<comma-separated list>" <host>... — checks server-alert addresses
+# (OPS_ALERT_EMAIL, bin/healthwatch.sh) before the installer saves them. Prints one line per problem:
+#   bad:<message>  the list can't be used (re-ask)
+#   own:<message>  an address is on a domain this server answers for — fine only if that domain's
+#                  mail is handled elsewhere (e.g. Microsoft 365), so the installer asks to confirm
+# Prints nothing when the list is fine. Hosts are the app/sign-in names; their parent domains count.
+alert_address_problems() {
+  local addrs="${1// /}" a dom h p hosted="" seen=""
+  shift
+  local -a list
+  for h in "$@"; do
+    h="$(printf '%s' "$h" | tr '[:upper:]' '[:lower:]')"
+    case "$h" in ""|*.localhost|localhost) continue ;; esac
+    hosted="${hosted} ${h}"
+    p="${h#*.}"
+    case "$p" in *.*) ;; *) continue ;; esac                       # never a bare TLD
+    case "$p" in co.uk|org.uk|me.uk|ltd.uk|plc.uk|net.uk|ac.uk|gov.uk|nhs.uk|com.au|net.au|org.au|co.nz|org.nz|co.za) continue ;; esac
+    hosted="${hosted} ${p}"
+  done
+  IFS=',' read -r -a list <<< "$addrs"
+  for a in "${list[@]}"; do
+    [ -n "$a" ] || continue
+    if ! printf '%s' "$a" | grep -Eq '^[^@[:space:]",;<>]+@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'; then
+      printf 'bad:%s is not an email address\n' "$a"; continue
+    fi
+    case ",${seen}," in *",${a},"*) continue ;; esac
+    seen="${seen:+${seen},}${a}"
+    dom="$(printf '%s' "${a##*@}" | tr '[:upper:]' '[:lower:]')"
+    for h in $hosted; do
+      if [ "$dom" = "$h" ] || [ "${dom%".${h}"}" != "$dom" ]; then
+        printf 'own:%s is on %s, which this server answers for\n' "$a" "$h"; break
+      fi
+    done
+  done
+}

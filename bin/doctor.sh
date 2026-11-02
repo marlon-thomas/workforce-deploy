@@ -409,6 +409,14 @@ alerts_row() {
   else row "ops alerts" ok "to ${ok_to}"; fi
 }
 alerts_row
+# Outside uptime check (RUNBOOK §7c): the only alert that works when this server is off.
+if [ -n "${OPS_HEARTBEAT_URL:-}" ]; then
+  row "uptime check" ok "outside heartbeat set"
+elif [ "${ENV_NAME:-prod}" = test ]; then
+  row "uptime check" skip "OPS_HEARTBEAT_URL not set (optional on the test appliance)"
+else
+  row "uptime check" warn "OPS_HEARTBEAT_URL not set — if this server stops, nobody is told (RUNBOOK §7c)"
+fi
 
 # --- license (slot; populated when licensing ships)
 row "license" ok "not yet enforced (deployment-spec §B7 slot)"
