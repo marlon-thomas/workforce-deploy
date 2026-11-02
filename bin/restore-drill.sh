@@ -20,6 +20,12 @@
 # Optional: GHCR_USER (default marlon-thomas), DRILL_IMAGE (default
 # images:ubuntu/24.04), DRILL_NAME, KEEP=1.
 #
+# Where the drill container runs. It needs nesting, which a restricted per-user Incus project
+# refuses, and a network address, which a bridge with no working DHCP won't give it:
+#   DRILL_INCUS    the incus command to use, e.g. "sudo -n incus --project appliance"
+#   DRILL_ADDRESS  a free fixed address, e.g. 10.230.4.57/24, with DRILL_GATEWAY (and DRILL_DNS,
+#                  default 1.1.1.1). Unset: the bridge's DHCP.
+#
 # An encrypted off-site copy (<archive>.tar.gz.age) also needs BACKUP_IDENTITY_FILE, a file holding
 # its private key on this machine. The key goes to the drill container through stdin only, and the
 # archive is decrypted by the same restore.sh customers use.
@@ -41,7 +47,9 @@ if [ "$ENCRYPTED" -eq 1 ]; then
 fi
 [ -n "${GHCR_TOKEN_FILE:-}" ] && [ -r "${GHCR_TOKEN_FILE/#\~/$HOME}" ] \
   || { echo "GHCR_TOKEN_FILE must name a readable file holding a read:packages token."; exit 1; }
-command -v incus >/dev/null 2>&1 || { echo "incus is required on this machine."; exit 1; }
+read -r -a INCUS_COMMAND <<< "${DRILL_INCUS:-incus}"
+command -v "${INCUS_COMMAND[0]}" >/dev/null 2>&1 || { echo "incus is required on this machine."; exit 1; }
+incus() { "${INCUS_COMMAND[@]}" "$@"; }
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mXX\033[0m %s\n' "$*"; exit 1; }
@@ -65,10 +73,24 @@ incus launch "$IMAGE" "$NAME" \
   -c security.nesting=true \
   -c security.syscalls.intercept.mknod=true \
   -c security.syscalls.intercept.setxattr=true >/dev/null
-for _ in $(seq 1 60); do
-  in_c sh -c 'getent hosts get.docker.com >/dev/null 2>&1' && break
+if [ -n "${DRILL_ADDRESS:-}" ]; then
+  [ -n "${DRILL_GATEWAY:-}" ] || fail "DRILL_ADDRESS also needs DRILL_GATEWAY."
+  printf '[Match]\nName=eth0\n[Network]\nAddress=%s\nGateway=%s\nDNS=%s\n' \
+      "$DRILL_ADDRESS" "$DRILL_GATEWAY" "${DRILL_DNS:-1.1.1.1}" \
+    | in_c sh -c 'cat > /etc/systemd/network/10-eth0.network'
+  # The container has only just started: its system bus may not be up yet.
+  for _ in $(seq 1 30); do
+    in_c networkctl reload >/dev/null 2>&1 </dev/null && break
+    sleep 2
+  done
+fi
+# A lookup with no network can hang for good, so each try has its own limit.
+NETWORK_UP=0
+for _ in $(seq 1 30); do
+  if in_c sh -c 'timeout 5 getent hosts get.docker.com >/dev/null 2>&1' </dev/null; then NETWORK_UP=1; break; fi
   sleep 2
 done
+[ "$NETWORK_UP" -eq 1 ] || fail "The drill container has no working network. If this bridge gives no DHCP address, set DRILL_ADDRESS and DRILL_GATEWAY."
 
 say "Installing Docker inside the drill container…"
 in_c sh -c 'apt-get update -qq >/dev/null && apt-get install -y -qq curl ca-certificates openssl >/dev/null \
@@ -133,7 +155,7 @@ check() { # check <label> <ok?> <detail>
   if [ "$2" = ok ]; then printf ' PASS %-12s %s\n' "$1" "$3"; else printf ' FAIL %-12s %s\n' "$1" "$3"; RESULT=1; fi
 }
 FW="$(in_c sh -c "cd $W && docker compose exec -T postgres psql -U workforce_app -d workforce -tAc \
-  \"select count(*) || ' (latest ' || coalesce(max(version),'none') || ')' from flyway_schema_history where success\"" 2>/dev/null || echo 0)"
+  \"select count(*) || ' (latest ' || coalesce((select version from flyway_schema_history where success and version is not null order by installed_rank desc limit 1),'none') || ')' from flyway_schema_history where success\"" 2>/dev/null || echo 0)"
 case "$FW" in 0*|'') check "app DB" fail "no successful migrations restored" ;; *) check "app DB" ok "$FW migrations" ;; esac
 
 AKU="$(in_c sh -c "cd $W && docker compose exec -T authentik-postgres psql -U authentik -d authentik -tAc \

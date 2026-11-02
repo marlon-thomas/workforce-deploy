@@ -432,6 +432,19 @@ It reaches the drill container through stdin only; delete that file afterwards:
     GHCR_TOKEN_FILE=~/.config/workforce-dev/ghcr-read.token BACKUP_IDENTITY_FILE=<key file> \
       ./bin/restore-drill.sh <archive>.tar.gz.age
 
+On the devbox, the drill needs an Incus project that allows nesting and a fixed address, because the
+bridges there don't hand out DHCP addresses:
+
+```bash
+DRILL_INCUS="sudo -n incus --project appliance" DRILL_ADDRESS=10.230.4.57/24 DRILL_GATEWAY=10.230.4.1 \
+  GHCR_TOKEN_FILE=~/.config/workforce-dev/ghcr-read.token BACKUP_IDENTITY_FILE=<private key file> \
+  ./bin/restore-drill.sh <archive>.tar.gz.age
+```
+
+An evidence count of 0 passes only because there was nothing to restore: if the server holds no evidence
+files, that part of the restore hasn't been tested. The drill doesn't check what landed in the mail
+database, or start the app on the restored data.
+
 It restores into a throw-away container with `bin/restore.sh --data-only`
 and checks app DB, sign-in DB and evidence object counts; exit 0 = PASS.
 Not yet scheduled — run it at least monthly (nightly once automated).
