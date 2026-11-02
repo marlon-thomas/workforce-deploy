@@ -138,13 +138,14 @@ helper_enabled() { [ "$(env_get SERVER_ACTIONS)" != off ]; }
 # What the screens need to show, from .env, never a secret: not the relay's user name or password, not
 # the uptime URL, not the off-site target. The alert address is shown, because it's what gets edited.
 write_heartbeat() { # write_heartbeat <busy true|false>
-  local profiles target kind="" off_configured=false mail_on=false private_ca=false port user mail_host smtp_host
+  local profiles target kind="" off_configured=false off_encrypted=false mail_on=false private_ca=false port user mail_host smtp_host
   profiles="$(env_get COMPOSE_PROFILES)"
   case ",$profiles," in *,staffmail,*) mail_on=true ;; esac
   target="$(env_get BACKUP_TARGET)"
   if [ -n "$target" ]; then
     off_configured=true
     case "$target" in s3://*) kind=S3 ;; *:*) kind=rsync ;; *) kind=other ;; esac
+    if age_recipient_usable "$(env_get BACKUP_ENCRYPT_RECIPIENT)"; then off_encrypted=true; fi
   fi
   case "$(env_get GATEWAY_CADDYFILE)" in *localca*) private_ca=true ;; esac
   smtp_host="$(env_get SMTP_HOST)"; port="$(env_get SMTP_PORT)"; user="$(env_get SMTP_USERNAME)"
@@ -156,13 +157,13 @@ write_heartbeat() { # write_heartbeat <busy true|false>
         --arg alerts "$(env_get OPS_ALERT_EMAIL)" --argjson hb "$([ -n "$(env_get OPS_HEARTBEAT_URL)" ] && echo true || echo false)" \
         --argjson mailOn "$mail_on" --arg webmail "$(env_get WEBMAIL_HOSTNAME)" --arg mailHost "$mail_host" \
         --arg mailRelay "$(env_get MAIL_RELAY_HOST)" --argjson privateCa "$private_ca" \
-        --argjson offConfigured "$off_configured" --arg offKind "$kind" \
+        --argjson offConfigured "$off_configured" --arg offKind "$kind" --argjson offEncrypted "$off_encrypted" \
     '{ schema: 1, at: $at, enabled: $enabled, busy: $busy,
        settings: {
          relay: { host: $host, port: $port, signsIn: $signsIn, from: $from, starttls: ($starttls == "true") },
          alerts: { address: $alerts, heartbeatSet: $hb },
          staffMail: { on: $mailOn, webmailHost: $webmail, mailHost: $mailHost, relayHost: $mailRelay, privateCa: $privateCa },
-         offsite: { configured: $offConfigured, kind: (if $offKind == "" then null else $offKind end) } } }' \
+         offsite: { configured: $offConfigured, kind: (if $offKind == "" then null else $offKind end), encrypted: $offEncrypted } } }' \
     | publish helper.json
 }
 
@@ -557,7 +558,8 @@ job_offsite_test() {
   data="$(jq -n --arg kind "$kind" --arg before "$before" '{ kind: $kind, lastCopyBefore: $before }')"
   case "$rc" in
     0) job_result SUCCEEDED OK "The test copy of the newest backup reached the off-site target." "$data" ;;
-    3) job_result FAILED OFFSITE_FAILED "The copy to the off-site target failed: $(last_words "$tmp")" "$data" ;;
+    # The last line is always "finished", so the reason comes from the line that gives it.
+    3) job_result FAILED OFFSITE_FAILED "The copy to the off-site target failed: $(sed -n 's/^Off-site copy failed — //p' "$tmp" | tail -n 1 | cut -c1-300)" "$data" ;;
     4) job_result REFUSED NO_TARGET "No off-site target is set on this server. Whoever runs it sets BACKUP_TARGET." ;;
     5) job_result REFUSED NO_BACKUP "There's no backup to copy yet. Run one first." ;;
     75) job_result REFUSED BUSY "A backup is running. Try again when it has finished." ;;

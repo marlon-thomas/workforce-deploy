@@ -27,6 +27,8 @@
 # Exit: 0 all checks pass · 1 checks failing (alerts handled) · 2 usage or configuration error ·
 #       3 an email was due but could not be sent (the next run tries again)
 set -euo pipefail
+# shellcheck source=lib/common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
 
 HW_STATE_FILE="${HW_STATE_FILE:-state/healthwatch.state}"
 HW_LOG_FILE="${HW_LOG_FILE:-logs/healthwatch.log}"
@@ -295,10 +297,12 @@ print_dry() { # print_dry <subject> <bodyfile>
 #     "version": { "running": "0.2.98", "configured": "0.2.98" },
 #     "checks": [ { "status": "OK|WARN|FAIL|SKIP", "check": "database", "detail": "…" }, … ],
 #     "backup": { "lastAt": "…Z", "sizeBytes": 123, "kept": 9,
-#                 "offsite": { "configured": true, "kind": "S3", "lastCopy": "OK|FAILED|UNKNOWN" } } }
+#                 "offsite": { "configured": true, "kind": "S3", "encrypted": true, "lastCopy": "OK|FAILED|UNKNOWN" } } }
 #
 # schema changes only when an old reader could misread the file; adding a field doesn't change it.
 # running, lastAt and sizeBytes are null when unknown; kind is null when there's no off-site target.
+# encrypted: there's a target and a usable recipient. A target without one sends nothing (backup.sh
+# never sends plaintext), so lastCopy is FAILED whatever the log says, and the doctor row says why.
 
 # mask_text — stdin to stdout. Hides this server's sensitive settings wherever they appear (the
 # relay's user name and password, the uptime ping URL, the off-site target and its keys), then the
@@ -344,13 +348,13 @@ offsite_last_copy() {
     /^Testing the off-site copy/        { copy = 0; bad = 0 }
     /^Copying off-site to /             { copy = 1 }
     /Off-site copy failed/              { bad = 1; result = "FAILED" }
-    /^Retention applied/                { result = !copy ? "UNKNOWN" : (bad ? "FAILED" : "OK") }
-    /^Off-site copy test finished/      { result = !copy ? "UNKNOWN" : (bad ? "FAILED" : "OK") }
+    /^Retention applied/                { result = bad ? "FAILED" : (copy ? "OK" : "UNKNOWN") }
+    /^Off-site copy test finished/      { result = bad ? "FAILED" : (copy ? "OK" : "UNKNOWN") }
     END                                 { print (result == "" ? "UNKNOWN" : result) }'
 }
 
 backup_json() { # the backup summary; never the target itself, which can name a user and a host
-  local latest="" kept=0 p last_at="" size="" kind="" configured=false copy=UNKNOWN m
+  local latest="" kept=0 p last_at="" size="" kind="" configured=false encrypted=false copy=UNKNOWN m
   for p in "$HW_BACKUP_DIR"/*.tar.gz; do
     [ -e "$p" ] || continue
     kept=$((kept + 1))
@@ -366,9 +370,10 @@ backup_json() { # the backup summary; never the target itself, which can name a 
     configured=true
     case "$BACKUP_TARGET" in s3://*) kind=S3 ;; *:*) kind=rsync ;; *) kind=other ;; esac
     copy="$(offsite_last_copy)"
+    if age_recipient_usable "${BACKUP_ENCRYPT_RECIPIENT:-}"; then encrypted=true; else copy=FAILED; fi
   fi
-  printf '{ "lastAt": %s, "sizeBytes": %s, "kept": %s, "offsite": { "configured": %s, "kind": %s, "lastCopy": "%s" } }' \
-    "$(json_or_null "$last_at")" "${size:-null}" "$kept" "$configured" "$(json_or_null "$kind")" "$copy"
+  printf '{ "lastAt": %s, "sizeBytes": %s, "kept": %s, "offsite": { "configured": %s, "kind": %s, "encrypted": %s, "lastCopy": "%s" } }' \
+    "$(json_or_null "$last_at")" "${size:-null}" "$kept" "$configured" "$(json_or_null "$kind")" "$encrypted" "$copy"
 }
 
 status_json() { # status_json <rows> <run epoch>
@@ -522,8 +527,6 @@ main() {
   # On the host, hand the run to the backup container: the schedule runs there, and only there
   # do compose-network relay names (the test appliance's `mailpit`) resolve.
   if [ "$here" -eq 0 ] && [ "${WORKFORCE_IN_STACK:-}" != 1 ]; then
-    # shellcheck source=lib/common.sh
-    . ./bin/lib/common.sh
     use_docker_socket
     # shellcheck disable=SC2016  # expanded inside the container
     if docker compose exec -T backup sh -c 'command -v curl && [ "${WORKFORCE_IN_STACK:-}" = 1 ]' >/dev/null 2>&1; then

@@ -227,3 +227,108 @@ alert_address_problems() {
     done
   done
 }
+
+# ------------------------------------------------------------------ off-site encryption (age)
+# Off-site copies are encrypted with age before they leave the server (RUNBOOK, "Off-site backup
+# targets"). This server holds only the public recipient, BACKUP_ENCRYPT_RECIPIENT in .env; the
+# private key lives off it, so neither the server nor someone who takes it over can read those copies.
+# The backup container has age. A host needs nothing installed: without age it runs in a throw-away
+# container of the same image.
+AGE_IMAGE="alpine:3.20"
+
+age_here() { command -v "${AGE_BIN:-age}" >/dev/null 2>&1; }
+
+# age_container SCRIPT [ARG...] — run SCRIPT with age available, stdin and stdout passed through.
+# --log-driver none: otherwise docker keeps what the container prints on disk until it's removed,
+# and that is a private key or a decrypted backup. /k is memory, for the key on its way in.
+age_container() {
+  local script="$1"; shift
+  docker run --rm -i --log-driver none --tmpfs /k:mode=0700,size=1m "$AGE_IMAGE" sh -c \
+    "apk add -q --no-progress age </dev/null >/dev/null 2>&1 || { echo 'Could not install age in a helper container.' >&2; exit 125; }; $script" sh "$@"
+}
+
+# age_recipient_usable RECIPIENT — is it an age public key that age can encrypt to? Only the X25519
+# form, which needs no plugin on this server. Where age is here, it's asked as well, since that
+# also checks the key's checksum.
+age_recipient_usable() {
+  [[ "${1:-}" =~ ^age1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58}$ ]] || return 1
+  if age_here; then printf 'x' | "${AGE_BIN:-age}" -r "$1" >/dev/null 2>&1 || return 1; fi
+  return 0
+}
+
+# offsite_encryption_problem RECIPIENT — why nothing can go off-site, in words; nothing when it can.
+offsite_encryption_problem() {
+  if [ -z "${1:-}" ]; then
+    echo "BACKUP_ENCRYPT_RECIPIENT isn't set"
+  elif ! age_recipient_usable "$1"; then
+    echo "BACKUP_ENCRYPT_RECIPIENT isn't a usable age public key (age1…)"
+  fi
+}
+
+# age_encrypt RECIPIENT — stdin to stdout.
+age_encrypt() {
+  if age_here; then
+    "${AGE_BIN:-age}" -r "$1"
+  else
+    # shellcheck disable=SC2016  # expanded inside the container
+    age_container 'exec age -r "$1"' "$1"
+  fi
+}
+
+# age_keygen_text — a new key pair as age-keygen prints it, on stdout only, so nothing is on disk.
+age_keygen_text() {
+  if command -v "${AGE_KEYGEN_BIN:-age-keygen}" >/dev/null 2>&1; then
+    "${AGE_KEYGEN_BIN:-age-keygen}" 2>/dev/null
+  else
+    ( use_docker_socket; age_container 'exec age-keygen 2>/dev/null' </dev/null )
+  fi
+}
+
+# read_age_identity <file, or - for stdin> — the private key into AGE_IDENTITY, which is never
+# exported, never an argument and never printed. A file can hold several keys, as age's can, for
+# archives made before a rotation. From stdin it stops after the first key, so whatever follows is
+# still there to read. Says why and returns 1 if there's no key.
+AGE_IDENTITY=""
+read_age_identity() {
+  local src="$1" line eof=0 key_re='^AGE-SECRET-KEY-1[0-9A-Z]{58}$'
+  AGE_IDENTITY=""
+  if [ "$src" = - ]; then
+    if [ -t 0 ]; then
+      read -rs -p "Paste the private key (AGE-SECRET-KEY-…, not shown): " line || line=""
+      echo >&2
+      line="${line//[[:space:]]/}"
+      if [[ "$line" =~ $key_re ]]; then AGE_IDENTITY="$line"; fi
+    else
+      while [ "$eof" -eq 0 ]; do
+        IFS= read -r line || eof=1
+        line="${line//[[:space:]]/}"
+        if [[ "$line" =~ $key_re ]]; then AGE_IDENTITY="$line"; break; fi
+      done
+    fi
+    [ -n "$AGE_IDENTITY" ] || { echo "That isn't an age private key (they start AGE-SECRET-KEY-1)." >&2; return 1; }
+    return 0
+  fi
+  [ -f "$src" ] && [ -r "$src" ] || { echo "Can't read the key file: $src" >&2; return 1; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line//[[:space:]]/}"
+    if [[ "$line" =~ $key_re ]]; then AGE_IDENTITY="${AGE_IDENTITY:+${AGE_IDENTITY}$'\n'}${line}"; fi
+  done < "$src"
+  [ -n "$AGE_IDENTITY" ] || { echo "There's no age private key in $src (they start AGE-SECRET-KEY-1)." >&2; return 1; }
+}
+
+# age_decrypt — stdin to stdout, with the key from read_age_identity. Printed by bash's own printf,
+# so it reaches age through a pipe and is on no command line. age's own error goes to stderr; "no
+# identity matched" is the wrong key.
+age_decrypt() {
+  if age_here; then
+    "${AGE_BIN:-age}" -d -i <(printf '%s\n' "$AGE_IDENTITY")
+  else
+    # The key comes first on stdin, up to a blank line; the archive follows it.
+    # shellcheck disable=SC2016  # expanded inside the container
+    { printf '%s\n\n' "$AGE_IDENTITY"; cat; } | age_container \
+      'umask 077; while IFS= read -r l && [ -n "$l" ]; do printf "%s\n" "$l" >> /k/id; done; exec age -d -i /k/id'
+  fi
+}
+
+# is_age_file FILE — is it age's format, whatever it's called?
+is_age_file() { [ "$(head -c 21 "$1" 2>/dev/null | tr -d '\000')" = "age-encryption.org/v1" ]; }

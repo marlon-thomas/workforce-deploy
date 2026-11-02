@@ -713,8 +713,8 @@ services:
         # bash: backup.sh is a bash script; docker-cli-compose: it drives
         # `docker compose` (alpine's docker-cli ships without the plugin);
         # curl + openssl: doctor.sh's probes and healthwatch.sh's SMTP send; jq: server-actions.sh
-        # reads the app's requests.
-        apk add -q dcron bash docker-cli docker-cli-compose curl openssl rsync openssh-client jq >/dev/null
+        # reads the app's requests; age: off-site copies are encrypted before they leave the server.
+        apk add -q dcron bash docker-cli docker-cli-compose curl openssl rsync openssh-client jq age >/dev/null
         printf '%s\n' \
           '0 2 * * * cd /opt/workforce-deploy && ./bin/backup.sh >> backups/cron.log 2>&1' \
           '*/15 * * * * cd /opt/workforce-deploy && mkdir -p logs && ./bin/healthwatch.sh > /dev/null 2>> logs/healthwatch.log' \

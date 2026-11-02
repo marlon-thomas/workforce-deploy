@@ -242,7 +242,7 @@ check "status: a row" "$(json_get 'd["checks"][2]')" "{'status': 'WARN', 'check'
 check "status: backup kept (no .part)" "$(json_get 'd["backup"]["kept"]')" 2
 check "status: backup size is the newest" "$(json_get 'd["backup"]["sizeBytes"]')" 3
 check "status: backup time" "$(json_get 'd["backup"]["lastAt"]')" "2027-01-15T05:13:20Z"
-check "status: no off-site" "$(json_get 'd["backup"]["offsite"]')" "{'configured': False, 'kind': None, 'lastCopy': 'UNKNOWN'}"
+check "status: no off-site" "$(json_get 'd["backup"]["offsite"]')" "{'configured': False, 'kind': None, 'encrypted': False, 'lastCopy': 'UNKNOWN'}"
 check "status: file mode (under umask 077)" "$(stat -c %a "$HW_STATUS_FILE")" 644
 check "status: folder mode (under umask 077)" "$(stat -c %a "$(dirname "$HW_STATUS_FILE")")" 755
 check "status: no temp left" "$(find "$WORK/status" -name '.health*' | wc -l | tr -d ' ')" 0
@@ -264,11 +264,12 @@ mv "$WORK/backups.away" "$HW_BACKUP_DIR"
 
 # 22. whether the last off-site copy worked, from the nightly log, and the target never appears
 BACKUP_TARGET="s3://secret-bucket/customer"
+BACKUP_ENCRYPT_RECIPIENT=age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
 cron_log() { printf '%s\n' "$@" > "$HW_BACKUP_DIR/cron.log"; }
 NIGHT_OK=("Dumping the application database…" "Copying off-site to s3://secret-bucket/customer…" "Retention applied (nightly)")
 NIGHT_BAD=("Dumping the application database…" "Copying off-site to s3://secret-bucket/customer…" "Off-site copy failed — check the backup target credentials (backup is still local)." "Retention applied (nightly)")
 cron_log "${NIGHT_OK[@]}"; run
-check "off-site worked" "$(json_get 'd["backup"]["offsite"]')" "{'configured': True, 'kind': 'S3', 'lastCopy': 'OK'}"
+check "off-site worked" "$(json_get 'd["backup"]["offsite"]')" "{'configured': True, 'kind': 'S3', 'encrypted': True, 'lastCopy': 'OK'}"
 cron_log "${NIGHT_OK[@]}" "${NIGHT_BAD[@]}"; run
 check "off-site failed" "$(json_get 'd["backup"]["offsite"]["lastCopy"]')" FAILED
 cron_log "${NIGHT_BAD[@]}" "${NIGHT_OK[@]}"; run
@@ -280,6 +281,25 @@ check "off-site never logged" "$(json_get 'd["backup"]["offsite"]["lastCopy"]')"
 BACKUP_TARGET="backup-user@vault.example.test:/srv/x"; run
 check "rsync kind" "$(json_get 'd["backup"]["offsite"]["kind"]')" rsync
 check "target not in the file" "$(grep -c 'vault\|backup-user\|secret-bucket' "$HW_STATUS_FILE")" 0
+
+# 22b. a target with no usable recipient sends nothing, whatever an older run logged: the file says so
+NO_KEY_LINE="Off-site copy failed — nothing was sent: BACKUP_ENCRYPT_RECIPIENT isn't set, and backups never leave this server unencrypted (backup is still local)."
+cron_log "${NIGHT_OK[@]}"; BACKUP_ENCRYPT_RECIPIENT=""; run
+check "no recipient: not encrypted" "$(json_get 'd["backup"]["offsite"]')" "{'configured': True, 'kind': 'rsync', 'encrypted': False, 'lastCopy': 'FAILED'}"
+BACKUP_ENCRYPT_RECIPIENT="ssh-ed25519 AAAA"; run
+check "bad recipient: not encrypted" "$(json_get 'd["backup"]["offsite"]["encrypted"]')" False
+check "bad recipient: failed" "$(json_get 'd["backup"]["offsite"]["lastCopy"]')" FAILED
+# The log's own answer, for a run that refused to send: no "Copying off-site" line in it.
+cron_log "Dumping the application database…" "$NO_KEY_LINE" "Retention applied (nightly)"
+check "a refused run reads as FAILED" "$(offsite_last_copy)" FAILED
+cron_log "Testing the off-site copy with x…" "$NO_KEY_LINE" "Off-site copy test finished."
+check "a refused test reads as FAILED" "$(offsite_last_copy)" FAILED
+cron_log "Dumping the application database…" "Retention applied (nightly)"
+check "a run with no off-site step is still UNKNOWN" "$(offsite_last_copy)" UNKNOWN
+# Encrypted is false with no target, even with a recipient set: nothing is going anywhere.
+BACKUP_TARGET=""; BACKUP_ENCRYPT_RECIPIENT=age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p; run
+check "no target: not encrypted" "$(json_get 'd["backup"]["offsite"]["encrypted"]')" False
+BACKUP_ENCRYPT_RECIPIENT=""; rm -f "$HW_BACKUP_DIR/cron.log"
 
 # 23. nothing like a secret survives, whatever a row says; JSON survives what the rows hold
 printf 'mail-relay-password-value\n' > "$HW_SECRETS_DIR/mail_relay_password"

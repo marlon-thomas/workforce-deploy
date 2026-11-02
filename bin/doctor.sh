@@ -460,13 +460,16 @@ else
 fi
 if [ -z "${BACKUP_TARGET:-}" ]; then
   row "off-site backup" warn "no BACKUP_TARGET — backups stay on this server and are lost with it"
+elif OFFSITE_PROBLEM="$(offsite_encryption_problem "${BACKUP_ENCRYPT_RECIPIENT:-}")" && [ -n "$OFFSITE_PROBLEM" ]; then
+  # Backups are never sent unencrypted, so a target with no usable recipient means no off-site copy.
+  oprow "off-site backup" fail "nothing is going off-site: ${OFFSITE_PROBLEM}, and backups never leave this server unencrypted — RUNBOOK, \"Off-site backup targets\""
 else
-  # The newest nightly run's off-site copy (backup.sh logs a failure but keeps the local archive).
+  # The newest run's off-site copy (backup.sh logs a failure but keeps the local archive).
   OFFSITE_FAILED="$( { tail -n 400 backups/cron.log 2>/dev/null || true; } \
-    | awk '/^Dumping the application database/ { f = 0 } /Off-site copy failed/ { f = 1 } END { print f + 0 }')" || OFFSITE_FAILED=0
+    | awk '/^Dumping the application database|^Testing the off-site copy/ { f = 0 } /Off-site copy failed/ { f = 1 } END { print f + 0 }')" || OFFSITE_FAILED=0
   case "$BACKUP_TARGET" in s3://*) KIND=S3 ;; *) KIND=rsync ;; esac
-  if [ "$OFFSITE_FAILED" = 1 ]; then row "off-site backup" warn "the last nightly off-site copy failed (${KIND}) — see backups/cron.log"
-  else row "off-site backup" ok "configured (${KIND})"; fi
+  if [ "$OFFSITE_FAILED" = 1 ]; then row "off-site backup" warn "the last off-site copy failed (${KIND}) — see backups/cron.log"
+  else row "off-site backup" ok "configured (${KIND}, encrypted)"; fi
 fi
 
 # --- server alerts (bin/healthwatch.sh): who outside this server hears about the FAILs above.

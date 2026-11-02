@@ -20,6 +20,10 @@
 # Optional: GHCR_USER (default marlon-thomas), DRILL_IMAGE (default
 # images:ubuntu/24.04), DRILL_NAME, KEEP=1.
 #
+# An encrypted off-site copy (<archive>.tar.gz.age) also needs BACKUP_IDENTITY_FILE, a file holding
+# its private key on this machine. The key goes to the drill container through stdin only, and the
+# archive is decrypted by the same restore.sh customers use.
+#
 # Exit 0 = PASS. Scheduling (nightly, against the newest off-site archive) is
 # deliberately left to the operator — see RUNBOOK.md.
 set -euo pipefail
@@ -27,7 +31,14 @@ cd "$(dirname "$0")/.."
 BUNDLE="$(pwd)"
 
 ARCHIVE="${1:-}"
-[ -n "$ARCHIVE" ] && [ -f "$ARCHIVE" ] || { echo "Usage: GHCR_TOKEN_FILE=<file> ./bin/restore-drill.sh <archive.tar.gz>"; exit 1; }
+[ -n "$ARCHIVE" ] && [ -f "$ARCHIVE" ] || { echo "Usage: GHCR_TOKEN_FILE=<file> [BACKUP_IDENTITY_FILE=<file>] ./bin/restore-drill.sh <archive.tar.gz[.age]>"; exit 1; }
+ENCRYPTED=0
+case "$ARCHIVE" in *.age) ENCRYPTED=1 ;; esac
+if [ "$ENCRYPTED" -eq 1 ]; then
+  [ -n "${BACKUP_IDENTITY_FILE:-}" ] && [ -r "${BACKUP_IDENTITY_FILE/#\~/$HOME}" ] \
+    || { echo "This archive is encrypted: BACKUP_IDENTITY_FILE must name a readable file holding its private key."; exit 1; }
+  IDENTITY_FILE="${BACKUP_IDENTITY_FILE/#\~/$HOME}"
+fi
 [ -n "${GHCR_TOKEN_FILE:-}" ] && [ -r "${GHCR_TOKEN_FILE/#\~/$HOME}" ] \
   || { echo "GHCR_TOKEN_FILE must name a readable file holding a read:packages token."; exit 1; }
 command -v incus >/dev/null 2>&1 || { echo "incus is required on this machine."; exit 1; }
@@ -69,7 +80,19 @@ in_c sh -c "docker login ghcr.io -u '${GHCR_USER:-marlon-thomas}' --password-std
 say "Shipping the deploy bundle (compose.yaml + bin/) and the archive…"
 in_c mkdir -p "$W/secrets" "$W/backups"
 tar -C "$BUNDLE" -cf - compose.yaml bin | in_c tar -xf - -C "$W"
-incus file push "$ARCHIVE" "$NAME$W/backups/drill.tar.gz" >/dev/null
+DRILL_FILE=backups/drill.tar.gz
+[ "$ENCRYPTED" -eq 0 ] || DRILL_FILE=backups/drill.tar.gz.age
+incus file push "$ARCHIVE" "$NAME$W/$DRILL_FILE" >/dev/null
+
+# archive_stream — the archive as a gzip stream on this machine, for the counts below. An encrypted
+# one is decrypted in the drill container, so nothing is left here either way.
+archive_stream() {
+  if [ "$ENCRYPTED" -eq 0 ]; then
+    cat "$ARCHIVE"
+  else
+    in_c bash -c "cd $W && . ./bin/lib/common.sh && use_docker_socket && read_age_identity - && age_decrypt < $DRILL_FILE" < "$IDENTITY_FILE"
+  fi
+}
 
 # Drill-only configuration: fresh throw-away credentials (dumps restore with
 # --no-owner as the drill's own superuser, so production passwords are never
@@ -97,7 +120,11 @@ in_c sh -c "cd $W && docker compose up -d --wait postgres authentik-postgres obj
   || fail "Data plane did not become healthy in the drill container."
 
 say "Restoring with bin/restore.sh --data-only…"
-in_c sh -c "cd $W && ./bin/restore.sh --yes --data-only backups/drill.tar.gz" \
+if [ "$ENCRYPTED" -eq 0 ]; then
+  in_c sh -c "cd $W && ./bin/restore.sh --yes --data-only $DRILL_FILE"
+else
+  in_c sh -c "cd $W && ./bin/restore.sh --yes --data-only --identity - $DRILL_FILE" < "$IDENTITY_FILE"
+fi \
   || fail "restore.sh FAILED on this archive — the backup is NOT restorable."
 
 say "Verifying what landed…"
@@ -111,14 +138,14 @@ case "$FW" in 0*|'') check "app DB" fail "no successful migrations restored" ;; 
 
 AKU="$(in_c sh -c "cd $W && docker compose exec -T authentik-postgres psql -U authentik -d authentik -tAc \
   'select count(*) from authentik_core_user'" 2>/dev/null || echo "")"
-if tar -xzOf "$ARCHIVE" authentik.dump >/dev/null 2>&1; then
+if archive_stream | tar -xzOf - authentik.dump >/dev/null 2>&1; then
   case "$AKU" in ''|0) check "sign-in DB" fail "no authentik users restored" ;; *) check "sign-in DB" ok "$AKU users" ;; esac
 else
   check "sign-in DB" fail "archive has no authentik.dump (pre-fix backup format)"
 fi
 
-if tar -xzOf "$ARCHIVE" evidence.tar >/dev/null 2>&1; then
-  WANT="$(tar -xzOf "$ARCHIVE" evidence.tar | tar -tvf - | grep -c '^-' || true)"
+if archive_stream | tar -xzOf - evidence.tar >/dev/null 2>&1; then
+  WANT="$(archive_stream | tar -xzOf - evidence.tar | tar -tvf - | grep -c '^-' || true)"
   # shellcheck disable=SC2016  # expanded inside the init container
   GOT="$(in_c sh -c "cd $W && docker compose run --rm --no-deps -T --entrypoint /bin/sh init -c '
     mc alias set local http://object-storage:9000 \"\$(cat /run/secrets/minio_access)\" \"\$(cat /run/secrets/minio_secret)\" >/dev/null

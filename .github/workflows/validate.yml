@@ -24,3 +24,11 @@ jobs:
         run: |
           printf 'apk add -q --no-progress bash jq openssl >/dev/null\nbash /w/bin/tests/server-actions-test.sh\n' > "$RUNNER_TEMP/alpine-run.sh"
           docker run --rm -v "$PWD:/w:ro" -v "$RUNNER_TEMP:/s:ro" alpine:3.20 sh /s/alpine-run.sh
+      # Off-site encryption runs there as well, and that image has a real age for the round trips,
+      # which the plain run above skips.
+      - name: The off-site encryption self-tests on alpine with a real age
+        run: |
+          printf 'apk add -q --no-progress bash jq openssl age curl python3 >/dev/null\nset -e\nbash /w/bin/tests/backup-encrypt-test.sh\nbash /w/bin/tests/install-questions-test.sh\nbash /w/bin/tests/healthwatch-test.sh\n' > "$RUNNER_TEMP/alpine-encrypt.sh"
+          docker run --rm -v "$PWD:/w:ro" -v "$RUNNER_TEMP:/s:ro" alpine:3.20 sh /s/alpine-encrypt.sh
+      - name: Off-site encryption end to end (real age, real rsync over ssh to a write-only key, helper container)
+        run: ./bin/tests/backup-encrypt-e2e.sh

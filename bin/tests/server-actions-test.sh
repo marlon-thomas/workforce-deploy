@@ -74,6 +74,12 @@ case "$*" in
 esac
 exit 0
 SH
+# Real encryption is bin/tests/backup-encrypt-test.sh's job: this is only so a copy can be made here.
+cat > "$WORK/fake/age" <<'SH'
+#!/usr/bin/env bash
+printf 'age %s\n' "$*" >> "$FAKE_CALLS"
+printf 'age-encryption.org/v1\n'; cat
+SH
 cat > "$WORK/fake/rsync" <<'SH'
 #!/usr/bin/env bash
 printf 'rsync %s\n' "$*" >> "$FAKE_CALLS"
@@ -101,7 +107,7 @@ SH
 FAKE_CALLS="$CALLS"; FAKE_DIR="$WORK/fake"; FAKE_BUNDLE="$B"; FAKE_CURL_CONFIG="$WORK/curl-config"
 : > "$FAKE_CURL_CONFIG"
 # Jobs run with a clean environment, so the fakes carry these within them.
-for f in docker rsync curl; do
+for f in docker rsync curl age; do
   { head -n 1 "$WORK/fake/$f"
     printf 'FAKE_CALLS=%s\nFAKE_DIR=%s\nFAKE_BUNDLE=%s\nFAKE_CURL_CONFIG=%s\n' "$FAKE_CALLS" "$FAKE_DIR" "$FAKE_BUNDLE" "$FAKE_CURL_CONFIG"
     tail -n +2 "$WORK/fake/$f"
@@ -400,7 +406,21 @@ check "backup: nothing left behind" "$(find "$WRK" -maxdepth 1 -type f ! -name l
 # Off-site target, and a failed copy reported without calling the backup a failure
 sleep 1
 printf 'BACKUP_TARGET=user@backup.example.test:/srv\n' >> "$B/.env"
+# A target with no recipient: nothing is sent, and the result says so without the job failing
+clear_calls
 id="$(new_id)"; request "$id" backup-now '{}'; once
+check "no recipient: the backup still stands" "$(state_of "$id")" SUCCEEDED
+check "no recipient: it says so" "$(data_of "$id" offsite)" FAILED
+lacks "no recipient: nothing sent" "$(cat "$CALLS")" "rsync -az"
+id="$(new_id)"; request "$id" offsite-test '{}'; once
+check "no recipient, test copy: failed" "$(state_of "$id")" FAILED
+contains "no recipient, test copy: why, in words" "$(message_of "$id")" "BACKUP_ENCRYPT_RECIPIENT isn't set"
+lacks "no recipient, test copy: nothing sent" "$(cat "$CALLS")" "rsync -az"
+check "no recipient: the heartbeat knows" "$(jq -r .settings.offsite.encrypted "$RES/helper.json")" false
+sleep 1
+printf 'BACKUP_ENCRYPT_RECIPIENT=age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p\n' >> "$B/.env"
+id="$(new_id)"; request "$id" backup-now '{}'; once
+check "recipient: the heartbeat knows" "$(jq -r .settings.offsite.encrypted "$RES/helper.json")" true
 check "backup with a target: succeeded" "$(state_of "$id")" SUCCEEDED
 check "backup with a target: copied" "$(data_of "$id" offsite)" OK
 sleep 1
@@ -434,7 +454,7 @@ reset_env
 id="$(new_id)"; request "$id" offsite-test '{}'; once
 check "off-site test, no target: refused" "$(state_of "$id")" REFUSED
 check "off-site test, no target: why" "$(code_of "$id")" NO_TARGET
-printf 'BACKUP_TARGET=s3://bucket/path\nAWS_ACCESS_KEY_ID=AKIAEXAMPLE\nAWS_SECRET_ACCESS_KEY=topsecretawskey\nAWS_DEFAULT_REGION=eu-west-2\n' >> "$B/.env"
+printf 'BACKUP_ENCRYPT_RECIPIENT=age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p\nBACKUP_TARGET=s3://bucket/path\nAWS_ACCESS_KEY_ID=AKIAEXAMPLE\nAWS_SECRET_ACCESS_KEY=topsecretawskey\nAWS_DEFAULT_REGION=eu-west-2\n' >> "$B/.env"
 clear_calls
 id="$(new_id)"; request "$id" offsite-test '{}'; once
 check "off-site test, S3: succeeded" "$(state_of "$id")" SUCCEEDED
