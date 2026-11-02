@@ -91,13 +91,17 @@ if [ -n "${BACKUP_TARGET:-}" ]; then
   case "$BACKUP_TARGET" in
     s3://*)
       echo "Copying off-site to ${BACKUP_TARGET}…"
+      # .env sets these but doesn't export them, and `docker run -e NAME` only passes an exported value.
+      export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
       docker run --rm -i -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
         "$AWS_CLI_IMAGE" s3 cp - "${BACKUP_TARGET%/}/$(basename "$OUT")" --sse AES256 < "$OUT" || \
         echo "Off-site copy failed — check the backup target credentials (backup is still local)."
       ;;
     *:*)
       echo "Copying off-site to ${BACKUP_TARGET}…"
-      rsync -az "$OUT" "$BACKUP_TARGET/backups/" || echo "Off-site copy failed — backup is still local."
+      # An SSH target needs a key: secrets/backup_ssh_key (RUNBOOK), since cron has no agent or home.
+      RSYNC_SSH=(); if [ -s secrets/backup_ssh_key ]; then RSYNC_SSH=(-e "ssh -i secrets/backup_ssh_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=backups/.known_hosts"); fi
+      rsync -az "${RSYNC_SSH[@]}" "$OUT" "$BACKUP_TARGET/backups/" || echo "Off-site copy failed — backup is still local."
       ;;
   esac
 fi

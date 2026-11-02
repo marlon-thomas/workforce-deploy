@@ -376,3 +376,11 @@ Not yet scheduled — run it at least monthly (nightly once automated).
   (containers run as `app`/`authentik`/`postgres` users with read-only root filesystems)
 - Off-site backups: provide an S3/rsync target at install time
 - License enforcement arrives with deployment-spec backlog #5
+
+## Off-site backup targets
+
+`BACKUP_TARGET` in `.env` is `s3://bucket/path` or an rsync target (`user@host:path`). For S3, also put
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_DEFAULT_REGION` in `.env`. For rsync over SSH, put a private
+key allowed on the target in `secrets/backup_ssh_key` (the nightly job runs in a container with no SSH agent); the
+target's host key is remembered on first use. After changing either, run a backup and check Setup → Server health or
+`./bin/doctor.sh` for "off-site backup".
