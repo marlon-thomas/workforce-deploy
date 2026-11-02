@@ -1,6 +1,7 @@
-# questions.sh — the installer's mail questions (bin/install.sh questions 5 and 6), kept apart so
+# questions.sh — the installer's mail questions (bin/install.sh questions 5 and 6, and the
+# recovery email after question 3), kept apart so
 # bin/tests/install-questions-test.sh can answer them from a script. Sourced after bin/lib/common.sh;
-# uses install.sh's say, warn and read_mandatory. Sets SMTP_* and OPS_ALERT_EMAIL / OPS_HEARTBEAT_URL.
+# uses install.sh's say, warn and read_mandatory. Sets SMTP_*, OPS_ALERT_EMAIL / OPS_HEARTBEAT_URL and ADMIN_RECOVERY_EMAIL.
 # shellcheck shell=bash disable=SC2034  # the SMTP_* and OPS_* answers are read by install.sh
 
 # Question 6: who outside this server is emailed when a health check fails (bin/healthwatch.sh).
@@ -153,4 +154,46 @@ TXT
   SMTP_FROM="${SMTP_FROM// /}"; SMTP_FROM="${SMTP_FROM:-$fromdef}"
   say "Outgoing email: ${SMTP_HOST}:${SMTP_PORT} as ${SMTP_FROM}. Ask your provider for the DNS records (SPF and DKIM)"
   echo "     for $(printf '%s' "${SMTP_FROM##*@}") — without them, email from Workforce is likely to land in spam."
+}
+
+# Follow-up to question 3: the emergency administrator's recovery email (ADR-0026). It must be an
+# address NOT on this server: if the administrator is locked out of sign-in, webmail (which signs
+# in the same way) can't be reached either. Pre-filled from the environment file; Enter keeps it.
+ask_recovery_email() {
+  local def="${ADMIN_RECOVERY_EMAIL:-}" ans problems yn
+  def="${def// /}"
+  echo "     Recovery email for this administrator — an address you control that is NOT hosted on"
+  echo "     this server (e.g. your own Microsoft 365 or Gmail address), for when you're locked out."
+  while :; do
+    if [ -n "$def" ]; then
+      read -r -p "     Recovery email [${def}] (Enter = keep, - = none): " ans
+      [ -n "$ans" ] || ans="$def"
+      [ "$ans" != "-" ] || ans=""
+    else
+      read -r -p "     Recovery email (Enter = none for now): " ans
+    fi
+    ans="${ans// /}"
+    if [ -z "$ans" ]; then
+      ADMIN_RECOVERY_EMAIL=""
+      warn "No recovery email. To add one later, set ADMIN_RECOVERY_EMAIL in .env, then ./bin/update.sh <running version>."
+      return 0
+    fi
+    case "$ans" in
+      *,*) echo "     One address only." >&2; continue ;;
+    esac
+    problems="$(alert_address_problems "$ans" "${APP_HOSTNAME:-}" "${AUTH_HOSTNAME:-}")"
+    if printf '%s\n' "$problems" | grep -q '^bad:'; then
+      printf '%s\n' "$problems" | sed -n 's/^bad:/     /p' >&2
+      continue
+    fi
+    if [ -n "$problems" ]; then
+      printf '%s\n' "$problems" | sed -n 's/^own:/     /p' >&2
+      echo "     A recovery address must still work when this server is down. That's fine only if the"
+      echo "     domain's mail is hosted elsewhere (for example Microsoft 365)."
+      read -r -p "     Use it anyway? [y/N] " yn
+      case "$yn" in y|Y|yes|YES) ;; *) continue ;; esac
+    fi
+    ADMIN_RECOVERY_EMAIL="$ans"
+    return 0
+  done
 }

@@ -131,5 +131,20 @@ https://hc-ping.example/abc
 IN
 check "https only" "$OPS_HEARTBEAT_URL" "https://hc-ping.example/abc"
 
+# --- recovery email: a list refused, own domain declined, then an outside address; pre-fill kept
+fresh; unset ADMIN_RECOVERY_EMAIL
+ask_recovery_email > /dev/null 2>&1 <<'IN'
+a@x.example,b@x.example
+admin@carehome.example.test
+n
+me@elsewhere.example
+IN
+check "recovery email" "$ADMIN_RECOVERY_EMAIL" "me@elsewhere.example"
+ADMIN_RECOVERY_EMAIL=recovery@example.test
+ask_recovery_email > /dev/null 2>&1 <<'IN'
+
+IN
+check "recovery kept" "$ADMIN_RECOVERY_EMAIL" "recovery@example.test"
+
 echo "install questions self-test: ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]

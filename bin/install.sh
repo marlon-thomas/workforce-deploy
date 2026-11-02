@@ -719,6 +719,7 @@ else
     printf '     Passwords did not match — enter again (Ctrl+C to exit).\n'
   done
 fi
+ask_recovery_email
 
 printf '4/6  Off-site backups — paste a target (rsync host:path or s3://bucket) or press Enter for local-only: '
 read -r BACKUP_TARGET

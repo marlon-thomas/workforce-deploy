@@ -90,7 +90,8 @@ The wizard asks **six questions**:
    `workforce.<domain>` (staff) and `auth.<domain>` (sign-in), shows both, and
    verifies both point at this machine (waiting if not)
 2. Email for certificate notices
-3. Administrator password (Enter = generate one and show it once)
+3. Administrator password (Enter = generate one and show it once), then the emergency
+   administrator's **recovery email**: an address you control that is not hosted on this server
 4. Off-site backup target (Enter = local only — fine for the test)
 5. **Outgoing email**: the relay that delivers Workforce's email (reminders, invitations,
    password resets, server alerts). Pick Microsoft 365, Google Workspace, Brevo, SMTP2GO,
