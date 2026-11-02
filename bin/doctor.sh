@@ -219,6 +219,64 @@ CV=$(docker compose exec -T clamav sh -c "nc -z localhost 3310" >/dev/null 2>&1 
 if [ "$CV" = ok ]; then row "antivirus" ok "ClamAV listening"
 else row "antivirus" warn "not answering (it can take minutes on first ever start)"; fi
 
+# --- the app's own view of the services it calls (from inside the api/worker containers, which
+#     have bash, curl and openssl). A service can be up yet unreachable from the app (network, name).
+# in_app <service> <script> [args…] — runs a bash snippet in that container; non-zero if it fails.
+in_app() { local svc="$1"; shift; docker compose exec -T "$svc" bash -c "$@" >/dev/null 2>&1; }
+TCP='exec 3<>"/dev/tcp/$1/$2"'
+AV_BAD=""
+for svc in api worker; do
+  in_app "$svc" "timeout 5 bash -c '$TCP' _ clamav 3310" || AV_BAD="${AV_BAD:+${AV_BAD}, }${svc}"
+done
+if [ -z "$AV_BAD" ]; then row "antivirus from app" ok "api and worker reach ClamAV"
+else oprow "antivirus from app" fail "${AV_BAD} can't reach clamav:3310 — uploads stay unscanned and unreadable"; fi
+
+if in_app api 'curl -fsS --max-time 5 http://gotenberg:3000/health'; then
+  row "PDF service" ok "the api reaches Gotenberg"
+else
+  oprow "PDF service" fail "the api can't reach gotenberg:3000 — PDF reports and exports fail"
+fi
+
+# --- outgoing email (the app's notifications: invitations, password resets, reminders)
+if [ -z "${SMTP_HOST:-}" ]; then
+  if [ "${ENV_NAME:-prod}" = test ]; then
+    row "outgoing email" warn "SMTP_HOST not set — emails stay queued, nothing is sent"
+  else
+    oprow "outgoing email" fail "SMTP_HOST not set — invitations, password resets and reminders are never sent (set SMTP_* in .env; RUNBOOK question 5)"
+  fi
+else
+  SMTP_TO="${SMTP_HOST}:${SMTP_PORT:-587}"
+  if ! in_app api "timeout 6 bash -c '$TCP' _ \"\$1\" \"\$2\"" _ "${SMTP_HOST}" "${SMTP_PORT:-587}"; then
+    oprow "outgoing email" fail "the api can't reach the relay ${SMTP_TO} — emails stay queued"
+  elif [ "${SMTP_STARTTLS:-false}" = true ] && ! in_app api 'timeout 12 openssl s_client -starttls smtp -connect "$1:$2" -servername "$1" -brief </dev/null' _ "${SMTP_HOST}" "${SMTP_PORT:-587}"; then
+    oprow "outgoing email" fail "the relay ${SMTP_TO} answers but STARTTLS fails — check SMTP_PORT (587) and SMTP_STARTTLS"
+  else
+    row "outgoing email" ok "relay ${SMTP_TO} reachable from the api$([ "${SMTP_STARTTLS:-false}" = true ] && echo ' (STARTTLS ok)')"
+  fi
+fi
+if [ -z "${NOTIFICATION_BASE_URL:-}" ]; then
+  row "email links" warn "NOTIFICATION_BASE_URL not set — links in emails won't open Workforce"
+fi
+
+# --- secret files that must not be empty (names and sizes only — never contents). Some are empty
+#     by design until a feature is used: ai_api_key, mail_relay_password, feedback_github_key.
+EMPTY=""
+need_secret() { [ -s "secrets/$1" ] || EMPTY="${EMPTY:+${EMPTY}, }$1"; }
+for s in db_password minio_access minio_secret ak_db_password ak_secret oidc_client_id \
+         oidc_client_secret oidc_jwks_uri ai_credential_key; do need_secret "$s"; done
+case ",${COMPOSE_PROFILES:-}," in
+  *,staffmail,*) for s in mail_admin_password mail_db_password mail_lookup_key webmail_oidc_secret webmail_des_key; do need_secret "$s"; done ;;
+esac
+[ -z "${MAIL_RELAY_USER:-}" ] || need_secret mail_relay_password
+[ -z "${FEEDBACK_GITHUB_APP_ID:-}" ] || need_secret feedback_github_key
+if [ ! -d secrets ]; then
+  row "secret files" warn "no secrets/ folder here"
+elif [ -z "$EMPTY" ]; then
+  row "secret files" ok "none missing or empty"
+else
+  row "secret files" fail "missing or empty: ${EMPTY} — see RUNBOOK (secrets)"
+fi
+
 # --- sign-in server
 # Probe authentik readiness via the gateway auth vhost (stable path from the host),
 # falling back to exec python inside the container.
@@ -237,6 +295,12 @@ case ",${COMPOSE_PROFILES:-}," in
       running/unhealthy) oprow "mail server" fail "running but unhealthy — docker compose logs mail" ;;
       running/*)         oprow "mail server" ok "running" ;;
       *)                 oprow "mail server" fail "not running (${MS%/*}) — ./bin/staff-mail.sh status" ;;
+    esac
+    WS="$(docker compose ps --format '{{.State}}/{{.Health}}' webmail 2>/dev/null | head -1)" || WS=""
+    case "$WS" in
+      running/unhealthy) oprow "webmail" fail "running but unhealthy — docker compose logs webmail" ;;
+      running/*)         oprow "webmail" ok "running" ;;
+      *)                 oprow "webmail" fail "not running (${WS%/*}) — ./bin/staff-mail.sh status" ;;
     esac ;;
 esac
 # Sync between Workforce and the mail server (app DB, read-only). An organisation-level sync error
