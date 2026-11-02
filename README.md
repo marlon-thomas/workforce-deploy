@@ -204,9 +204,15 @@ in the source repo). Off until switched on:
 - Secrets (generated, never displayed): `mail_admin_password` (Workforce administers the mail
   server with it), `mail_db_password` (its own `stalwart` database on the suite's PostgreSQL —
   in the nightly backup and `restore.sh`), `mail_lookup_key` (the sign-in server asks Workforce which
-  mailbox a login has), `webmail_oidc_secret`, `webmail_des_key`; `mail_relay_password` starts empty.
+  mailbox a login has, and webmail which shared mailboxes it may use), `webmail_oidc_secret`,
+  `webmail_des_key`; `mail_relay_password` starts empty.
 - Webmail signs in through the suite's sign-in server only; people without a working mailbox are
   refused there. `./bin/staff-mail.sh off` stops the mail server and webmail and keeps their data.
+- **Shared mailboxes** (hr@, admin@ …) are set up in Workforce (Setup → Email). In webmail they
+  appear as folders under *Shared Folders*, beside the person's own (Roundcube's bundled
+  `subscriptions_option`, with subscriptions off for everyone), and their addresses are offered in
+  the From menu by our small plugin `webmail/plugins/workforce_identities` (it asks Workforce over
+  the private network after each sign-in; if Workforce is away, sign-in carries on unchanged).
 - Test appliance: `--private-ca` (the private CA, ADR-0014) and a host under the app's name, e.g.
   `--webmail-host webmail.<app host> --relay mailpit:1025` so nothing leaves; `bin/gen-test-ca.sh`
   covers `*.<app host>`.
