@@ -28,5 +28,15 @@ $config['use_https'] = true;
 $config['session_lifetime'] = 15;
 $config['login_autocomplete'] = 0;
 // One identity per person; the address itself can't be changed (no sending as someone else).
+// The workforce_identities plugin adds one more per shared mailbox the person may use (hr@ …), so
+// the From menu offers those too; the mail server refuses them to anyone who isn't a member.
 $config['identities_level'] = 3;
+// Shared mailboxes (mail-calendar-spec §11a) are folders under "Shared Folders" that nobody has
+// subscribed to: list every folder, not only subscribed ones, so they appear beside the person's
+// own as soon as they are given access (as in Outlook). Fixed for everyone (subscriptions_option).
+$config['use_subscriptions'] = false;
+$config['dont_override'] = ['use_subscriptions'];
+// Where the workforce_identities plugin asks which shared mailboxes someone may use (private network).
+$config['workforce_identities_url'] = 'http://api:8080/api/public/mail/shared-identities';
+$config['workforce_identities_key_file'] = '/run/secrets/mail_lookup_key';
 $config['enable_installer'] = false;

@@ -264,16 +264,27 @@ services:
       ROUNDCUBEMAIL_SMTP_PORT: "465"
       ROUNDCUBEMAIL_DB_TYPE: sqlite
       ROUNDCUBEMAIL_SKIN: elastic
-      ROUNDCUBEMAIL_PLUGINS: archive,zipdownload,markasjunk
+      # subscriptions_option (bundled) lists shared mailboxes' folders without subscribing;
+      # workforce_identities (ours, webmail/plugins) offers their addresses in the From menu.
+      ROUNDCUBEMAIL_PLUGINS: archive,zipdownload,markasjunk,subscriptions_option,workforce_identities
       ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE: 25M
     # Its entrypoint (root) reads the OAuth client secret natively; the session key is read again
     # by Apache's user at every request, which can't open a secret file under the rootless daemon,
     # so it is handed over as the environment variable the image also supports.
+    # Our plugin goes into the image's Roundcube source, which the image copies into a new
+    # container's web root (and into an existing one on restart, here). Mounting it straight into
+    # the web root makes the image find a non-empty web root and stall each new container.
     entrypoint:
       - /bin/sh
       - -c
       - |
         export ROUNDCUBEMAIL_DES_KEY="$$(cat /run/secrets/webmail_des_key)"
+        for root in /usr/src/roundcubemail /var/www/html; do
+          if [ -d "$$root/plugins" ]; then
+            rm -rf "$$root/plugins/workforce_identities"
+            cp -R /opt/workforce/plugins/workforce_identities "$$root/plugins/"
+          fi
+        done
         exec /docker-entrypoint.sh apache2-foreground
     secrets:
       - source: webmail_oidc_secret
@@ -281,9 +292,13 @@ services:
         mode: 0444
       - source: webmail_des_key
         mode: 0444
+      # Asked by the workforce_identities plugin: which shared mailboxes someone may send from.
+      - source: mail_lookup_key
+        mode: 0444
     volumes:
       - webmail_data:/var/roundcube/db
       - ./webmail:/var/roundcube/config:ro
+      - ./webmail/plugins/workforce_identities:/opt/workforce/plugins/workforce_identities:ro
     logging: *default-logging
     stop_grace_period: 20s
     depends_on:
