@@ -131,8 +131,10 @@ authentik_version() {
 secret_modes() {
   [ -d secrets ] || return 0
   chmod 700 secrets
-  find secrets -maxdepth 1 -type f ! -name initial-admin-password -exec chmod 644 {} +
+  find secrets -maxdepth 1 -type f ! -name initial-admin-password ! -name backup_ssh_key -exec chmod 644 {} +
   [ -e secrets/initial-admin-password ] && chmod 400 secrets/initial-admin-password
+  # ssh refuses a private key anyone else could read; only the backup container uses this one.
+  [ -e secrets/backup_ssh_key ] && chmod 600 secrets/backup_ssh_key
   return 0
 }
 
