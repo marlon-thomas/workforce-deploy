@@ -1,0 +1,145 @@
+---
+# ADR-0026 (Workforce): the emergency administrator's recovery address.
+#
+# The installer's Administrator ("admin", made by the Workforce blueprint) is the emergency account
+# for setup and recovery. Its email is a recovery address the operator reads OUTSIDE this server
+# (ADMIN_RECOVERY_EMAIL): mail on this server is read by signing in here, which is exactly what a
+# locked-out administrator cannot do. authentik's own bootstrap superuser (akadmin) is a separate
+# account and gets the same address. Runs on every identity converge — install.sh, and update.sh
+# (--tags identity) — and is idempotent. Empty ADMIN_RECOVERY_EMAIL = leave both as they are.
+#
+# Order matters: Workforce knows the Administrator by its email (the provider's sign-in subject is
+# the email, sub_mode user_email), so the Workforce login is moved to the new address FIRST, then
+# authentik is changed. A failure before authentik changes leaves sign-in exactly as it was, and a
+# re-run after a later failure finds the login already moved and completes the change.
+
+- name: Recovery address from the deployment
+  ansible.builtin.set_fact:
+    recovery_email: "{{ admin_recovery_email | default('', true) | trim | lower }}"
+
+- name: Recovery address — checked before anything changes
+  when: recovery_email | length > 0
+  block:
+    - name: Recovery address looks like an email address
+      ansible.builtin.assert:
+        that: recovery_email is match('^[^@\s]+@[^@\s]+\.[^@\s]+$')
+        fail_msg: >-
+          ADMIN_RECOVERY_EMAIL='{{ recovery_email }}' is not an email address. Set it in .env to an
+          address you read outside this server, then run ./bin/update.sh again. Nothing was changed.
+        quiet: true
+
+    - name: Staff mail domains this server hosts (none before the app's first start)
+      ansible.builtin.command:
+        argv: [docker, exec, workforce-deploy-postgres-1, psql, -X, -At, -U, workforce_app, -d, workforce, -c,
+               "select staff_domain from mail_setting where staff_domain is not null"]
+      register: ak_staff_domains
+      changed_when: false
+      failed_when: false
+      environment:
+        DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
+
+    - name: Recovery address is not on this server
+      vars:
+        recovery_domain: "{{ recovery_email.split('@')[-1] }}"
+        staff_domains: "{{ (ak_staff_domains.stdout_lines | default([])) if (ak_staff_domains.rc | default(1)) == 0 else [] }}"
+        hosted: "{{ ([app_hostname, auth_hostname, webmail_hostname | default('', true)] + staff_domains) | map('trim') | map('lower') | select | list }}"
+        on_this_server: >-
+          {% set ns = namespace(hit=false) %}{% for d in hosted %}{% if recovery_domain == d or recovery_domain.endswith('.' ~ d) %}{% set ns.hit = true %}{% endif %}{% endfor %}{{ ns.hit }}
+      ansible.builtin.assert:
+        that: not (on_this_server | trim | bool)
+        fail_msg: >-
+          ADMIN_RECOVERY_EMAIL is on '{{ recovery_domain }}', which this server hosts. A locked-out
+          administrator could not read it: mail here is read by signing in here. Set an address
+          outside this server in .env, then run ./bin/update.sh again. Nothing was changed.
+        quiet: true
+
+    - name: Recovery-address script copied into authentik
+      ansible.builtin.command: >-
+        docker cp {{ role_path }}/files/admin-recovery-email.py
+        workforce-deploy-authentik-server-1:/tmp/admin-recovery-email.py
+      changed_when: false
+      environment:
+        DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
+
+    - name: Administrator accounts' email in authentik now
+      ansible.builtin.command:
+        argv: [docker, exec, -i, -w, /, workforce-deploy-authentik-server-1,
+               ak, shell, -c, "exec(open('/tmp/admin-recovery-email.py').read())"]
+        stdin: "{{ {'mode': 'read', 'email': recovery_email} | to_json }}"
+      register: ak_recovery_read
+      until: (ak_recovery_read.stdout_lines | default([]) | select('match', '^ADMIN_RECOVERY ') | list | length) > 0
+      retries: 10
+      delay: 6
+      changed_when: false
+      environment:
+        DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
+
+    - name: What authentik reported
+      ansible.builtin.set_fact:
+        ak_recovery_now: "{{ (ak_recovery_read.stdout_lines | select('match', '^ADMIN_RECOVERY ') | first)[15:] | from_json }}"
+
+    - name: No other sign-in account uses the recovery address
+      ansible.builtin.assert:
+        that: (ak_recovery_now.others | int) == 0
+        fail_msg: >-
+          ADMIN_RECOVERY_EMAIL is already the email of another sign-in account, and sign-in is by email:
+          the emergency administrator needs an address of its own. Choose another in .env, then run
+          ./bin/update.sh again. Nothing was changed.
+        quiet: true
+
+    - name: The Administrator's Workforce login moved to the recovery address (audited)
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - -i
+          - workforce-deploy-postgres-1
+          - psql
+          - -X
+          - -q
+          - -At
+          - -U
+          - workforce_app
+          - -d
+          - workforce
+          - -v
+          - "issuer=https://{{ auth_hostname }}/application/o/workforce/"
+          - -v
+          - "old={{ ak_recovery_now.admin | default('', true) }}"
+          - -v
+          - "new={{ recovery_email }}"
+          - -v
+          - "detail=recovery address set by the deployment (ADMIN_RECOVERY_EMAIL): {{ recovery_email[0] }}•••@{{ recovery_email.split('@')[-1] }}; sign-in moved with it"
+          - -f
+          - "-"
+        stdin: "{{ lookup('ansible.builtin.file', role_path ~ '/files/admin-recovery-email.sql') }}"
+      register: wf_recovery_move
+      until: (wf_recovery_move.rc | default(1)) == 0
+      retries: 10
+      delay: 6
+      changed_when: (wf_recovery_move.stdout | default('')) is search('MOVED [1-9]')
+      environment:
+        DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
+
+    - name: The recovery address is not someone's own Workforce sign-in
+      ansible.builtin.assert:
+        that: "'RECOVERY_EMAIL_TAKEN' not in wf_recovery_move.stdout"
+        fail_msg: >-
+          ADMIN_RECOVERY_EMAIL is already someone's own Workforce sign-in. The emergency administrator
+          needs an address of its own: choose another in .env, then run ./bin/update.sh again.
+          Nothing was changed.
+        quiet: true
+
+    - name: Recovery address set on the administrator accounts in authentik
+      ansible.builtin.command:
+        argv: [docker, exec, -i, -w, /, workforce-deploy-authentik-server-1,
+               ak, shell, -c, "exec(open('/tmp/admin-recovery-email.py').read())"]
+        stdin: "{{ {'mode': 'write', 'email': recovery_email} | to_json }}"
+      register: ak_recovery_write
+      when: >-
+        (ak_recovery_now.admin | default('', true) | lower) != recovery_email
+        or (ak_recovery_now.akadmin is not none and (ak_recovery_now.akadmin | default('', true) | lower) != recovery_email)
+      failed_when: (ak_recovery_write.stdout_lines | default([]) | select('match', '^ADMIN_RECOVERY ') | list | length) == 0
+      changed_when: true
+      environment:
+        DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
