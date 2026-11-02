@@ -12,11 +12,20 @@
 # archives (--tag final, …) are kept, except the routine pre-update /
 # pre-authentik-upgrade ones (newest 5 of each).
 # Optional encrypted off-site copy (BACKUP_TARGET).
+#
+#   ./bin/backup.sh [--tag NAME]     make an archive, copy it off-site, apply retention
+#   ./bin/backup.sh --offsite-only   copy the newest archive off-site by the same code and say whether
+#                                    that worked. Exit 3 it failed, 4 no target set, 5 no archive yet
+# One at a time: exit 75 if another backup is running. A tagged one, which an update or upgrade is
+# waiting on, waits for it instead.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TAG=""
-[ "${1:-}" = "--tag" ] && { TAG="-${2}"; shift 2; }
+TAG=""; OFFSITE_ONLY=0
+case "${1:-}" in
+  --tag) TAG="-${2}"; shift 2 ;;
+  --offsite-only) OFFSITE_ONLY=1; shift ;;
+esac
 
 [ -f .env ] || { echo "No deploy/.env — run install.sh first."; exit 1; }
 # shellcheck disable=SC1091
@@ -32,6 +41,60 @@ AWS_CLI_IMAGE="amazon/aws-cli@sha256:6977c83ae3dc99f28fcf8276b9ea5eec33833cd5be4
 
 umask 077
 mkdir -p backups
+
+# Nothing else takes this lock, and it goes when the process does, however it ended.
+if { exec 8>>backups/.backup.lock; } 2>/dev/null && command -v flock >/dev/null 2>&1; then
+  if [ -n "$TAG" ]; then
+    flock -w 3600 8 || { echo "Another backup has been running for over an hour; not waiting any longer."; exit 75; }
+  elif ! flock -n 8; then
+    echo "Another backup is already running."; exit 75
+  fi
+fi
+
+# offsite_copy ARCHIVE — streamed through stdin: no host bind mount, so this works from the backup
+# container as well as from the host. Says what happened, and returns non-zero when it didn't work.
+offsite_copy() {
+  case "$BACKUP_TARGET" in
+    s3://*)
+      echo "Copying off-site to ${BACKUP_TARGET}…"
+      # .env sets these but doesn't export them, and `docker run -e NAME` only passes an exported value.
+      export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
+      docker run --rm -i -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
+        "$AWS_CLI_IMAGE" s3 cp - "${BACKUP_TARGET%/}/$(basename "$1")" --sse AES256 < "$1" || {
+        echo "Off-site copy failed — check the backup target credentials (backup is still local)."
+        return 1
+      }
+      ;;
+    *:*)
+      echo "Copying off-site to ${BACKUP_TARGET}…"
+      # An SSH target needs a key: secrets/backup_ssh_key (RUNBOOK), since cron has no agent or home.
+      RSYNC_SSH=(); if [ -s secrets/backup_ssh_key ]; then RSYNC_SSH=(-e "ssh -i secrets/backup_ssh_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=backups/.known_hosts"); fi
+      rsync -az "${RSYNC_SSH[@]}" "$1" "$BACKUP_TARGET/backups/" || {
+        echo "Off-site copy failed — backup is still local."
+        return 1
+      }
+      ;;
+    *)
+      echo "Off-site copy failed — BACKUP_TARGET is neither s3://… nor host:path (backup is still local)."
+      return 1
+      ;;
+  esac
+}
+
+if [ "$OFFSITE_ONLY" -eq 1 ]; then
+  [ -n "${BACKUP_TARGET:-}" ] || { echo "No off-site target is set (BACKUP_TARGET in .env)."; exit 4; }
+  NEWEST=""
+  for p in backups/*.tar.gz; do
+    [ -e "$p" ] || continue
+    if [ -z "$NEWEST" ] || [ "$p" -nt "$NEWEST" ]; then NEWEST="$p"; fi
+  done
+  [ -n "$NEWEST" ] || { echo "No backup to copy yet."; exit 5; }
+  echo "Testing the off-site copy with ${NEWEST}…"
+  RC=0; offsite_copy "$NEWEST" || RC=3
+  echo "Off-site copy test finished."
+  exit "$RC"
+fi
+
 STAMP="$(date +%Y-%m-%d_%H%M%S)"
 OUT="backups/${STAMP}${TAG}.tar.gz"
 TMP="$(mktemp -d)"
@@ -85,25 +148,9 @@ chmod 600 "$OUT"
 echo "Wrote $OUT ($(du -h "$OUT" | cut -f1))"
 
 # --- off-site (optional) -----------------------------------------------------
-# Streamed through stdin: no host bind mount, so this works from the nightly
-# backup container as well as from the host.
+# A failed copy is reported and the local archive stands: this isn't a failed backup.
 if [ -n "${BACKUP_TARGET:-}" ]; then
-  case "$BACKUP_TARGET" in
-    s3://*)
-      echo "Copying off-site to ${BACKUP_TARGET}…"
-      # .env sets these but doesn't export them, and `docker run -e NAME` only passes an exported value.
-      export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
-      docker run --rm -i -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
-        "$AWS_CLI_IMAGE" s3 cp - "${BACKUP_TARGET%/}/$(basename "$OUT")" --sse AES256 < "$OUT" || \
-        echo "Off-site copy failed — check the backup target credentials (backup is still local)."
-      ;;
-    *:*)
-      echo "Copying off-site to ${BACKUP_TARGET}…"
-      # An SSH target needs a key: secrets/backup_ssh_key (RUNBOOK), since cron has no agent or home.
-      RSYNC_SSH=(); if [ -s secrets/backup_ssh_key ]; then RSYNC_SSH=(-e "ssh -i secrets/backup_ssh_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=backups/.known_hosts"); fi
-      rsync -az "${RSYNC_SSH[@]}" "$OUT" "$BACKUP_TARGET/backups/" || echo "Off-site copy failed — backup is still local."
-      ;;
-  esac
+  offsite_copy "$OUT" || true
 fi
 
 # --- retention ---------------------------------------------------------------

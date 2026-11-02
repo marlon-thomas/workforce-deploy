@@ -118,6 +118,62 @@ connects the sign-in server, and finishes with a green/red health table.
   `ADMIN_RECOVERY_EMAIL` in `.env`, then `./bin/update.sh <running version>` (README → "The
   emergency administrator and its recovery email").
 
+## 6a. Jobs from the app
+
+**Start here, not with a shell.** The registered manager or a director can run the routine jobs from
+Setup in Workforce, and nobody needs to sign in to the server for them:
+
+| Job | Where | By hand, if the app can't |
+|---|---|---|
+| Back up now; test the off-site copy | Setup → Server health | `./bin/backup.sh`; `./bin/backup.sh --offsite-only` |
+| Staff email on and off | Setup → Email | `./bin/staff-mail.sh on\|off` (top of the script) |
+| Outgoing email relay, with a test send before saving | Setup → Email | `SMTP_*` in `.env`, then `docker compose up -d worker api` |
+| Alert address and uptime ping address, then a test alert | Setup → Server health | §7b, §7c |
+
+Updates, restore, the recovery address, DNS and port 25 stay outside the app (Workforce ADR-0026, ADR-0031).
+
+**How it works.** The app has no docker socket, no shell, and no write access to `.env` or `secrets/`.
+It leaves a request in `actions/requests/`; `bin/server-actions.sh`, run by cron in the `backup`
+container, treats it as hostile, does only what's on its fixed list, and writes a result to
+`actions/results/`. A request not picked up in 2 minutes expires and never runs later. One job at a
+time, each with a time limit. Everything it does is in `logs/server-actions.log`, with secrets masked;
+the app's audit trail says who asked. Changes to the relay, the alert address and staff email also
+send a note to the alert address.
+
+| Path | Owner, mode | Who |
+|---|---|---|
+| `actions/requests/` | uid 999 (the app), 0700; files 0600 | The app writes. The helper, root in its container, reads and deletes. A password is on disk only until the helper reads it |
+| `actions/results/` | helper, 0755; files 0644 | The helper writes. Mounted read-only into `api` only. Never holds a secret |
+| `actions/work/` | helper, 0700 | The lock, the file being read, requests already seen |
+
+The helper sets those modes on every run, so `actions/requests/` can't be listed by the service account
+on the host (it belongs to a mapped uid under rootless docker). Removing the whole bundle needs root.
+`backup.sh` doesn't archive `actions/`, and git ignores it.
+
+**Turning it off.** `SERVER_ACTIONS=off` in `.env` stops the helper at its next pass, needs no restart,
+and doesn't rely on the app: requests get a written refusal. `WORKFORCE_SERVER_ACTIONS=false` then
+`docker compose up -d api` takes the buttons away; **the hosted platform sets this**, and they're also
+gone whenever `WORKFORCE_SERVER_HEALTH_VISIBLE` is false.
+
+**When the app says the helper isn't running.** `docker compose ps backup`, then
+`docker compose up -d backup`. `actions/results/helper.json` is rewritten about every minute, so its
+time shows whether cron is alive. `docker compose logs backup` shows a failed `apk add` (the container
+installs `jq`, `curl` and the others when it starts, so it needs the network then). An older install
+gets the new schedule the first time the container is recreated, which `update.sh` does.
+
+**What it can't reach.** Port 25 and DNS. Inside a container the helper can't see the host's
+`net.ipv4.ip_unprivileged_port_start`, so "staff email on" finds out when the mail server fails to
+start: it puts the settings back and says to run, once, as root,
+`sysctl -w net.ipv4.ip_unprivileged_port_start=25`.
+
+**Relay passwords.** Stored in `.env` in single quotes. Refused: a single quote, a backslash (compose
+reads `\'` as not closing the quote, so a value ending in one stops the whole stack), non-ASCII, `${`
+and `#{` (the app's settings resolve placeholders), and fewer than 6 characters. The installer now
+refuses a password ending in a backslash too.
+
+**Test appliance.** `SERVER_ACTIONS_PLAIN_RELAY=mailpit:1025` lets that one relay be saved without
+STARTTLS. It's only read from `.env`, so the app can't ask for it. **Never set it in production.**
+
 ## 7. When something looks wrong
 
 ```bash
@@ -201,7 +257,7 @@ never through the server's own mail server. So:
 Test appliance: `environments/test.env` sets `OPS_ALERT_EMAIL=ops-alerts@example.test`, which
 mailpit catches (`http://127.0.0.1:8025` on the box).
 
-**Try it:**
+**Change the address** from Setup → Server health, which sends a test alert (§6a). By hand:
 
 ```bash
 ./bin/healthwatch.sh --test      # sends a test alert now — check it arrives
@@ -213,9 +269,9 @@ and tools as the 15-minute schedule (`--here` runs on the host instead). Exit co
 passing, 1 something failing, 2 configuration problem (e.g. `OPS_ALERT_EMAIL` empty for
 `--test`), 3 the email could not be sent.
 
-**Switching it on for an existing installation.** `update.sh` does not rewrite `.env` (only
-the installer does), so add the setting by hand, then recreate the backup container so it runs
-the new schedule:
+**Switching it on for an existing installation, by hand.** Setup → Server health is the first
+choice. Without it: `update.sh` does not rewrite `.env` (only the installer does), so add the
+setting by hand, then recreate the backup container so it runs the new schedule:
 
 ```bash
 cd /opt/workforce-deploy
@@ -263,8 +319,9 @@ what Setup → Server health and the server items in Setup status read:
   `WORKFORCE_SERVER_HEALTH_VISIBLE=false` in `.env` and run `docker compose up -d api` to turn the
   page off and have Setup status say only what is configured. **The hosted platform sets it off**,
   because a tenant must not see server details.
-- **The off-site result** comes from the newest nightly run in `backups/cron.log`, so a copy made
-  by running `./bin/backup.sh` by hand doesn't change it.
+- **The off-site result** comes from the newest run in `backups/cron.log`: the nightly one, or a backup
+  or off-site test started from the app, which log there too. A copy made by running `./bin/backup.sh`
+  by hand doesn't change it.
 
 ## 7c. Outside uptime check
 
@@ -382,5 +439,5 @@ Not yet scheduled — run it at least monthly (nightly once automated).
 `BACKUP_TARGET` in `.env` is `s3://bucket/path` or an rsync target (`user@host:path`). For S3, also put
 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_DEFAULT_REGION` in `.env`. For rsync over SSH, put a private
 key allowed on the target in `secrets/backup_ssh_key` (the nightly job runs in a container with no SSH agent); the
-target's host key is remembered on first use. After changing either, run a backup and check Setup → Server health or
-`./bin/doctor.sh` for "off-site backup".
+target's host key is remembered on first use. After changing either, use **Test the off-site copy** on Setup → Server
+health (or `./bin/backup.sh --offsite-only`), which sends the newest archive by the same code as the nightly run.

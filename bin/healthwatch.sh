@@ -335,14 +335,17 @@ json_or_null() { if [ -n "$1" ]; then json_str "$1"; else printf 'null'; fi; }
 iso_time() { date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ'; }
 version_or_empty() { case "$1" in ''|*[!A-Za-z0-9._+-]*) ;; *) printf '%s' "$1" ;; esac; }
 
-# offsite_last_copy — the newest finished nightly run's off-site copy, from the log backup.sh writes
-# (it logs a failure and keeps the local archive). OK | FAILED | UNKNOWN (no copy in that run).
+# offsite_last_copy — the newest finished run's off-site copy, from the log backup.sh writes (it logs
+# a failure and keeps the local archive): the nightly one, or one started from the app, which goes in
+# the same log (bin/server-actions.sh). OK | FAILED | UNKNOWN (no copy in that run).
 offsite_last_copy() {
   { tail -n 400 "$HW_BACKUP_DIR/cron.log" 2>/dev/null || true; } | awk '
     /^Dumping the application database/ { copy = 0; bad = 0 }
+    /^Testing the off-site copy/        { copy = 0; bad = 0 }
     /^Copying off-site to /             { copy = 1 }
     /Off-site copy failed/              { bad = 1; result = "FAILED" }
     /^Retention applied/                { result = !copy ? "UNKNOWN" : (bad ? "FAILED" : "OK") }
+    /^Off-site copy test finished/      { result = !copy ? "UNKNOWN" : (bad ? "FAILED" : "OK") }
     END                                 { print (result == "" ? "UNKNOWN" : result) }'
 }
 
