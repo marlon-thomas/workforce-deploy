@@ -105,6 +105,18 @@ compose_state() { # compose_state <service> — "running", "exited", … or noth
   docker compose ps --format '{{.State}}' "$1" 2>/dev/null | head -1 || true
 }
 
+# --- rootless Docker's port driver: the default shows every client as the Docker gateway, so
+#     signature certificates and the audit would hold a meaningless address (host only: the
+#     backup container can't see the daemon's process).
+if [ "$IN_STACK" -eq 0 ] && command -v pgrep >/dev/null 2>&1; then
+  RK="$(pgrep -af 'rootlesskit --state-dir' 2>/dev/null | head -1)" || RK=""
+  case "$RK" in
+    "") : ;;
+    *--port-driver=slirp4netns*) row "client addresses" ok "real addresses reach the app" ;;
+    *) row "client addresses" warn "rootless Docker hides client addresses, so certificates and the audit record the Docker gateway — see RUNBOOK (client addresses)" ;;
+  esac
+fi
+
 # --- containers
 # In the backup container, one clear failure rather than every service "not running" (a wrong
 # DOCKER_SOCK means nightly backups and these checks cannot run at all).

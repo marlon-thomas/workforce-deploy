@@ -12,6 +12,7 @@
       - unzip
       - ca-certificates
       - openssl
+      - slirp4netns
     state: present
 
 - name: Service user exists

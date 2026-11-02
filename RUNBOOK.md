@@ -132,6 +132,23 @@ Paste the output to support. The "reachability" row failing almost always means 
 notifications, alerting) then report at most WARN, so they never fail an install or roll
 back a good update. Run it by hand without `--gate` to see them as FAILs.
 
+## 7a. Client addresses
+
+Rootless Docker's default port driver shows every client as the Docker gateway (`172.x`), which puts a
+meaningless address on signature certificates, in the audit and in the mail server's filtering. New installs
+use the `slirp4netns` driver, which keeps the real address (it's a little slower, which doesn't matter
+here). `./bin/doctor.sh` warns under "client addresses" if a server still has the default. To change one, as
+root, once (the stack restarts, about a minute of downtime):
+
+```bash
+apt-get install -y slirp4netns
+d=/home/workforce_app_sa/.config/systemd/user/docker.service.d; mkdir -p "$d"
+printf '[Service]\nEnvironment=DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns\nEnvironment=DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=slirp4netns\n' > "$d/source-ip.conf"
+chown -R workforce_app_sa: "$d"
+sudo -u workforce_app_sa XDG_RUNTIME_DIR=/run/user/$(id -u workforce_app_sa) systemctl --user daemon-reload
+sudo -u workforce_app_sa XDG_RUNTIME_DIR=/run/user/$(id -u workforce_app_sa) systemctl --user restart docker
+```
+
 ## 7b. Server alerts (health watch)
 
 So that someone **outside** the server hears about a problem — even when the app, or the

@@ -441,7 +441,7 @@ bootstrap() {
     command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
     usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$SERVICE_USER"
     loginctl enable-linger "$SERVICE_USER"
-    apt-get -qq install -y uidmap dbus-user-session >/dev/null 2>&1 || true
+    apt-get -qq install -y uidmap dbus-user-session slirp4netns >/dev/null 2>&1 || true
     # 25: staff email's SMTP port (bin/staff-mail.sh); 80/443: the gateway.
     sysctl -w net.ipv4.ip_unprivileged_port_start=25 >/dev/null
     if grep -q "ip_unprivileged_port_start" /etc/sysctl.conf 2>/dev/null; then
@@ -455,9 +455,24 @@ bootstrap() {
       fail "Rootless Docker setup failed. If this kernel lacks unprivileged user
      namespaces (some OpenVZ/LXC images), re-run with --system-docker."
     fi
+    # Real client addresses: the default port driver shows every client as the Docker gateway, which
+    # would put a meaningless address on signature certificates, in the audit and in mail filtering.
+    mkdir -p "/home/${SERVICE_USER}/.config/systemd/user/docker.service.d"
+    cat > "/home/${SERVICE_USER}/.config/systemd/user/docker.service.d/source-ip.conf" <<'DROPIN'
+[Service]
+Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns
+Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=slirp4netns
+DROPIN
+    chown -R "$SERVICE_USER:$SERVICE_USER" "/home/${SERVICE_USER}/.config/systemd/user/docker.service.d"
     sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
       XDG_RUNTIME_DIR="/run/user/$(id -u "$SERVICE_USER")" \
-      systemctl --user enable --now docker
+      systemctl --user daemon-reload
+    sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
+      XDG_RUNTIME_DIR="/run/user/$(id -u "$SERVICE_USER")" \
+      systemctl --user enable docker
+    sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
+      XDG_RUNTIME_DIR="/run/user/$(id -u "$SERVICE_USER")" \
+      systemctl --user restart docker
     mkdir -p "/home/${SERVICE_USER}/.docker"
     chown -R "$SERVICE_USER:$SERVICE_USER" "/home/${SERVICE_USER}/.docker"
     cat > "/home/${SERVICE_USER}/.profile.d-docker" <<PROF
