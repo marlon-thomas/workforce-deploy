@@ -382,5 +382,10 @@ Not yet scheduled — run it at least monthly (nightly once automated).
 `BACKUP_TARGET` in `.env` is `s3://bucket/path` or an rsync target (`user@host:path`). For S3, also put
 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_DEFAULT_REGION` in `.env`. For rsync over SSH, put a private
 key allowed on the target in `secrets/backup_ssh_key` (the nightly job runs in a container with no SSH agent); the
-target's host key is remembered on first use. After changing either, run a backup and check Setup → Server health or
+target's host key is remembered on first use. The target needs `rsync`. Restrict the key to writing, so that someone who
+takes over this server can't read or delete your older backups: in the target account's `authorized_keys`, put
+`command="/usr/bin/rrsync -wo /srv/backups",restrict ssh-ed25519 AAAA…` (`rrsync` also needs `python3`). Then
+`BACKUP_TARGET=user@host:`; copies land in `/srv/backups/backups/`. Nothing prunes the target, so it keeps growing
+until you remove old copies there. An rsync copy is not encrypted, so the target must be somewhere you'd trust with
+staff and care records. After changing either, run a backup and check Setup → Server health or
 `./bin/doctor.sh` for "off-site backup".
