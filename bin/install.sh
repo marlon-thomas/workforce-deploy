@@ -326,6 +326,7 @@ INV
   WFV_ops_alert_from="${OPS_ALERT_FROM:-}" \
   WFV_ops_heartbeat_url="${OPS_HEARTBEAT_URL:-}" \
   WFV_ai_test_services="${AI_TEST_SERVICES:-false}" \
+  WFV_server_health_visible="${WORKFORCE_SERVER_HEALTH_VISIBLE:-true}" \
   WFV_admin_recovery_email="${ADMIN_RECOVERY_EMAIL:-}" \
   WFV_backup_target="${BACKUP_TARGET:-}" \
   WFV_docker_sock="${ANSIBLE_SOCK}" \

@@ -232,6 +232,40 @@ to `OPS_ALERT_EMAIL` need no restart. New installs take it from `environments/<e
 **What it cannot do.** A server that is off, or has lost its network, cannot send email about
 it. That is what the outside uptime check (§7c) is for.
 
+**What the app sees.** Each run also replaces `status/health.json` (temp file + rename), which is
+what Setup → Server health and the server items in Setup status read:
+
+```json
+{
+  "schema": 1,
+  "checkedAt": "2026-11-02T10:15:03Z",
+  "version": { "running": "0.2.98", "configured": "0.2.98" },
+  "checks": [ { "status": "OK", "check": "database", "detail": "accepting connections" } ],
+  "backup": { "lastAt": "2026-11-02T02:00:41Z", "sizeBytes": 73741824, "kept": 9,
+              "offsite": { "configured": true, "kind": "S3", "lastCopy": "OK" } }
+}
+```
+
+- **Masked.** The rows are doctor's, with these hidden wherever they appear: the relay's user name
+  and password, the uptime ping URL, `BACKUP_TARGET` and its keys, the contents of the small files
+  in `secrets/`, a URL's login, anything after `password=`, `token:` and the like, and long tokens.
+  Email addresses keep their first letter and domain. If doctor stopped early, the file says so
+  without its last words; the email and `logs/healthwatch.log` still have them. Emails to
+  `OPS_ALERT_EMAIL` are not masked: they go to you, not to people using the app.
+- **Permissions.** The folder is 0755 and the file 0644, set on every run whatever the umask,
+  because the app runs as uid 999. A file it can't read shows as a problem on the page, never as
+  a green one. The folder is mounted read-only into the `api` container only, as a folder because
+  a mounted file would keep pointing at the old copy after a rename.
+- **Failure.** A write that fails is logged (`status file NOT written`) and changes nothing else:
+  the alert and the heartbeat have already gone by then. The page reports that the watch hasn't
+  been heard from once the file is over an hour old, or that it hasn't reported at all.
+- **Who sees it.** The registered manager, director and data administrator. Set
+  `WORKFORCE_SERVER_HEALTH_VISIBLE=false` in `.env` and run `docker compose up -d api` to turn the
+  page off and have Setup status say only what is configured. **The hosted platform sets it off**,
+  because a tenant must not see server details.
+- **The off-site result** comes from the newest nightly run in `backups/cron.log`, so a copy made
+  by running `./bin/backup.sh` by hand doesn't change it.
+
 ## 7c. Outside uptime check
 
 Two free outside services cover "the whole server is gone". Both are accounts the operator

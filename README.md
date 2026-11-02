@@ -15,7 +15,7 @@ You do NOT need the private source repo to deploy or operate the product.
 | `bin/bootstrap.py` | first-command runner: preps a fresh box over SSH (root password or key), ships out-of-band host files, runs the installer |
 | `bin/install.sh` | the appliance installer (service user → rootless Docker → prompts → Ansible) |
 | `bin/update.sh` / `doctor.sh` / `backup.sh` / `smoke.sh` | versioned updates with rollback, health check, backups, OIDC-less smoke run |
-| `bin/healthwatch.sh` | every 15 min (backup container): runs `doctor.sh`, emails `OPS_ALERT_EMAIL` outside the server when checks fail, remind daily, resolved; pings `OPS_HEARTBEAT_URL` for the outside uptime check (RUNBOOK.md §7b, §7c) |
+| `bin/healthwatch.sh` | every 15 min (backup container): runs `doctor.sh`, emails `OPS_ALERT_EMAIL` outside the server when checks fail, remind daily, resolved; pings `OPS_HEARTBEAT_URL` for the outside uptime check; leaves `status/health.json` (masked, read-only to the `api` container) for the app's Setup → Server health page (RUNBOOK.md §7b, §7c) |
 | `bin/tests/` | hermetic shell self-tests, run by `ci-validate.sh` |
 | `bin/restore.sh` / `restore-drill.sh` | restore an archive (app DB + sign-in DB + evidence); prove an archive restores in a scratch Incus container (operator machine only) |
 | `bin/ci-validate.sh` | static checks run by `.github/workflows/validate.yml` (bash -n, python, `docker compose config`) — run before pushing |
@@ -198,6 +198,18 @@ contract & onboarding magic links) go through a durable ledger: rows are only
   Nothing leaves the machine.
 - **Server alerts** (`OPS_ALERT_EMAIL`) use the same relay settings but are sent by
   `bin/healthwatch.sh` directly, not by the app — see RUNBOOK.md, "Server alerts".
+
+## Server health in the app
+
+Setup → Server health shows the registered manager, director and data administrator what the
+15-minute health watch last found, and Setup status uses the same results, so a scanner that is
+set up but down no longer shows as done. The watch writes `status/health.json`; the `api` container
+mounts that folder read-only and has no other view of the server: no Docker socket and no way to
+write anything here. If the watch stops, the page says so.
+
+`WORKFORCE_SERVER_HEALTH_VISIBLE` (default `true`) turns the page off. **The hosted platform sets it
+to `false`**, because a tenant must not see server details; Setup status then says only what is
+configured. See RUNBOOK.md §7b for the file's format and what is masked.
 
 ## The AI assistant (ADR-0021)
 

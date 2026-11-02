@@ -323,6 +323,10 @@ services:
       # Static authentik signing key: id_tokens are validated against this
       # pinned public key — no JWKS network fetch from the api at all.
       - ./secrets/oidc_signing_pub.pem:/run/oidc/signing-pub.pem:ro
+      # What the health watch last found (bin/healthwatch.sh), for Setup -> Server health. Read-only,
+      # and the api only: this is all the app learns about the server this way. The folder, not the
+      # file: the watch replaces the file by renaming, and a mounted file would stay the old one.
+      - ./status:/run/workforce-status:ro
     networks: [back, data]
     environment:
       TZ: Europe/London
@@ -364,6 +368,9 @@ services:
       # B.AI): no data processing agreement, fictitious people only. Test appliance only — never
       # set it in production.
       AI_TEST_SERVICES: ${AI_TEST_SERVICES:-false}
+      # Setup -> Server health. Keep it on for a server that runs one organisation; the hosted
+      # platform sets it to false, because a tenant must not see server details.
+      WORKFORCE_SERVER_HEALTH_VISIBLE: ${WORKFORCE_SERVER_HEALTH_VISIBLE:-true}
       # Reports from inside the app (feedback-spec.md): filed as GitHub issues by the installation's
       # GitHub App when FEEDBACK_GITHUB_APP_ID/INSTALLATION_ID are set and secrets/feedback_github_key
       # holds its private key; otherwise reports stay with the organisation.
