@@ -92,7 +92,9 @@ and never change the admin password; the blueprint's user entry is
 own password at first install, none of the above files exist — the password is
 whatever you typed then.
 
-**Lost it anyway?** Rotate it deliberately with `./bin/reset-admin.sh`: run it
+**Lost it anyway?** Use "Forgot your password?" on the sign-in page: from the
+version that includes it, the link goes to the recovery email below, as long as that is outside
+this server. If the app or email is down, rotate it with `./bin/reset-admin.sh`: run it
 bare to get a one-time verification phrase (`care-angels-XXXXXX`), then
 `./bin/reset-admin.sh --confirm <phrase>` to set a fresh password (printed
 once, and also written to the `initial-admin-password` file). The two-step
@@ -120,8 +122,9 @@ app only shows it (masked) and warns when it is missing or on this server.
   comment: set it before go-live; the test appliance uses a fictitious
   `@example.test` address).
 * The identity converge (install, and every `./bin/update.sh`) sets it on the
-  `admin` account **and** on authentik's own bootstrap superuser `akadmin` (a
-  separate account that does not sign in to Workforce). It refuses — and changes
+  `admin` account. authentik's own bootstrap superuser `akadmin` (a separate
+  account that does not sign in to Workforce) gets `akadmin@<sign-in host>`, never
+  the same address, because sign-in finds an account by email or username. It refuses — and changes
   nothing — when the address is malformed, on this server, or already another
   account's sign-in. Workforce signs people in by their email, so the converge
   moves the Administrator's Workforce login to the new address first (audited as

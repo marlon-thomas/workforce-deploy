@@ -5,7 +5,9 @@
 # for setup and recovery. Its email is a recovery address the operator reads OUTSIDE this server
 # (ADMIN_RECOVERY_EMAIL): mail on this server is read by signing in here, which is exactly what a
 # locked-out administrator cannot do. authentik's own bootstrap superuser (akadmin) is a separate
-# account and gets the same address. Runs on every identity converge — install.sh, and update.sh
+# account and gets its own address under the sign-in host, never the same one: sign-in finds an
+# account by email or username, so a shared address could resolve to the superuser. Runs on every
+# identity converge — install.sh, and update.sh
 # (--tags identity) — and is idempotent. Empty ADMIN_RECOVERY_EMAIL = leave both as they are.
 #
 # Order matters: Workforce knows the Administrator by its email (the provider's sign-in subject is
@@ -134,11 +136,11 @@
       ansible.builtin.command:
         argv: [docker, exec, -i, -w, /, workforce-deploy-authentik-server-1,
                ak, shell, -c, "exec(open('/tmp/admin-recovery-email.py').read())"]
-        stdin: "{{ {'mode': 'write', 'email': recovery_email} | to_json }}"
+        stdin: "{{ {'mode': 'write', 'email': recovery_email, 'bootstrap_email': 'akadmin@' ~ auth_hostname} | to_json }}"
       register: ak_recovery_write
       when: >-
         (ak_recovery_now.admin | default('', true) | lower) != recovery_email
-        or (ak_recovery_now.akadmin is not none and (ak_recovery_now.akadmin | default('', true) | lower) != recovery_email)
+        or (ak_recovery_now.akadmin is not none and (ak_recovery_now.akadmin | default('', true) | lower) != ('akadmin@' ~ auth_hostname) | lower)
       failed_when: (ak_recovery_write.stdout_lines | default([]) | select('match', '^ADMIN_RECOVERY ') | list | length) == 0
       changed_when: true
       environment:
