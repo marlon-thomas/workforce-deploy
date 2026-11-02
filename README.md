@@ -100,6 +100,49 @@ phrase gate exists because the script is also the support procedure for
 customer appliances — identity is verified on the call before the phrase is
 accepted.
 
+### The emergency administrator and its recovery email (Workforce ADR-0026)
+
+The `admin` login the installer makes is the installation's **emergency
+administrator**: for setting Workforce up and for getting back in when something
+goes wrong. It has no staff record and no mailbox, and the app shows a standing
+note while it is in use. Everyone who runs Workforce day to day — including the
+owner — gets **their own account** (Setup → Administrator accounts → *Set up
+your own administrator account*: a staff record, their own login and mailbox,
+and the administrator access).
+
+The emergency account's email is its **recovery email**, and it must be an
+address you read **outside this server** — not the staff mail domain, not this
+server's own names. Mail on this server is read by signing in here, which is
+exactly what a locked-out administrator cannot do. The deployment sets it; the
+app only shows it (masked) and warns when it is missing or on this server.
+
+* `ADMIN_RECOVERY_EMAIL` in `.env` (`environments/prod.env` has it empty with a
+  comment: set it before go-live; the test appliance uses a fictitious
+  `@example.test` address).
+* The identity converge (install, and every `./bin/update.sh`) sets it on the
+  `admin` account **and** on authentik's own bootstrap superuser `akadmin` (a
+  separate account that does not sign in to Workforce). It refuses — and changes
+  nothing — when the address is malformed, on this server, or already another
+  account's sign-in. Workforce signs people in by their email, so the converge
+  moves the Administrator's Workforce login to the new address first (audited as
+  `EMERGENCY_ADMIN_RECOVERY_EMAIL_SET`), then changes authentik.
+* `./bin/doctor.sh` warns while it is empty, on a domain this server may host,
+  or set in `.env` but not applied yet.
+
+**Setting it on an existing installation** — `update.sh` never re-renders
+`.env`, so add the line yourself, then converge:
+
+```bash
+cd /opt/workforce-deploy
+echo 'ADMIN_RECOVERY_EMAIL=you@your-own-provider.example' >> .env   # an address NOT on this server
+./bin/update.sh "$(grep -m1 '^APP_VERSION=' .env | cut -d= -f2)"   # same version: converges identity (sets it)
+./bin/doctor.sh            # "admin recovery email" row: OK
+```
+
+To change it later, edit the line in `.env` and run `./bin/update.sh <version>` again (the
+running version is fine).
+Signing in with the username `admin` keeps working; the email is what changes.
+
 ## Versioning
 
 * suite images: `ghcr.io/marlon-thomas/workforce-suite:<semver>` (private; PAT)

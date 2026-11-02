@@ -326,6 +326,7 @@ INV
   WFV_ops_alert_from="${OPS_ALERT_FROM:-}" \
   WFV_ops_heartbeat_url="${OPS_HEARTBEAT_URL:-}" \
   WFV_ai_test_services="${AI_TEST_SERVICES:-false}" \
+  WFV_admin_recovery_email="${ADMIN_RECOVERY_EMAIL:-}" \
   WFV_backup_target="${BACKUP_TARGET:-}" \
   WFV_docker_sock="${ANSIBLE_SOCK}" \
   python3 -c 'import json,os,sys; json.dump({k[4:]: v for k, v in os.environ.items() if k.startswith("WFV_")}, sys.stdout)' \
@@ -819,6 +820,9 @@ OIDC_ISSUER=https://${AUTH_HOSTNAME}/application/o/workforce/
 
 API_IMAGE=ghcr.io/marlon-thomas/workforce-suite
 APP_VERSION=${APP_VERSION:-0.2.9}
+
+# ADR-0026: the emergency administrator's recovery email, OUTSIDE this server.
+ADMIN_RECOVERY_EMAIL=${ADMIN_RECOVERY_EMAIL:-}
 
 BACKUP_TARGET=${BACKUP_TARGET}
 ENV

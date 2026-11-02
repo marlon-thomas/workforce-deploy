@@ -76,13 +76,16 @@ say "Backing up before touching anything…"
 # ADR-0017: converge the identity plane first — sign-in/enrolment flows, the invitation service
 # account and its token (compose refuses to start the api without the token file). Idempotent:
 # unchanged blueprints and an existing token are left alone. No admin password is passed, so the
-# installer's first-admin entry (state: created) is not re-rendered.
+# installer's first-admin entry (state: created) is not re-rendered. ADMIN_RECOVERY_EMAIL from .env
+# (Workforce ADR-0026) is set on the installer's Administrator and authentik's akadmin here; .env
+# itself is never re-rendered by this script, so add the line to .env by hand on older installs.
 if [ -f inventories/local/hosts.yml ] && command -v ansible-playbook >/dev/null 2>&1; then
   say "Converging the identity plane (sign-in and staff invitations)…"
   ansible-playbook -i inventories/local/hosts.yml ansible/site.yml --tags identity \
       -e github_token=unused -e ak_admin_password= \
       -e "app_hostname=${APP_HOSTNAME}" -e "auth_hostname=${AUTH_HOSTNAME}" \
       -e "webmail_hostname=${WEBMAIL_HOSTNAME:-}" \
+      -e "admin_recovery_email=${ADMIN_RECOVERY_EMAIL:-}" \
       >"backups/identity-converge.log" 2>&1 \
     || fail "Identity converge failed — update aborted (nothing else was changed). See backups/identity-converge.log"
 fi

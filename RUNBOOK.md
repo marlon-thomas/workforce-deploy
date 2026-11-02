@@ -111,6 +111,11 @@ connects the sign-in server, and finishes with a green/red health table.
 
 - App: `https://workforce.<your-domain>` → the onboarding wizard runs
 - Sign-in server: `https://auth.<your-domain>` (user `admin`, the password from step 5)
+- `admin` is the **emergency administrator** (setup and recovery only — no staff record, no
+  mailbox). Once the organisation exists, set up your own account in Setup → Administrator
+  accounts and work from that. Give the emergency account a recovery email outside this server:
+  `ADMIN_RECOVERY_EMAIL` in `.env`, then `./bin/update.sh <running version>` (README → "The
+  emergency administrator and its recovery email").
 
 ## 7. When something looks wrong
 

@@ -199,3 +199,8 @@
   no_log: true
   environment:
     DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
+
+# ---------- ADR-0026 (Workforce): the emergency administrator's recovery address ----------
+# Static import, so the tasks carry the role's `identity` tag: update.sh converges them too.
+- name: Emergency administrator recovery address (ADMIN_RECOVERY_EMAIL)
+  ansible.builtin.import_tasks: recovery_email.yml

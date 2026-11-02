@@ -214,6 +214,36 @@ if [ "${AI_TEST_SERVICES:-false}" = "true" ]; then
   fi
 fi
 
+# --- the emergency administrator's recovery email (Workforce ADR-0026): outside this server, or a
+#     locked-out administrator cannot read the reset email (mail here needs the lost sign-in).
+#     Warns only; never fails. Staff domains come from a read-only query, skipped if unavailable.
+RECOVERY="$(printf '%s' "${ADMIN_RECOVERY_EMAIL:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+if [ -z "$RECOVERY" ]; then
+  row "admin recovery email" warn "ADMIN_RECOVERY_EMAIL is empty: set an address outside this server in .env, then ./bin/update.sh"
+else
+  R_DOMAIN="${RECOVERY##*@}"
+  # This server's names and their parent domains (only names with a dot: never a bare TLD).
+  HOSTED="$(printf '%s\n' "${APP_HOSTNAME:-}" "${AUTH_HOSTNAME:-}" "${WEBMAIL_HOSTNAME:-}" \
+    "${APP_HOSTNAME#*.}" "${AUTH_HOSTNAME#*.}" | tr '[:upper:]' '[:lower:]' | grep '\.' | sort -u || true)"
+  STAFF_DOMAINS="$(docker compose exec -T postgres psql -U "${DB_USER}" -d "${DB_NAME}" -tAc \
+    "select staff_domain from mail_setting where staff_domain is not null" 2>/dev/null || true)"
+  ON_HERE=""
+  for d in $HOSTED $STAFF_DOMAINS; do
+    case "$R_DOMAIN" in "$d"|*."$d") ON_HERE="$d"; break ;; esac
+  done
+  # What authentik holds now (applied by the identity converge in ./bin/update.sh).
+  AK_NOW="$(docker compose exec -T authentik-postgres psql -U "${AK_DB_USER:-authentik}" -d "${AK_DB_NAME:-authentik}" -tAc \
+    "select lower(email) from authentik_core_user where username = 'admin'" 2>/dev/null | tr -d '[:space:]' || true)"
+  MASKED="${RECOVERY:0:1}•••@${R_DOMAIN}"
+  if [ -n "$ON_HERE" ]; then
+    row "admin recovery email" warn "${MASKED} is on ${ON_HERE}, which this server may host: use an address outside this server"
+  elif [ -n "$AK_NOW" ] && [ "$AK_NOW" != "$RECOVERY" ]; then
+    row "admin recovery email" warn "${MASKED} is set in .env but not applied yet: run ./bin/update.sh"
+  else
+    row "admin recovery email" ok "${MASKED} (outside this server)"
+  fi
+fi
+
 # --- antivirus
 CV=$(docker compose exec -T clamav sh -c "nc -z localhost 3310" >/dev/null 2>&1 && echo ok || echo no)
 if [ "$CV" = ok ]; then row "antivirus" ok "ClamAV listening"
