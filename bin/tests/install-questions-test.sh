@@ -54,6 +54,17 @@ good"pass\w$x
 IN
 check "quote refused" "$SMTP_PASSWORD" 'good"pass\w$x'
 
+# --- relay: one ending in a backslash would stop compose reading .env, so it's refused too
+fresh
+ask_relay > /dev/null 2>&1 <<'IN'
+4
+user
+ends-in-a-slash\
+good-pass
+
+IN
+check "trailing backslash refused" "$SMTP_PASSWORD" 'good-pass'
+
 # --- relay: Microsoft 365 sends as the mailbox it signs in as
 fresh
 ask_relay > /dev/null 2>&1 <<'IN'

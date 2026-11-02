@@ -327,6 +327,11 @@ services:
       # and the api only: this is all the app learns about the server this way. The folder, not the
       # file: the watch replaces the file by renaming, and a mounted file would stay the old one.
       - ./status:/run/workforce-status:ro
+      # Routine jobs started from Setup (bin/server-actions.sh, Workforce ADR-0031). The api can leave
+      # a request and read a result, and nothing more: it gets no docker socket, no shell, and no
+      # write access to .env or secrets/. The api only, as with the status folder.
+      - ./actions/requests:/run/workforce-actions/requests
+      - ./actions/results:/run/workforce-actions/results:ro
     networks: [back, data]
     environment:
       TZ: Europe/London
@@ -371,6 +376,10 @@ services:
       # Setup -> Server health. Keep it on for a server that runs one organisation; the hosted
       # platform sets it to false, because a tenant must not see server details.
       WORKFORCE_SERVER_HEALTH_VISIBLE: ${WORKFORCE_SERVER_HEALTH_VISIBLE:-true}
+      # Routine jobs from Setup (backups, staff email, the relay, alerts). Off whenever the above is
+      # off, and the hosted platform sets it off. SERVER_ACTIONS=off in .env stops the helper itself,
+      # for an operator who doesn't want to rely on the app's word.
+      WORKFORCE_SERVER_ACTIONS: ${WORKFORCE_SERVER_ACTIONS:-true}
       # Reports from inside the app (feedback-spec.md): filed as GitHub issues by the installation's
       # GitHub App when FEEDBACK_GITHUB_APP_ID/INSTALLATION_ID are set and secrets/feedback_github_key
       # holds its private key; otherwise reports stay with the organisation.
@@ -694,17 +703,23 @@ services:
     # Also the server's health watch (bin/healthwatch.sh, every 15 minutes): it runs doctor.sh and
     # emails OPS_ALERT_EMAIL straight through SMTP_HOST — both read from .env in the mounted bundle
     # at every run, so changing them in .env needs no restart.
+    # And the helper for jobs started from Setup (bin/server-actions.sh). Two cron lines, because dcron
+    # won't start a line that is still running: --tick stays busy through a long job, and --beat keeps
+    # saying the helper is alive, and turns away anything else, while it does.
     entrypoint:
       - /bin/sh
       - -c
       - |
         # bash: backup.sh is a bash script; docker-cli-compose: it drives
         # `docker compose` (alpine's docker-cli ships without the plugin);
-        # curl + openssl: doctor.sh's probes and healthwatch.sh's SMTP send.
-        apk add -q dcron bash docker-cli docker-cli-compose curl openssl rsync openssh-client >/dev/null
+        # curl + openssl: doctor.sh's probes and healthwatch.sh's SMTP send; jq: server-actions.sh
+        # reads the app's requests.
+        apk add -q dcron bash docker-cli docker-cli-compose curl openssl rsync openssh-client jq >/dev/null
         printf '%s\n' \
           '0 2 * * * cd /opt/workforce-deploy && ./bin/backup.sh >> backups/cron.log 2>&1' \
           '*/15 * * * * cd /opt/workforce-deploy && mkdir -p logs && ./bin/healthwatch.sh > /dev/null 2>> logs/healthwatch.log' \
+          '* * * * * cd /opt/workforce-deploy && mkdir -p logs && ./bin/server-actions.sh --tick > /dev/null 2>> logs/server-actions.log' \
+          '* * * * * cd /opt/workforce-deploy && mkdir -p logs && ./bin/server-actions.sh --beat > /dev/null 2>> logs/server-actions.log' \
           | crontab -
         crond -f -L /dev/null
     logging: *default-logging

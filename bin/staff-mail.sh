@@ -15,6 +15,8 @@
 # --private-ca    test appliances only (ADR-0014): accept the private CA's certificates when
 #                 the mail server and webmail talk to the sign-in server
 #
+# Setup -> Email in Workforce starts this too, through bin/server-actions.sh in the backup container,
+# so everything here also has to work on alpine with busybox and no python or ansible.
 # The organisation's own domains are NOT set here: they are Setup -> Email in Workforce.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -29,21 +31,7 @@ use_docker_socket
 say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mXX\033[0m %s\n' "$*"; exit 1; }
 
-# set_env KEY VALUE — replace KEY's line in .env, or add it.
-set_env() {
-  local key="$1" value="$2"
-  if grep -q "^${key}=" .env; then
-    python3 - "$key" "$value" <<'PY'
-import sys
-key, value = sys.argv[1], sys.argv[2]
-lines = open(".env").read().splitlines()
-lines = [f"{key}={value}" if l.startswith(key + "=") else l for l in lines]
-open(".env", "w").write("\n".join(lines) + "\n")
-PY
-  else
-    printf '%s=%s\n' "$key" "$value" >> .env
-  fi
-}
+set_env() { env_set "$1" "$2"; }   # bin/lib/common.sh
 
 profiles_with() {   # profiles_with add|remove NAME
   local current="${COMPOSE_PROFILES:-}" out=""
@@ -55,8 +43,52 @@ profiles_with() {   # profiles_with add|remove NAME
 
 valid_host() { [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]; }
 
+# render_webmail_blueprint HOST — what the identity converge renders from the same template, for the
+# backup container, which has no ansible. Only the webmail blueprint depends on the webmail host. The
+# values are a checked host name and generated hex, and anything left that looks like a template
+# means the template has moved on from this renderer: refused rather than applied half-done. Written
+# in place, so authentik's mount of this one file (bound to its inode) sees the new contents.
+render_webmail_blueprint() {
+  local host="$1" key secret tmp
+  key="$(cat secrets/mail_lookup_key)"; secret="$(cat secrets/webmail_oidc_secret)"
+  [[ "$key" =~ ^[0-9a-fA-F]+$ ]] && [[ "$secret" =~ ^[0-9a-fA-F]+$ ]] || fail "The webmail keys in secrets/ aren't what this expects"
+  tmp="$(mktemp)"
+  awk -v host="$host" -v key="$key" -v secret="$secret" '
+    /^\{% if webmail_hostname/ { off = 1; next }
+    /^\{% else %\}/            { off = 0; next }
+    /^\{% endif %\}/           { next }
+    off                        { next }
+    { gsub(/\{\{ webmail_hostname \}\}/, host); gsub(/\{\{ mail_lookup_key \}\}/, key)
+      gsub(/\{\{ webmail_oidc_secret \}\}/, secret); print }' \
+    ansible/roles/authentik/templates/webmail-app.yaml.j2 > "$tmp"
+  if grep -qE '\{\{|\{%' "$tmp"; then rm -f "$tmp"; fail "The webmail sign-in template has something this can't fill in"; fi
+  cat "$tmp" > blueprints/webmail-app.yaml
+  rm -f "$tmp"
+}
+
+apply_webmail_blueprint() {
+  local tries=0 out
+  # A mount left pointing at an old copy can only be fixed by recreating the sign-in containers.
+  if ! docker exec -w / workforce-deploy-authentik-server-1 cat /blueprints/webmail-app.yaml 2>/dev/null | cmp -s - blueprints/webmail-app.yaml; then
+    say "Restarting the sign-in server so it sees the webmail settings…"
+    docker compose up -d --no-deps --force-recreate authentik-server authentik-worker
+  fi
+  while [ "$tries" -lt 30 ]; do
+    tries=$((tries + 1))
+    if out="$(docker exec -w / workforce-deploy-authentik-server-1 python /manage.py apply_blueprint /blueprints/webmail-app.yaml 2>&1)"; then
+      case "$out" in *"Blueprint invalid"*) ;; *) return 0 ;; esac
+    fi
+    sleep "${STAFF_MAIL_RETRY_SECS:-10}"
+  done
+  fail "Sign-in setup failed: authentik would not apply the webmail settings"
+}
+
 converge_identity() {
-  if [ -f inventories/local/hosts.yml ] && command -v ansible-playbook >/dev/null 2>&1; then
+  if [ "${WORKFORCE_IN_STACK:-}" = 1 ]; then
+    say "Setting up webmail sign-in…"
+    render_webmail_blueprint "$1"
+    apply_webmail_blueprint
+  elif [ -f inventories/local/hosts.yml ] && command -v ansible-playbook >/dev/null 2>&1; then
     say "Setting up webmail sign-in…"
     ansible-playbook -i inventories/local/hosts.yml ansible/site.yml --tags identity \
         -e github_token=unused -e ak_admin_password= \
@@ -76,6 +108,9 @@ ensure_secrets() {
   [ -e secrets/mail_relay_password ] || ( umask 077; : > secrets/mail_relay_password )
   mkdir -p blueprints backups
   [ -e blueprints/webmail-app.yaml ] || printf 'version: 1\nentries: []\n' > blueprints/webmail-app.yaml
+  # They were made 0600 just above, and the app runs as uid 999: without this, staff email stayed
+  # silently off until the next update put the modes right.
+  secret_modes
 }
 
 cmd="${1:-status}"; shift || true
@@ -102,7 +137,10 @@ case "$cmd" in
     if [ -n "$RELAY" ]; then
       RELAY_HOST="${RELAY%%:*}"; [ "$RELAY" != "$RELAY_HOST" ] && RELAY_PORT="${RELAY##*:}"
     fi
-    floor="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 0)"
+    # Only meaningful on the host: inside a container this shows the container's own setting, which
+    # is always open. From the backup container, the mail server failing to start says the same.
+    floor=0
+    [ "${WORKFORCE_IN_STACK:-}" = 1 ] || floor="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 0)"
     [ "$floor" -le 25 ] || fail "This server can't receive mail yet: as root run
     sysctl -w net.ipv4.ip_unprivileged_port_start=25 and set it in /etc/sysctl.conf (the ansible common role does this), then run this again."
     ensure_secrets

@@ -141,9 +141,11 @@ TXT
     while :; do
       read_mandatory SMTP_PASSWORD "     Password or SMTP key (not shown): " silent
       # .env keeps it in single quotes (compose and bash both read that literally); a single quote
-      # inside can't be written that way, so ask for another key rather than store a broken one.
+      # inside can't be written that way, so ask for another key rather than store a broken one. Nor
+      # one ending in a backslash: compose takes \' as not closing the quote, and won't start anything.
       case "$SMTP_PASSWORD" in
         *"'"*) echo "     That password contains a single quote ('), which .env can't hold safely. Create an SMTP key or password without one." >&2 ;;
+        *\\) echo "     That password ends in a backslash (\\), which .env can't hold safely. Create an SMTP key or password without one." >&2 ;;
         *) break ;;
       esac
     done

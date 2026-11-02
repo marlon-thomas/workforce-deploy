@@ -131,11 +131,65 @@ authentik_version() {
 secret_modes() {
   [ -d secrets ] || return 0
   chmod 700 secrets
+  # backup_ssh_key is for ssh in the backup container, which refuses a key anyone else could read.
   find secrets -maxdepth 1 -type f ! -name initial-admin-password ! -name backup_ssh_key -exec chmod 644 {} +
   [ -e secrets/initial-admin-password ] && chmod 400 secrets/initial-admin-password
-  # ssh refuses a private key anyone else could read; only the backup container uses this one.
   [ -e secrets/backup_ssh_key ] && chmod 600 secrets/backup_ssh_key
   return 0
+}
+
+# ------------------------------------------------------------------ the .env file
+# env_get KEY [FILE] — print KEY's value from the file WITHOUT running it: the last line wins, as it
+# would when sourced, and one pair of surrounding quotes is taken off. Prints nothing when unset.
+env_get() {
+  local key="$1" file="${2:-.env}" line value="" v
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) value="${line#*=}" ;;
+    esac
+  done < "$file"
+  case "$value" in
+    \'*\') v="${value#\'}"; value="${v%\'}" ;;
+    \"*\") v="${value#\"}"; value="${v%\"}" ;;
+  esac
+  printf '%s' "$value"
+}
+
+# env_set KEY VALUE [FILE] — replace KEY's line, or add it, byte for byte: everything else in the
+# file, and its mode and owner, stay as they are. A temp file and a rename, so nothing ever sees half
+# a file. VALUE goes in exactly as given, so a caller with a value that isn't a plain word quotes it
+# first (env_single_quote). A value with a line break could add a setting of its own: refused.
+env_set() {
+  local key="$1" value="$2" file="${3:-.env}" tmp line found=0
+  case "$key" in ''|*[!A-Za-z0-9_]*) return 2 ;; esac
+  case "$value" in *$'\n'*|*$'\r'*) return 2 ;; esac
+  [ -f "$file" ] || return 1
+  tmp="${file}.tmp.$$"
+  ( umask 077; : > "$tmp" ) || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*)
+        [ "$found" -eq 1 ] || printf '%s=%s\n' "$key" "$value"
+        found=1 ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done < "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+  [ "$found" -eq 1 ] || printf '%s=%s\n' "$key" "$value" >> "$tmp"
+  chmod "$(stat -c %a "$file")" "$tmp" 2>/dev/null || true
+  chown "$(stat -c %u:%g "$file")" "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file"
+}
+
+# env_single_quote VALUE — VALUE as .env must hold anything that isn't a plain word. compose and bash
+# both read single quotes literally, so $, #, spaces and double quotes are safe. Two things can't be
+# held: a single quote, and a backslash (compose takes \' as not closing the quote, so a value ending
+# in a backslash stops the whole stack starting). Returns 1 for those, and for a line break.
+env_single_quote() {
+  case "$1" in
+    *\'*|*\\*|*$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  printf "'%s'" "$1"
 }
 
 # alert_address_problems "<comma-separated list>" <host>... — checks server-alert addresses

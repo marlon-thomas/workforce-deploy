@@ -18,3 +18,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Static validation (bash -n, python, docker compose config, shellcheck)
         run: ./bin/ci-validate.sh
+      # The helper runs in the backup container, so its self-test runs there too: alpine, busybox,
+      # as root, which is also what proves the mailbox's modes for the app's uid 999.
+      - name: The server-actions self-test on alpine with busybox
+        run: |
+          printf 'apk add -q --no-progress bash jq openssl >/dev/null\nbash /w/bin/tests/server-actions-test.sh\n' > "$RUNNER_TEMP/alpine-run.sh"
+          docker run --rm -v "$PWD:/w:ro" -v "$RUNNER_TEMP:/s:ro" alpine:3.20 sh /s/alpine-run.sh

@@ -327,6 +327,9 @@ INV
   WFV_ops_heartbeat_url="${OPS_HEARTBEAT_URL:-}" \
   WFV_ai_test_services="${AI_TEST_SERVICES:-false}" \
   WFV_server_health_visible="${WORKFORCE_SERVER_HEALTH_VISIBLE:-true}" \
+  WFV_server_actions_visible="${WORKFORCE_SERVER_ACTIONS:-true}" \
+  WFV_server_actions="${SERVER_ACTIONS:-on}" \
+  WFV_server_actions_plain_relay="${SERVER_ACTIONS_PLAIN_RELAY:-}" \
   WFV_admin_recovery_email="${ADMIN_RECOVERY_EMAIL:-}" \
   WFV_backup_target="${BACKUP_TARGET:-}" \
   WFV_docker_sock="${ANSIBLE_SOCK}" \
@@ -590,6 +593,7 @@ resume_or_start() {
 if [ -n "${ENV_NAME_ARG}" ] && [ -f "environments/${ENV_NAME_ARG}.env" ]; then
   say "Loading environment: ${ENV_NAME_ARG} (environments/${ENV_NAME_ARG}.env)"
   # shellcheck disable=SC1091
+  # shellcheck disable=SC1090  # chosen at run time
   . "environments/${ENV_NAME_ARG}.env"
 fi
 
@@ -673,6 +677,7 @@ if [ "${SMOKE}" -eq 0 ]; then
       DUCKDNS_API_TOKEN=""
       TOKEN_FILE="${DUCKDNS_TOKEN_FILE:-}"
       if [ -n "${TOKEN_FILE}" ] && [ -f "${TOKEN_FILE/#\~/$HOME}" ]; then
+        # shellcheck disable=SC1090  # chosen at run time
         . "${TOKEN_FILE/#\~/$HOME}"
         DUCKDNS_API_TOKEN="${DUCKDNS_TOKEN:-}"
         [ -n "${DUCKDNS_API_TOKEN}" ] && say "DuckDNS token loaded from ${TOKEN_FILE}."
@@ -799,6 +804,8 @@ if [ ! -s secrets/push_vapid_public ] || [ ! -s secrets/push_vapid_private ]; th
 fi
 # Readable inside the containers (the app runs unprivileged), folder closed: bin/lib/common.sh.
 secret_modes
+# Compose would make these anyway, but as whoever runs the daemon. The helper sets their modes.
+mkdir -p actions/requests actions/results
 
 say "Writing configuration…"
 GATEWAY_IMAGE_DEFAULT="caddy:2.8.4"
