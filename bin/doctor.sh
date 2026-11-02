@@ -106,6 +106,12 @@ compose_state() { # compose_state <service> — "running", "exited", … or noth
 }
 
 # --- containers
+# In the backup container, one clear failure rather than every service "not running" (a wrong
+# DOCKER_SOCK means nightly backups and these checks cannot run at all).
+if [ "$IN_STACK" -eq 1 ] && ! docker version >/dev/null 2>&1; then
+  row "docker access" fail "the backup container can't reach Docker (DOCKER_SOCK=${DOCKER_SOCK:-unset}) — nightly backups and health checks can't run; ./bin/update.sh <running version> corrects it"
+  finish
+fi
 for svc in gateway api worker postgres object-storage clamav authentik-server; do
   state="$(compose_state "$svc")"
   if [ "$state" = "running" ]; then row "service $svc" ok "running"
@@ -113,7 +119,14 @@ for svc in gateway api worker postgres object-storage clamav authentik-server; d
 done
 # The backup container also runs the 15-minute health watch (bin/healthwatch.sh).
 state="$(compose_state backup)"
-if [ "$state" = "running" ]; then oprow "service backup" ok "running (nightly backup + health watch)"
+if [ "$state" = "running" ]; then
+  # Running isn't enough: it drives compose through the mounted socket. (docker may still be
+  # installing on a first boot, which is not a fault.)
+  if [ "$IN_STACK" -eq 0 ] && ! docker compose exec -T backup sh -c 'command -v docker >/dev/null || exit 0; docker version >/dev/null' >/dev/null 2>&1; then
+    oprow "service backup" fail "running but can't reach Docker (DOCKER_SOCK=${DOCKER_SOCK:-unset}) — nightly backups and alerts don't run; ./bin/update.sh <running version> corrects it"
+  else
+    oprow "service backup" ok "running (nightly backup + health watch)"
+  fi
 else oprow "service backup" fail "not running ($state) — no nightly backup and no alerts: docker compose up -d backup"; fi
 
 # --- version identity (compare running vs configured)

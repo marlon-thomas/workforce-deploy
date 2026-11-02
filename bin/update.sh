@@ -21,6 +21,20 @@ cd "$(dirname "$0")/.."
 . ./bin/lib/common.sh
 use_docker_socket
 
+# The backup container runs the nightly backup and the health watch through this socket. An older
+# install recorded the system socket on a rootless host: permission denied in the container, so
+# backups and health checks silently never ran. Put it right; `compose up` below applies it.
+SOCK_NOW="$(docker_socket || true)"
+if [ -n "$SOCK_NOW" ] && [ "${DOCKER_SOCK:-}" != "$SOCK_NOW" ]; then
+  if grep -q '^DOCKER_SOCK=' .env; then
+    sed -i "s|^DOCKER_SOCK=.*|DOCKER_SOCK=${SOCK_NOW}|" .env
+  else
+    printf 'DOCKER_SOCK=%s\n' "$SOCK_NOW" >> .env
+  fi
+  echo "Corrected DOCKER_SOCK in .env: ${DOCKER_SOCK:-(unset)} -> ${SOCK_NOW}"
+  DOCKER_SOCK="$SOCK_NOW"
+fi
+
 TARGET="${1:-}"
 if [ -z "$TARGET" ]; then
   echo "Usage: ./bin/update.sh <version>     (e.g. ./bin/update.sh 0.2.0)"
