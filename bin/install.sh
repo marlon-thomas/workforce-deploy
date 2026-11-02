@@ -298,6 +298,8 @@ INV
   VARS_FILE="$(umask 077 && mktemp "${TMPDIR:-/tmp}/workforce-vars.XXXXXX")"
   trap 'rm -f "${VARS_FILE:-}"; [ -n "${ticker_pid:-}" ] && kill "$ticker_pid" 2>/dev/null' EXIT
   ANSIBLE_SOCK="$(docker_socket || echo "/run/user/$(id -u)/docker.sock")"
+  # Server alert addresses (bin/healthwatch.sh): a list with spaces would break .env when sourced.
+  OPS_ALERT_EMAIL="${OPS_ALERT_EMAIL:-}"; OPS_ALERT_EMAIL="${OPS_ALERT_EMAIL// /}"
   WFV_app_hostname="${APP_HOSTNAME}" \
   WFV_auth_hostname="${AUTH_HOSTNAME}" \
   WFV_env_name="${ENV_NAME:-prod}" \
@@ -316,6 +318,8 @@ INV
   WFV_smtp_starttls="${SMTP_STARTTLS:-false}" \
   WFV_smtp_from="${SMTP_FROM:-}" \
   WFV_compose_profiles="${COMPOSE_PROFILES:-}" \
+  WFV_ops_alert_email="${OPS_ALERT_EMAIL}" \
+  WFV_ops_alert_from="${OPS_ALERT_FROM:-}" \
   WFV_ai_test_services="${AI_TEST_SERVICES:-false}" \
   WFV_backup_target="${BACKUP_TARGET:-}" \
   WFV_docker_sock="${ANSIBLE_SOCK}" \
@@ -587,7 +591,8 @@ if [ -f .env ]; then
     run_ansible_site
     # doctor exits non-zero only on FAIL rows (WARN rows never count), so a
     # red health check is a failed install, not a footnote.
-    DOCTOR_ARGS=""; [ "${SMOKE}" -eq 1 ] && DOCTOR_ARGS="--smoke"
+    # --gate: operational checks (backup age, disk, staff mail, notifications) are WARN at most.
+    DOCTOR_ARGS="--gate"; [ "${SMOKE}" -eq 1 ] && DOCTOR_ARGS="--gate --smoke"
     # shellcheck disable=SC2086
     ./bin/doctor.sh $DOCTOR_ARGS || fail "Health check failed after converging — see the FAIL rows above.
      Resume after fixing: cd $(pwd) && ${RESUME_CMD}"
@@ -830,9 +835,9 @@ say "Final health check:"
 # (it is already live in authentik), THEN a red check fails the install.
 DOCTOR_RC=0
 if [ "${SMOKE}" -eq 1 ]; then
-  ./bin/doctor.sh --smoke || DOCTOR_RC=$?
+  ./bin/doctor.sh --gate --smoke || DOCTOR_RC=$?
 else
-  ./bin/doctor.sh || DOCTOR_RC=$?
+  ./bin/doctor.sh --gate || DOCTOR_RC=$?
 fi
 
 # ---------------------------------------------------------------- summary

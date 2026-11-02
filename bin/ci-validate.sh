@@ -8,6 +8,7 @@
 #      placeholder env file — catches YAML/interpolation breakage at PR time,
 #      not at an appliance's next converge
 #   4. shellcheck -S error, when shellcheck is installed
+#   5. the hermetic shell self-tests in bin/tests/ (no Docker, no network)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -15,7 +16,7 @@ RC=0
 bad() { printf 'FAIL %s\n' "$*"; RC=1; }
 
 echo "== bash -n"
-for f in bin/*.sh bin/lib/*.sh; do
+for f in bin/*.sh bin/lib/*.sh bin/tests/*.sh; do
   [ -e "$f" ] || continue
   bash -n "$f" || bad "syntax: $f"
 done
@@ -58,10 +59,16 @@ fi
 
 if command -v shellcheck >/dev/null 2>&1; then
   echo "== shellcheck -S error"
-  shellcheck -S error -x bin/*.sh bin/lib/*.sh || bad "shellcheck"
+  shellcheck -S error -x bin/*.sh bin/lib/*.sh bin/tests/*.sh || bad "shellcheck"
 else
   echo "== shellcheck not installed — skipped (CI runners have it)"
 fi
+
+echo "== self-tests"
+for t in bin/tests/*-test.sh; do
+  [ -e "$t" ] || continue
+  if bash "$t"; then echo "ok   $t"; else bad "self-test: $t"; fi
+done
 
 [ "$RC" -eq 0 ] && echo "All deploy-apparatus checks passed." || echo "Validation FAILED."
 exit "$RC"

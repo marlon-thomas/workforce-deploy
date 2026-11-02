@@ -667,14 +667,23 @@ services:
     environment:
       TZ: Europe/London
       COMPOSE_PROJECT_NAME: workforce-deploy
+      # bin/doctor.sh probes the gateway at its address on the private network from in here.
+      WORKFORCE_IN_STACK: "1"
+    # Also the server's health watch (bin/healthwatch.sh, every 15 minutes): it runs doctor.sh and
+    # emails OPS_ALERT_EMAIL straight through SMTP_HOST — both read from .env in the mounted bundle
+    # at every run, so changing them in .env needs no restart.
     entrypoint:
       - /bin/sh
       - -c
       - |
         # bash: backup.sh is a bash script; docker-cli-compose: it drives
-        # `docker compose` (alpine's docker-cli ships without the plugin).
-        apk add -q dcron bash docker-cli docker-cli-compose >/dev/null
-        echo '0 2 * * * cd /opt/workforce-deploy && ./bin/backup.sh >> backups/cron.log 2>&1' | crontab -
+        # `docker compose` (alpine's docker-cli ships without the plugin);
+        # curl + openssl: doctor.sh's probes and healthwatch.sh's SMTP send.
+        apk add -q dcron bash docker-cli docker-cli-compose curl openssl >/dev/null
+        printf '%s\n' \
+          '0 2 * * * cd /opt/workforce-deploy && ./bin/backup.sh >> backups/cron.log 2>&1' \
+          '*/15 * * * * cd /opt/workforce-deploy && mkdir -p logs && ./bin/healthwatch.sh > /dev/null 2>> logs/healthwatch.log' \
+          | crontab -
         crond -f -L /dev/null
     logging: *default-logging
 

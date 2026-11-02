@@ -111,6 +111,96 @@ connects the sign-in server, and finishes with a green/red health table.
 Paste the output to support. The "reachability" row failing almost always means the
 **cloud firewall** (step 1) is missing 80/443, or DNS (step 2) isn't propagated.
 
+`./bin/doctor.sh --plain` prints the same rows without colour, one per line
+(`STATUS<TAB>check<TAB>detail`) for scripts. Install, update and restore run it as
+`./bin/doctor.sh --gate`: the operational checks (backup age, disk, staff mail,
+notifications, alerting) then report at most WARN, so they never fail an install or roll
+back a good update. Run it by hand without `--gate` to see them as FAILs.
+
+## 7b. Server alerts (health watch)
+
+So that someone **outside** the server hears about a problem — even when the app, or the
+server's own mail server, is what broke.
+
+**What runs.** The `backup` container runs `./bin/healthwatch.sh` every 15 minutes
+(next to the 02:00 nightly backup). It runs `./bin/doctor.sh` and emails
+`OPS_ALERT_EMAIL` when:
+
+| When | Subject |
+|---|---|
+| a check newly FAILs (also a WARN turning into a FAIL) | `[Workforce prod workforce.example.com] 2 checks failing: last backup, mail sync` |
+| something is still failing, at most once a day | `[…] reminder: 2 checks still failing: …` |
+| every FAIL has cleared | `[…] resolved: no checks failing` |
+
+The email lists the failing and warning rows, the server, the time and the command to
+investigate (`cd /opt/workforce-deploy && ./bin/doctor.sh`). WARNs alone never send email.
+Each run logs one line to `logs/healthwatch.log`; what was failing is kept in
+`state/healthwatch.state` (delete it to start afresh). A send that fails is logged and
+tried again 15 minutes later.
+
+**What it watches** — every doctor row, including the ones that exist for it:
+
+| Row | FAIL when | WARN when |
+|---|---|---|
+| `service …`, `database`, `sign-in server`, … | a container is down, the app or sign-in is not answering | — |
+| `last backup` | the newest archive in `backups/` is over 26 h old (or there is none, 26 h after install) | none yet on a new install |
+| `off-site backup` | — | no `BACKUP_TARGET`, or the last nightly off-site copy failed |
+| `disk space`, `disk space (docker)` | under 5 % free | under 15 % free |
+| `mail server`, `mail sync` (staff email on) | the mail server is down/unhealthy, an organisation's mail sync fails, or every mailbox fails to sync | some mailboxes have a sync error |
+| `notifications` | 3 or more emails failed in 24 h and none were sent | any email failed in 24 h (people without an address are not counted) |
+| `ops alerts` | — | `OPS_ALERT_EMAIL` empty (production), an address on this server's own domain, no `SMTP_HOST`, or the watch has not run for an hour |
+
+The database rows read the app database read-only. Inside the container the gateway is
+checked at its private address, so "reachability" there means "the gateway answers", not
+"the internet can reach the server".
+
+**Where alerts go, and how.** Straight to `SMTP_HOST:SMTP_PORT` with curl (port 465:
+implicit TLS; `SMTP_STARTTLS=true`: STARTTLS required; `SMTP_USERNAME` set: login, with the
+password in a private temporary file, never on a command line) — never through Workforce and
+never through the server's own mail server. So:
+
+- `OPS_ALERT_EMAIL` must be an address **not hosted on this server** (not the staff mail
+  domain): the operator's own provider, a phone's email, a support mailbox elsewhere.
+  Comma-separated, no spaces.
+- `SMTP_HOST` must be an outside relay (not `mail`, the server's own mail server). Without
+  `SMTP_HOST`, problems are only logged.
+- `OPS_ALERT_FROM` sets the sender (a plain address); empty = `SMTP_FROM`.
+
+Test appliance: `environments/test.env` sets `OPS_ALERT_EMAIL=ops-alerts@example.test`, which
+mailpit catches (`http://127.0.0.1:8025` on the box).
+
+**Try it:**
+
+```bash
+./bin/healthwatch.sh --test      # sends a test alert now — check it arrives
+./bin/healthwatch.sh --dry-run   # runs the checks, prints what it would send; sends and saves nothing
+```
+
+Run on the server, both hand themselves to the backup container, so they use the same network
+and tools as the 15-minute schedule (`--here` runs on the host instead). Exit codes: 0 all
+passing, 1 something failing, 2 configuration problem (e.g. `OPS_ALERT_EMAIL` empty for
+`--test`), 3 the email could not be sent.
+
+**Switching it on for an existing installation.** `update.sh` does not rewrite `.env` (only
+the installer does), so add the setting by hand, then recreate the backup container so it runs
+the new schedule:
+
+```bash
+cd /opt/workforce-deploy
+echo 'OPS_ALERT_EMAIL=you@your-own-provider.example' >> .env   # comma-separated, no spaces
+# echo 'OPS_ALERT_FROM=alerts@your-domain.example' >> .env     # optional
+docker compose up -d backup
+./bin/healthwatch.sh --test
+```
+
+(The bundle must be at a version that has `bin/healthwatch.sh`; any `update.sh` run after that
+recreates the backup container itself.) The watch reads `.env` at every run, so later changes
+to `OPS_ALERT_EMAIL` need no restart. New installs take it from `environments/<env>.env`.
+
+**What it cannot do.** A server that is off, or has lost its network, cannot send email about
+it. Pair this with an outside uptime check (any uptime monitoring service polling
+`https://<app host>/`) for "the whole server is gone".
+
 ## 8. Finished testing?
 
 ```bash

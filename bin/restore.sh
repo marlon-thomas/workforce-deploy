@@ -124,5 +124,5 @@ if [ -d "$TMP/branding" ]; then
     || echo "  (branding not restored — re-upload it in the admin settings)"
 fi
 sleep 15
-./bin/doctor.sh || { echo "Restore finished but the health check is RED — copy the output above to support."; exit 1; }
+./bin/doctor.sh --gate || { echo "Restore finished but the health check is RED — copy the output above to support."; exit 1; }
 echo "Restore complete."

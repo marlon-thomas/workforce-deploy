@@ -15,6 +15,8 @@ You do NOT need the private source repo to deploy or operate the product.
 | `bin/bootstrap.py` | first-command runner: preps a fresh box over SSH (root password or key), ships out-of-band host files, runs the installer |
 | `bin/install.sh` | the appliance installer (service user → rootless Docker → prompts → Ansible) |
 | `bin/update.sh` / `doctor.sh` / `backup.sh` / `smoke.sh` | versioned updates with rollback, health check, backups, OIDC-less smoke run |
+| `bin/healthwatch.sh` | every 15 min (backup container): runs `doctor.sh`, emails `OPS_ALERT_EMAIL` outside the server when checks fail, remind daily, resolved (RUNBOOK.md, "Server alerts") |
+| `bin/tests/` | hermetic shell self-tests, run by `ci-validate.sh` |
 | `bin/restore.sh` / `restore-drill.sh` | restore an archive (app DB + sign-in DB + evidence); prove an archive restores in a scratch Incus container (operator machine only) |
 | `bin/ci-validate.sh` | static checks run by `.github/workflows/validate.yml` (bash -n, python, `docker compose config`) — run before pushing |
 | `bin/lib/common.sh` | shared helpers: the ONE Docker-socket discovery (`docker_socket`) and the backup/restore data-plane functions |
@@ -148,6 +150,8 @@ contract & onboarding magic links) go through a durable ledger: rows are only
 - **Test appliance**: `COMPOSE_PROFILES=mail` runs a local [mailpit](https://mailpit.axllent.org/)
   catcher (loopback UI at `http://127.0.0.1:8025` on the box; `SMTP_HOST=mailpit`).
   Nothing leaves the machine.
+- **Server alerts** (`OPS_ALERT_EMAIL`) use the same relay settings but are sent by
+  `bin/healthwatch.sh` directly, not by the app — see RUNBOOK.md, "Server alerts".
 
 ## The AI assistant (ADR-0021)
 

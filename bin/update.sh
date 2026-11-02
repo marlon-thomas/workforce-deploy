@@ -119,7 +119,7 @@ rollback() {
   fi
   docker compose up -d || true
   sleep 15
-  ./bin/doctor.sh || true
+  ./bin/doctor.sh --gate || true
   fail "$1. You are back on $PREV with the database as it was before the update
   (rollback dump kept: $ROLLBACK_DUMP). Send the output above to support."
 }
@@ -138,12 +138,13 @@ say "Health check…"
 HEALTHY=0
 # Same ~2-minute budget as before, but probed every 5s: a fixed 20s sleep before the
 # first probe added up to 20s to every update that was already healthy.
+# --gate: operational checks (backup age, disk, staff mail, notifications) never roll back an update.
 DEADLINE=$(( $(date +%s) + 120 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 5
-  if ./bin/doctor.sh >/dev/null 2>&1; then HEALTHY=1; break; fi
+  if ./bin/doctor.sh --gate >/dev/null 2>&1; then HEALTHY=1; break; fi
 done
-./bin/doctor.sh || true
+./bin/doctor.sh --gate || true
 [ "$HEALTHY" -eq 1 ] || rollback "The new version did not pass the health check"
 
 rm -f "$ROLLBACK_DUMP" .env.pre-update

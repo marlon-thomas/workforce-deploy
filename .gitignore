@@ -10,6 +10,7 @@ secrets/*
 !.env.example
 backups/
 logs/
+state/
 inventories/local/
 
 # Rendered by the identity converge (holds the OIDC client secret).
