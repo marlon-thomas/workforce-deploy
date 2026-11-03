@@ -547,9 +547,19 @@ anything changes, as is a damaged file. To prove a copy restores without touchin
 `restore.sh` only ever puts the data back: it reads no further than the data in a copy, and leaves this server's `.env` and
 `secrets/` as they are. To put those back too, on a new server, see "Recovering onto a new server".
 
-If you unpack a copy by hand, `age -d` then `tar -xzf` gives you the data only. The settings and secrets are a second gzip
-part after it, which plain tar stops short of: `age -d -i <key file> <copy> | gzip -dc | tar -xif -` gets all of it, and
-writes every secret to the folder you're in, so don't.
+### By hand
+
+A copy is two gzip parts: the data, then the settings and secrets. Plain tar stops at the end of the first. You should only
+need this if `restore.sh` says a copy's data looks whole but what follows it is damaged, and there's no earlier copy. Decrypt
+it into `secrets/`, the one closed folder, because the file holds every secret, and restore that:
+
+    age -d -i <key file> -o secrets/unpacked.tar.gz <copy>.tar.gz.age
+    ./bin/restore.sh secrets/unpacked.tar.gz
+    rm secrets/unpacked.tar.gz
+
+`age` may report an error at the end of a damaged copy, and the file still holds what came before it. `restore.sh` then checks
+the data against its checksums, so bad data is still refused. This brings back the data only. The settings and secrets are
+what's damaged, so treat it as "If the copy has no settings and secrets", under "Recovering onto a new server".
 
 ## Recovering onto a new server
 
@@ -578,7 +588,9 @@ Everything else, including the settings you gave the installer and every passwor
    at the new server, so the recovery waits up to 15 minutes for them, then stops and says so. Keeping those records' TTL
    low, say 5 minutes, makes this quicker on the day.
 5. **Fetch the newest copy** with your own access to the target, then put it on the new server, for example
-   `scp <name>.tar.gz.age root@<new address>:/root/`.
+   `scp <name>.tar.gz.age root@<new address>:/root/`. **After a break-in, don't use the newest. Use one from before the
+   break-in.** Anyone can encrypt a file to your public key, and the old server could write to the target, so someone who
+   had that server could have left a copy of their own there, and it would open and restore like any other.
 6. **Run the recovery** as root on the new server:
 
    ```bash
@@ -587,13 +599,22 @@ Everything else, including the settings you gave the installer and every passwor
    ./bin/recover.sh --identity - /root/<name>.tar.gz.age
    ```
 
-   Paste the private key when asked, then the GitHub token, and leave it to run: it asks nothing else. Neither is shown. The
+   Clone it to exactly that place: the recovery refuses to run from anywhere else, so that nothing lying beside a clone gets
+   copied in. When asked, paste just the line starting `AGE-SECRET-KEY-1` from the key file, then the GitHub token, and leave it
+   to run: it asks nothing else. Neither is shown. The
    key is never written down, and the token is kept in the service account's Docker login, as on any install. It installs Docker and every service using the secrets from the copy, then
    restores the data, and tells you how long that took. Expect a good half hour, more with a lot of evidence.
 
    - The token can come from a file: `--registry-token-file <file>`. Delete the file afterwards.
    - On a machine that can't run rootless Docker, add `--system-docker`, as for the installer.
-   - **If it stops,** fix what it says and run the same command again. It carries on from where it got to.
+   - **If it stops,** fix what it says and run the same command again, with the same copy. It carries on from where it got
+     to, and refuses a different copy, because the secrets already in place only go with that copy's data. To use another,
+     start again on a new, empty server.
+   - **If it stops after saying the data is back,** the data won't be replaced again, even if you run this again, as people may
+     be using it by now. Fix what the health check says. Running the same command again then only repeats the check, and
+     finishes. The `recovery` row of `./bin/doctor.sh` is a reminder until you do.
+   - **Backups wait for it.** Until the data is back the server holds an empty install, so backups stand down rather than send
+     that off-site as your newest copy.
    - **If it says the backup's sign-in database is from another authentik version,** do what it says as `workforce_app_sa`:
      `./bin/upgrade-authentik.sh --hold <version>`. Run the recovery again as root, then `./bin/upgrade-authentik.sh`.
 7. **Remove the copy** from `/root` when you've finished checking. It's encrypted, so this is only about disk space.
@@ -627,14 +648,15 @@ gone waits at the sender for a few days, then bounces.
 
 Keep these from every recovery and every practice run, because they're what you'd tell your organisation to expect:
 
-- **Time to recover**: from the time in step 1 until the checks above pass. `recover.sh` prints its own share of that.
+- **Time to recover**: from the time in step 1 until the checks above pass. `recover.sh` prints how long its last run took.
 - **Data lost**: from the time the copy was made (it's in the file's name) until the server was lost. A nightly backup means up to a
   day.
 
 Practise before you need it. A full practice needs the names in the copy to point at the practice server, so it means a
 planned outage, or a test installation's own copy. In between, at least once a year, run "Restore drill" for the data, and
-this for the rest. It proves a copy holds what a recovery needs without changing anything. It reads the whole copy, writes
-none of it down, and works on any Linux computer with this repository, GNU tar, and either `age` or Docker:
+this for the rest. It proves a copy holds what a recovery needs, every file matching its checksum, without changing anything.
+It reads the whole copy, writes none of it down, and works on any Linux computer with this repository, GNU tar, and either
+`age` or Docker:
 
     ./bin/recover.sh --check --identity - <name>.tar.gz.age
 

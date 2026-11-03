@@ -342,6 +342,15 @@ case "$AH" in
 esac
 if [ "$AH" = ok ]; then row "sign-in server" ok "healthy"; else row "sign-in server" fail "not healthy"; fi
 
+# --- a recovery nobody finished. Only ever a warning: the server may be working perfectly well.
+if [ -f "$RECOVERY_MARK" ]; then
+  if [ "$(env_get stage "$RECOVERY_MARK")" = restored ]; then
+    row "recovery" warn "the data is back, but the recovery wasn't finished: as root, run ./bin/recover.sh again, with the same copy (it only re-checks), or remove $RECOVERY_MARK"
+  else
+    row "recovery" warn "a recovery is under way and the data isn't back yet, so backups are paused: as root, run ./bin/recover.sh again, with the same copy, to carry on"
+  fi
+fi
+
 # --- does the app trust the key authentik signs with? Everything else stays green when it doesn't,
 #     and nobody can sign in. Yes or no only, never the keys.
 if ! command -v openssl >/dev/null 2>&1; then

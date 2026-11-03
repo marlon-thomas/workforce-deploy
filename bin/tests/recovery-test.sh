@@ -46,6 +46,7 @@ case "$*" in
   *"exec -T postgres psql"*|*"exec -T authentik-postgres psql"*) cat > /dev/null ;;
   *pg_restore*)
     cat > /dev/null
+    if [ -f "$FAKE_SENT/verify-fails" ]; then exit 1; fi
     printf 'pg_restore\n' >> "$FAKE_RESTORES"
     # What's on disk while a restore is under way.
     find "${TMPDIR:-/nonexistent}" > "$FAKE_SENT/tmp-during-restore" 2>/dev/null
@@ -54,8 +55,25 @@ case "$*" in
   *"compose run"*init*"tar -xf -"*) cat > /dev/null; printf 'evidence\n' >> "$FAKE_RESTORES" ;;
   *"compose run"*init*) tar -C "$FAKE_EV" -cf - . ;;
   *"compose cp"*) exit 1 ;;
+  *"compose start authentik"*) if [ -f "$FAKE_SENT/start-fails" ]; then exit 1; fi ;;
 esac
 exit 0
+SH
+# In front of the real tar and rm, to fail on request. Only while that's being tested.
+REAL_TAR="$(command -v tar)"; REAL_RM="$(command -v rm)"
+cat > "$FAKE/tar" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *-xi*|*-ti*)
+    if [ -f "\$FAKE_SENT/tar-write-fails" ]; then cat > /dev/null; echo "tar: .env: Cannot write: No space left on device" >&2; exit 2; fi
+    if [ -f "\$FAKE_SENT/tar-fails-after" ]; then "$REAL_TAR" "\$@"; echo "tar: secrets/x: Cannot write: No space left on device" >&2; exit 2; fi ;;
+esac
+exec "$REAL_TAR" "\$@"
+SH
+cat > "$FAKE/rm" <<SH
+#!/usr/bin/env bash
+case "\$*" in *.recover-registry*) if [ -f "\$FAKE_SENT/rm-denied" ]; then echo "rm: Permission denied" >&2; exit 1; fi ;; esac
+exec "$REAL_RM" "\$@"
 SH
 cat > "$FAKE/rsync" <<'SH'
 #!/usr/bin/env bash
@@ -145,7 +163,7 @@ make_server() { # make_server <dir> <target> <recipient>
   printf 'image: goauthentik/server:2026.8.1\n' > "$d/compose.yaml"
   printf 'TLS_MODE=certs\n' > "$d/environments/test.env"
   mv "$d/bin/doctor.sh" "$d/bin/doctor-real.sh"
-  printf '#!/usr/bin/env bash\nprintf "doctor %%s\\n" "$*" >> "$FAKE_CALLS"\n[ ! -f "$FAKE_SENT/doctor-red" ]\n' > "$d/bin/doctor.sh"
+  printf '#!/usr/bin/env bash\nprintf "doctor %%s\\n" "$*" >> "$FAKE_CALLS"\n[ ! -f "$FAKE_SENT/doctor-red" ] || exit 1\nif [ -f "$FAKE_SENT/doctor-red-after-restore" ] && grep -q evidence "$FAKE_RESTORES"; then exit 1; fi\n' > "$d/bin/doctor.sh"
   chmod +x "$d/bin/doctor.sh"
   cat > "$d/.env" <<ENV
 ENV_NAME=test
@@ -189,7 +207,7 @@ make_clone() { # make_clone <dir>
   printf 'image: goauthentik/server:2026.8.1\n' > "$d/compose.yaml"
   printf 'TLS_MODE=certs\n' > "$d/environments/test.env"
   mv "$d/bin/doctor.sh" "$d/bin/doctor-real.sh"
-  printf '#!/usr/bin/env bash\nprintf "doctor %%s\\n" "$*" >> "$FAKE_CALLS"\n[ ! -f "$FAKE_SENT/doctor-red" ]\n' > "$d/bin/doctor.sh"
+  printf '#!/usr/bin/env bash\nprintf "doctor %%s\\n" "$*" >> "$FAKE_CALLS"\n[ ! -f "$FAKE_SENT/doctor-red" ] || exit 1\nif [ -f "$FAKE_SENT/doctor-red-after-restore" ] && grep -q evidence "$FAKE_RESTORES"; then exit 1; fi\n' > "$d/bin/doctor.sh"
   chmod +x "$d/bin/doctor.sh"
 }
 
@@ -239,6 +257,44 @@ UP_LINE="$(grep -n 'name: Application plane up' "$ROLE" | cut -d: -f1)"
 check "the rule runs before the app starts" "$([ "${MODES_LINE:-99999}" -lt "${UP_LINE:-0}" ] && echo yes)" yes
 contains "install.sh applies the rule after converging" "$(sed -n '/^run_ansible_site()/,/^}/p' "$REPO/bin/install.sh")" "secret_modes"
 
+# ------------------------------------------------------------------ pasting a whole key file
+# On a real terminal. The file's first line is a comment, and the key mustn't be left queued for root's shell.
+if command -v python3 >/dev/null 2>&1; then
+  FAKE_KEY="AGE-SECRET-KEY-1$(printf 'Q%.0s' $(seq 1 58))"
+  cat > "$WORK/paste.py" <<'PY_PASTE'
+import os, pty, select, sys, time
+child = "cd \"$1\" && . bin/lib/common.sh && read_age_identity -; echo \"rc=$?\"; [ \"$AGE_IDENTITY\" = \"$2\" ] && echo got-the-key; IFS= read -r -t 1 rest; echo \"queued=[${rest:+yes}]\""
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp("bash", ["bash", "-c", child, "bash", sys.argv[1], sys.argv[2]])
+time.sleep(0.5)
+os.write(fd, sys.argv[3].encode().decode("unicode_escape").encode())
+out = b""
+while True:
+    r, _, _ = select.select([fd], [], [], 8)
+    if not r: break
+    try: d = os.read(fd, 4096)
+    except OSError: break
+    if not d: break
+    out += d
+os.waitpid(pid, 0)
+sys.stdout.write(out.decode(errors="replace"))
+PY_PASTE
+  # The way age-keygen writes it, the way a person pastes it.
+  PASTE_OUT="$(python3 "$WORK/paste.py" "$REPO" "$FAKE_KEY" "# created: 2026-11-03T00:00:00Z\\n# public key: age1example\\n$FAKE_KEY\\n" 2>&1)"
+  contains "pasting a key file: found the key" "$PASTE_OUT" "got-the-key"
+  contains "pasting a key file: nothing left for the shell" "$PASTE_OUT" "queued=[]"
+  lacks "pasting a key file: not shown" "$PASTE_OUT" "$FAKE_KEY"
+  # Two keys in the paste: the second doesn't go to whoever reads next.
+  PASTE_OUT="$(python3 "$WORK/paste.py" "$REPO" "$FAKE_KEY" "$FAKE_KEY\\n$FAKE_KEY\\n" 2>&1)"
+  contains "pasting two keys: nothing left over" "$PASTE_OUT" "queued=[]"
+  PASTE_OUT="$(python3 "$WORK/paste.py" "$REPO" "$FAKE_KEY" "$FAKE_KEY\\n" 2>&1)"
+  contains "pasting the key line alone: found" "$PASTE_OUT" "got-the-key"
+  PASTE_OUT="$(python3 "$WORK/paste.py" "$REPO" "$FAKE_KEY" "not a key\\n\\x04" 2>&1)"
+  contains "something else, then Ctrl-D: stops" "$PASTE_OUT" "rc=1"
+  lacks "something else: not repeated back" "$PASTE_OUT" "not a key"
+fi
+
 # ------------------------------------------------------------------ the doctor's row
 B="$WORK/server"; make_server "$B" "" ""
 doctor_row() { ( cd "$B" && bash ./bin/doctor-real.sh --plain --smoke 2>/dev/null ) | awk -F'\t' '$2 == "sign-in key" { print $1 "|" $3 }'; }
@@ -258,6 +314,14 @@ contains "doctor: no copy of the key" "$(doctor_row)" "FAIL|the application has 
 mv "$WORK/pem.keep" "$B/secrets/oidc_signing_pub.pem"
 rm -f "$SENT/ak-cert"
 contains "doctor: can't read the database is only a WARN" "$(doctor_row)" "WARN|not checked"
+
+# The doctor says when a recovery hasn't been finished.
+recovery_row() { ( cd "$B" && bash ./bin/doctor-real.sh --plain --smoke 2>/dev/null ) | awk -F'\t' '$2 == "recovery" { print $1 "|" $3 }'; }
+check "doctor: no recovery, no row" "$(recovery_row)" ""
+mkdir -p "$B/state"; printf 'stage=restored\ncopy=x.tar.gz.age\nsize=1\n' > "$B/state/recovery-in-progress"
+contains "doctor: a recovery left unfinished" "$(recovery_row)" "WARN|"
+contains "doctor: and what to do" "$(recovery_row)" "bin/recover.sh"
+rm -f "$B/state/recovery-in-progress"
 
 # ------------------------------------------------------------------ a full restore and signing in
 restore() { ( cd "$B" && TMPDIR="$WORK/tmpd" bash ./bin/restore.sh "$@" ) > "$WORK/out" 2>&1; }
@@ -325,6 +389,56 @@ rm -f "$SENT/ak-cert"; to_fresh_install; rm -f "$SENT/ak-cert"
 ( cd "$B" && bash ./bin/refresh-signing-key.sh ) > "$WORK/out" 2>&1; check "refresh: can't read it" "$?" 1
 contains "refresh: says so" "$(cat "$WORK/out")" "Couldn't read the key"
 
+# The password file is settled as soon as the key is, whatever happens to the restart after it.
+to_fresh_install; touch "$SENT/start-fails"; reset_logs
+restore --yes "$ARCHIVE"; [ "$?" -ne 0 ] && ok || bad "a failed start: the restore fails"
+check "a failed start: the throwaway password is gone anyway" "$([ -e "$B/secrets/initial-admin-password" ] && echo left || echo gone)" gone
+contains "a failed start: and what to do was said" "$(cat "$WORK/out")" 'Forgot your password?'
+rm -f "$SENT/start-fails"
+# It can't tell another installation from a key changed on this one, so it doesn't claim to.
+to_fresh_install; restore --yes "$ARCHIVE"
+contains "the words allow for a key changed here" "$(cat "$WORK/out")" "If you changed the sign-in key"
+
+# ------------------------------------------------------------------ the marker, on restore.sh and backup.sh
+mark_stage() { printf 'stage=%s\ncopy=x.tar.gz.age\nsize=1\n' "$1" > "$B/state/recovery-in-progress"; }
+stage_of() { sed -n 's/^stage=//p' "$B/state/recovery-in-progress" 2>/dev/null; }
+cp "$SENT/backup-cert" "$SENT/ak-cert"
+mark_stage installed; reset_logs
+restore --yes "$ARCHIVE"; check "a marker: a completed restore" "$?" 0
+check "a marker: a completed restore removes it" "$([ -e "$B/state/recovery-in-progress" ] && echo left || echo gone)" gone
+mark_stage installed; touch "$SENT/doctor-red"
+restore --yes "$ARCHIVE"; check "a marker: red at the end" "$?" 1
+check "a marker: the data is back, whatever the check said" "$(stage_of)" restored
+rm -f "$SENT/doctor-red"
+mark_stage installed; touch "$SENT/verify-fails"
+restore --yes "$ARCHIVE"; check "a marker: a bad backup" "$?" 1
+check "a marker: nothing replaced, so still installed" "$(stage_of)" installed
+rm -f "$SENT/verify-fails"
+mark_stage installed
+restore --yes --data-only "$ARCHIVE"; check "a marker: --data-only" "$?" 0
+check "a marker: --data-only leaves it" "$(stage_of)" installed
+rm -f "$B/state/recovery-in-progress"
+# No marker: none appears.
+restore --yes "$ARCHIVE"
+check "no marker: none made" "$([ -e "$B/state/recovery-in-progress" ] && echo made || echo none)" none
+
+# A backup during a recovery, before the data is back, would hold an empty install.
+archive_count() { find "$B/backups" -maxdepth 1 -name '*.tar.gz' | wc -l | tr -d ' '; }
+for s in placing installed; do
+  mark_stage "$s"; N_BEFORE="$(archive_count)"
+  ( cd "$B" && bash ./bin/backup.sh ) > "$WORK/out" 2>&1; [ "$?" -ne 0 ] && ok || bad "stage $s: the backup stands down"
+  contains "stage $s: says why" "$(cat "$WORK/out")" "recovery"
+  check "stage $s: no archive" "$(archive_count)" "$N_BEFORE"
+  lacks "stage $s: not a failed copy" "$(cat "$WORK/out")" "Off-site copy failed"
+  ( cd "$B" && bash ./bin/backup.sh --offsite-only ) > "$WORK/out" 2>&1; [ "$?" -ne 0 ] && ok || bad "stage $s: the test copy stands down"
+  contains "stage $s: the test copy says why" "$(cat "$WORK/out")" "recovery"
+done
+# Once the data is back it's real, and a marker someone never cleared mustn't stop backups of a live site.
+mark_stage restored
+( cd "$B" && bash ./bin/backup.sh ) > "$WORK/out" 2>&1; check "stage restored: the backup runs" "$?" 0
+contains "stage restored: an archive" "$(cat "$WORK/out")" "Wrote backups/"
+rm -f "$B/state/recovery-in-progress"
+
 # ------------------------------------------------------------------ what needs real encryption
 HAVE_GNU=0; tar --version 2>/dev/null | grep -q GNU && HAVE_GNU=1
 if [ -z "$REAL_AGE" ] || [ -z "$REAL_KEYGEN" ] || [ "$HAVE_GNU" -eq 0 ]; then
@@ -365,6 +479,23 @@ else
   archive_part no-such-part >/dev/null 2>&1; [ "$?" -ne 0 ] && ok || bad "drill: a missing part is noticed"
   archive_part secrets/db_password >/dev/null 2>&1; [ "$?" -ne 0 ] && ok || bad "drill: the config isn't a part"
 
+  # Copies with something wrong inside, though age and gzip are happy with them.
+  ARCHIVE_SIZE="$(wc -c < "$ARCHIVE_O")"
+  mkdir "$WORK/cfg"; "$REAL_AGE" -d -i "$WORK/key.txt" "$COPY" | tail -c +"$((ARCHIVE_SIZE + 1))" | tar -xzf - -C "$WORK/cfg"
+  forge() { # forge <name>: seal $WORK/forge.tgz after the data
+    cat "$ARCHIVE_O" "$WORK/forge.tgz" | "$REAL_AGE" -r "$RECIPIENT" -o "$WORK/$1.tar.gz.age"
+  }
+  pack_cfg() { ( cd "$WORK/cfg2" && tar -cf - secrets/.config-manifest .env secrets 2>/dev/null ); }
+  rm -rf "$WORK/cfg2"; cp -a "$WORK/cfg" "$WORK/cfg2"; rm -f "$WORK/cfg2/secrets/ai_credential_key"
+  pack_cfg | gzip -c > "$WORK/forge.tgz"; forge missing-secret
+  rm -rf "$WORK/cfg2"; cp -a "$WORK/cfg" "$WORK/cfg2"; chmod 644 "$WORK/cfg2/secrets/ai_credential_key"; printf 'x' > "$WORK/cfg2/secrets/ai_credential_key"
+  pack_cfg | gzip -c > "$WORK/forge.tgz"; forge short-secret
+  # A tar cut off part-way, in a perfectly good gzip: what a read error in the middle of sending leaves.
+  rm -rf "$WORK/cfg2"; cp -a "$WORK/cfg" "$WORK/cfg2"
+  pack_cfg | head -c 3000 | gzip -c > "$WORK/forge.tgz"; forge cut-tar
+  # The second part is broken, so restore.sh can't vouch for the copy, though the data is whole.
+  head -c 200 "$WORK/forge.tgz" > "$WORK/forge2.tgz"; mv "$WORK/forge2.tgz" "$WORK/forge.tgz"; forge bad-tail
+
   # --- recover.sh --check
   rchk() { bash "$REPO/bin/recover.sh" --check "$@" > "$WORK/out" 2>&1; }
   rchk --identity "$WORK/key.txt" "$COPY"; check "--check: a good copy" "$?" 0
@@ -373,11 +504,33 @@ else
   rchk --identity "$WORK/other-key.txt" "$COPY"; check "--check: the wrong key" "$?" 6
   head -c "$(( $(wc -c < "$COPY") - 100 ))" "$COPY" > "$WORK/cut.tar.gz.age"
   rchk --identity "$WORK/key.txt" "$WORK/cut.tar.gz.age"; check "--check: cut short" "$?" 1
+  for f in missing-secret short-secret cut-tar bad-tail; do
+    rchk --identity "$WORK/key.txt" "$WORK/$f.tar.gz.age"; check "--check: $f is damaged" "$?" 1
+    lacks "--check: $f isn't OK" "$(cat "$WORK/out")" "OK:"
+  done
+  # Damage isn't the wrong key: someone could conclude the key is lost.
+  head -c 40 "$COPY" > "$WORK/bad-header.tar.gz.age"
+  rchk --identity "$WORK/key.txt" "$WORK/bad-header.tar.gz.age"; check "--check: a broken header isn't the wrong key" "$?" 1
+  lacks "--check: a broken header, in words" "$(cat "$WORK/out")" "doesn't open"
+  # tar failing while age and gzip are fine
+  touch "$SENT/tar-fails-after"
+  rchk --identity "$WORK/key.txt" "$COPY"; check "--check: tar fails" "$?" 1
+  rm -f "$SENT/tar-fails-after"
+  # Its exit code survives a tidy-up it isn't allowed to do, as anyone but root.
+  touch "$SENT/rm-denied"
+  rchk --identity "$WORK/key.txt" "$COPY"; check "--check: can't reach secrets/, still OK" "$?" 0
+  rchk --identity "$WORK/key.txt" "$WORK/old-format.tar.gz.age"; check "--check: can't reach secrets/, still 3" "$?" 3
+  rchk --identity "$WORK/other-key.txt" "$COPY"; check "--check: can't reach secrets/, still 6" "$?" 6
+  rm -f "$SENT/rm-denied"
+  # Writes none of it down.
+  rm -rf "$WORK/tmpd2"; mkdir "$WORK/tmpd2"; rchk_tmp() { TMPDIR="$WORK/tmpd2" bash "$REPO/bin/recover.sh" --check "$@" > "$WORK/out" 2>&1; }
+  rchk_tmp --identity "$WORK/key.txt" "$COPY"; check "--check: leaves no file" "$(find "$WORK/tmpd2" -mindepth 1 | wc -l | tr -d ' ')" 0
 
   # --- a recovery, start to finish
-  T="$WORK/opt-workforce"; N="$WORK/clone"; make_clone "$N"
-  recover() { ( cd "$N" && WORKFORCE_TARGET="$T" TMPDIR="$WORK/tmpd" bash ./bin/recover.sh "$@" ) > "$WORK/out" 2>&1; }
-  new_server() { rm -rf "$T"; rm -f "$WORK/fakehome/.docker/config.json" "$SENT/user-made" "$SENT/token-received" "$SENT/vars.json"; touch "$SENT/no-such-user"; cp "$SENT/fresh-cert" "$SENT/ak-cert"; reset_logs; }
+  # Run from the clone in its final home, as RUNBOOK says.
+  T="$WORK/opt-workforce"
+  recover() { ( cd "$T" && WORKFORCE_TARGET="$T" TMPDIR="$WORK/tmpd" bash ./bin/recover.sh "$@" ) > "$WORK/out" 2>&1; }
+  new_server() { rm -rf "$T"; make_clone "$T"; rm -f "$WORK/fakehome/.docker/config.json" "$SENT/user-made" "$SENT/token-received" "$SENT/vars.json"; touch "$SENT/no-such-user"; cp "$SENT/fresh-cert" "$SENT/ak-cert"; reset_logs; }
   # What must come back exactly as it was: .env apart from the socket, and every secret.
   same_as_old() { # same_as_old <label>
     check "$1: .env is as it was, but for the socket" "$(grep -v '^DOCKER_SOCK=' "$T/.env" | sha256sum)" "$(grep -v '^DOCKER_SOCK=' "$O/.env" | sha256sum)"
@@ -420,7 +573,7 @@ else
   check "recover: no leftovers in secrets/" "$(find "$T/secrets" -maxdepth 1 -name '.recover*' | wc -l | tr -d ' ')" 0
   check "recover: nothing in progress" "$([ -e "$T/state/recovery-in-progress" ] && echo yes || echo no)" no
   check "recover: nothing in the temp folder" "$(find "$WORK/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0
-  contains "recover: says how long" "$(cat "$WORK/out")" "Recovered in about"
+  contains "recover: says how long" "$(cat "$WORK/out")" "took about"
   contains "recover: says what a person should check" "$(cat "$WORK/out")" "sign in with a real account"
 
   # Done, so it won't run over itself.
@@ -467,27 +620,63 @@ else
   contains "run again: restored" "$(cat "$FAKE_RESTORES")" "evidence"
   check "run again: done" "$([ -e "$T/state/recovery-in-progress" ] && echo yes || echo no)" no
 
+  # Red in the install's own check, before any data: run again from there.
   new_server; touch "$SENT/doctor-red"
-  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "red health check: stops" "$?" 1
+  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "red before the data: stops" "$?" 1
+  check "red before the data: nothing restored" "$(cat "$FAKE_RESTORES")" ""
   rm -f "$SENT/doctor-red"
-  if [ "$(cat "$T/state/recovery-in-progress" 2>/dev/null)" != installed ]; then
-    # The red came in the install's own check, before the restore: run again from there.
-    recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "red install check: run again" "$?" 0
-  else
-    bad "red health check: expected it to stop in the install's own check"
-  fi
+  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "red before the data: run again" "$?" 0
+  contains "red before the data: restored" "$(cat "$FAKE_RESTORES")" "evidence"
 
-  # Restore stops after the setup: a run again skips the setup and needs no token.
-  new_server
-  sed -i 's/^\[ ! -f "\$FAKE_SENT\/doctor-red" \]$/[ ! -f "$FAKE_SENT\/doctor-red" ] \&\& { [ "$1" != --gate ] || [ ! -f "$FAKE_SENT\/restore-red" ] || ! grep -q certificate_data "$FAKE_CALLS"; }/' "$N/bin/doctor.sh"
-  touch "$SENT/restore-red"
-  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; RC=$?
-  check "restore stops: stops" "$RC" 1
-  check "restore stops: the setup is marked done" "$(cat "$T/state/recovery-in-progress" 2>/dev/null)" installed
-  rm -f "$SENT/restore-red"; reset_logs
+  # The backup is refused before anything is replaced: a run again skips the setup and tries once more.
+  new_server; touch "$SENT/verify-fails"
+  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "restore stops: stops" "$?" 1
+  check "restore stops: the setup is marked done" "$(sed -n 's/^stage=//p' "$T/state/recovery-in-progress")" installed
+  rm -f "$SENT/verify-fails"; reset_logs
   recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "restore stops: run again" "$?" 0
   check "run again: the setup isn't repeated" "$(grep -c '^ansible-playbook' "$FAKE_CALLS")" 0
   contains "run again: restored" "$(cat "$FAKE_RESTORES")" "evidence"
+
+  # The data is back and the final check is red. The site may be in use by now: never replace it again.
+  new_server; touch "$SENT/doctor-red-after-restore"
+  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "red after the data: stops" "$?" 1
+  contains "red after the data: says the data is back" "$(cat "$WORK/out")" "The data is back"
+  check "red after the data: marked restored" "$(sed -n 's/^stage=//p' "$T/state/recovery-in-progress")" restored
+  rm -f "$SENT/doctor-red-after-restore"; touch "$SENT/doctor-red"; reset_logs
+  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "still red: stops" "$?" 1
+  check "still red: nothing replaced" "$(cat "$FAKE_RESTORES")" ""
+  check "still red: the marker stays" "$(sed -n 's/^stage=//p' "$T/state/recovery-in-progress")" restored
+  rm -f "$SENT/doctor-red"; reset_logs
+  # It needs no key or token for this: there's nothing left to decrypt.
+  ( cd "$T" && WORKFORCE_TARGET="$T" bash ./bin/recover.sh --identity /nonexistent/key "$COPY" ) > "$WORK/out" 2>&1; check "green now: finishes" "$?" 0
+  check "green now: nothing replaced" "$(cat "$FAKE_RESTORES")" ""
+  check "green now: no setup repeated" "$(grep -c '^ansible-playbook' "$FAKE_CALLS")" 0
+  contains "green now: the check ran" "$(cat "$FAKE_CALLS")" "doctor --gate"
+  check "green now: the marker is gone" "$([ -e "$T/state/recovery-in-progress" ] && echo left || echo gone)" gone
+  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "and then: the guard is back" "$?" 1
+  contains "and then: in words" "$(cat "$WORK/out")" "already set up"
+  check "and then: nothing replaced" "$(cat "$FAKE_RESTORES")" ""
+
+  # A marker that says nothing can't be trusted to open the guard.
+  new_server; printf 'x=1\n' > "$T/.env"; mkdir -p "$T/state"; : > "$T/state/recovery-in-progress"
+  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "an empty marker: refused" "$?" 1
+  check "an empty marker: nothing ran" "$(grep -c 'install.sh\|restore.sh' "$FAKE_CALLS")" 0
+
+  # A different copy on a run again: copy A's secrets would meet copy B's data.
+  cp "$SENT/rsync-copy" "$WORK/copy-b.tar.gz.age"; printf 'padding' | "$REAL_AGE" -r "$RECIPIENT" >> /dev/null
+  cat "$ARCHIVE_O" "$WORK/forge.tgz" | "$REAL_AGE" -r "$RECIPIENT" -o "$WORK/copy-b.tar.gz.age"
+  new_server; touch "$SENT/ansible-fails"
+  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "another copy: the first stops" "$?" 1
+  reset_logs
+  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$WORK/copy-b.tar.gz.age"; check "another copy: refused" "$?" 1
+  contains "another copy: names the one it started with" "$(cat "$WORK/out")" "copy.tar.gz.age"
+  contains "another copy: says what to do" "$(cat "$WORK/out")" "new, empty server"
+  check "another copy: nothing ran" "$(grep -c 'install.sh\|restore.sh' "$FAKE_CALLS")" 0
+  # The same name but a different size is another copy too.
+  cp "$COPY" "$WORK/same-name.keep"; printf 'x' >> "$COPY"
+  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "another copy, same name: refused" "$?" 1
+  cp "$WORK/same-name.keep" "$COPY"
+  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "the same copy: carries on" "$?" 0
 
   # --- what it refuses, changing nothing
   new_server
@@ -502,7 +691,39 @@ else
   new_server
   recover --identity "$WORK/other-key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "wrong key: refused" "$?" 1
   contains "wrong key: in words" "$(cat "$WORK/out")" "doesn't open this copy"
-  check "wrong key: nothing moved" "$([ -e "$T" ] && echo yes || echo no)" no
+  check "wrong key: no .env" "$([ -e "$T/.env" ] && echo yes || echo no)" no
+  new_server
+  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$WORK/bad-header.tar.gz.age"; check "a broken header: refused" "$?" 1
+  lacks "a broken header: not blamed on the key" "$(cat "$WORK/out")" "doesn't open this copy"
+  contains "a broken header: says damaged" "$(cat "$WORK/out")" "damaged"
+
+  # Valid to age and gzip, wrong inside: no half-set server, and no quietly regenerated secrets later.
+  for f in missing-secret short-secret cut-tar bad-tail; do
+    new_server
+    recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$WORK/$f.tar.gz.age"; check "$f: refused" "$?" 1
+    contains "$f: says damaged" "$(cat "$WORK/out")" "damaged"
+    lacks "$f: isn't called an older copy" "$(cat "$WORK/out")" "made before they"
+    check "$f: no .env" "$([ -e "$T/.env" ] && echo yes || echo no)" no
+    check "$f: nothing ran" "$(grep -c 'install.sh\|restore.sh' "$FAKE_CALLS")" 0
+  done
+  # tar fails with age and gzip healthy, as on a full disk: having pulled out .env first, and not.
+  new_server; touch "$SENT/tar-fails-after"
+  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "tar fails part-way: refused" "$?" 1
+  contains "tar fails part-way: says damaged" "$(cat "$WORK/out")" "damaged"
+  check "tar fails part-way: no .env" "$([ -e "$T/.env" ] && echo yes || echo no)" no
+  rm -f "$SENT/tar-fails-after"
+  new_server; touch "$SENT/tar-write-fails"
+  recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "tar can't write at all: refused" "$?" 1
+  lacks "tar can't write at all: isn't called an older copy" "$(cat "$WORK/out")" "made before they"
+  contains "tar can't write at all: says what" "$(cat "$WORK/out")" "disk"
+  rm -f "$SENT/tar-write-fails"
+
+  # Not from the clone in its final home: nothing is copied, so nothing lying beside it comes along.
+  new_server
+  S="$WORK/staged"; rm -rf "$S"; make_clone "$S"; printf 'a key lying about' > "$S/my-key.txt"
+  ( cd "$S" && WORKFORCE_TARGET="$T" bash ./bin/recover.sh --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY" ) > "$WORK/out" 2>&1; check "a clone elsewhere: refused" "$?" 1
+  contains "a clone elsewhere: says where" "$(cat "$WORK/out")" "git clone"
+  check "a clone elsewhere: nothing copied" "$([ -e "$T/my-key.txt" ] && echo yes || echo no)" no
 
   new_server
   recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$WORK/cut.tar.gz.age"; check "cut short: refused" "$?" 1
@@ -516,27 +737,47 @@ else
   new_server; : > "$WORK/empty"
   recover --identity "$WORK/key.txt" --registry-token-file "$WORK/empty" "$COPY"; check "no token: refused" "$?" 1
   contains "no token: in words" "$(cat "$WORK/out")" "read:packages"
-  check "no token: nothing moved" "$([ -e "$T" ] && echo yes || echo no)" no
+  check "no token: no .env" "$([ -e "$T/.env" ] && echo yes || echo no)" no
 
   # Not root: nothing happens
   new_server
-  ( cd "$N" && FAKE_UID=1500 WORKFORCE_TARGET="$T" bash ./bin/recover.sh --identity "$WORK/key.txt" "$COPY" ) > "$WORK/out" 2>&1; check "not root: refused" "$?" 1
+  ( cd "$T" && FAKE_UID=1500 WORKFORCE_TARGET="$T" bash ./bin/recover.sh --identity "$WORK/key.txt" "$COPY" ) > "$WORK/out" 2>&1; check "not root: refused" "$?" 1
   contains "not root: in words" "$(cat "$WORK/out")" "as root"
 
   # --- no environment file (a customer's own server): the questions' DNS check still happens
-  new_server; rm -f "$SENT/dns-here"; mv "$N/environments/test.env" "$WORK/test.env.keep"
+  new_server; rm -f "$SENT/dns-here"; rm -f "$T/environments/test.env"
   recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "DNS elsewhere: stops" "$?" 1
   contains "DNS elsewhere: says what to change" "$(cat "$WORK/out")" "Change the A records"
   check "DNS elsewhere: before converging" "$(grep -c '^ansible-playbook' "$FAKE_CALLS")" 0
   touch "$SENT/dns-here"
   recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$COPY"; check "DNS here: carries on" "$?" 0
-  mv "$WORK/test.env.keep" "$N/environments/test.env"
+  # A server's mode is in what it ran with, not in a file that may not be on this one: a private CA or
+  # DNS-01 server has no need of its names pointing here, and would wait 15 minutes for nothing.
+  for c in Caddyfile.localca Caddyfile.duckdns; do
+    printf 'GATEWAY_CADDYFILE=./gateway/%s\n' "$c" >> "$O/.env"
+    ( cd "$O" && bash ./bin/backup.sh --offsite-only ) > "$WORK/out" 2>&1
+    sed -i '$d' "$O/.env"
+    cp "$SENT/rsync-copy" "$WORK/mode.tar.gz.age"
+    new_server; rm -f "$SENT/dns-here" "$T/environments/test.env"
+    recover --identity "$WORK/key.txt" --registry-token-file "$WORK/token.txt" "$WORK/mode.tar.gz.age"; check "$c, DNS elsewhere: no wait" "$?" 0
+    lacks "$c: no DNS check" "$(cat "$WORK/out")" "point at this machine"
+  done
 
   # --- an older copy still restores, by restore.sh, as an ordinary archive would
   B="$WORK/server"; to_fresh_install
   restore --yes --identity "$WORK/key.txt" "$WORK/old-format.tar.gz.age"; check "older copy, restore.sh: works" "$?" 0
   check "older copy, restore.sh: signing in repaired" "$(sum_of "$B/secrets/oidc_signing_pub.pem")" "$(sum_of "$SENT/backup-pub")"
   check "older copy, restore.sh: the throwaway password is gone" "$([ -e "$B/secrets/initial-admin-password" ] && echo left || echo gone)" gone
+
+  # --- a broken second part: the data's whole, so say how to get it out
+  to_fresh_install
+  restore --yes --identity "$WORK/key.txt" "$WORK/bad-tail.tar.gz.age"; check "bad second part: refused" "$?" 1
+  contains "bad second part: says the data looks whole" "$(cat "$WORK/out")" "the data in it looks whole"
+  contains "bad second part: points at the RUNBOOK" "$(cat "$WORK/out")" "By hand"
+  # And what that section says works.
+  "$REAL_AGE" -d -i "$WORK/key.txt" -o "$B/secrets/unpacked.tar.gz" "$WORK/bad-tail.tar.gz.age"
+  restore --yes "$B/secrets/unpacked.tar.gz"; check "bad second part: by hand, the data restores" "$?" 0
+  rm -f "$B/secrets/unpacked.tar.gz"
 
   # --- a new copy through restore.sh on another server: it ignores the config
   to_fresh_install

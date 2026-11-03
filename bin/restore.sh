@@ -17,8 +17,8 @@
 # tar stops at the end of the data. Only bin/recover.sh puts them back.
 #
 # After a full restore of the sign-in database, the app is made to trust the signing key that came
-# back with it. If that key isn't this server's, the database came from another installation, and
-# secrets/initial-admin-password no longer means anything: it's removed, and this says what to do.
+# back with it. If that key isn't the one this server had, secrets/initial-admin-password can't be relied
+# on: it's removed, and this says what to do.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -65,6 +65,13 @@ if is_age_file "$ARCHIVE"; then
     echo "rotated since, this backup needs the older one. Nothing was changed."
     exit 1
   fi
+  # All the data came out, and it's what follows that's bad: that can be got past, by hand.
+  if [ "${DECRYPT_RC[2]}" -eq 0 ] && [ -f "$TMP/database.dump" ] && { [ "${DECRYPT_RC[0]}" -ne 0 ] || [ "${DECRYPT_RC[1]}" -ne 0 ]; }; then
+    echo "This backup is damaged after its data: the data in it looks whole, but the server's settings that follow"
+    echo "aren't readable, so it can't be vouched for as it stands. Nothing was changed. Use an earlier copy if you"
+    echo "can. If not, RUNBOOK, \"Off-site backup targets\", has \"By hand\": how to get the data out and restore that."
+    exit 1
+  fi
   if [ "${DECRYPT_RC[0]}" -ne 0 ] || [ "${DECRYPT_RC[1]}" -ne 0 ] || [ "${DECRYPT_RC[2]}" -ne 0 ]; then
     echo "This backup couldn't be decrypted and unpacked: the file is damaged or incomplete, or age"
     echo "couldn't run here (it uses a helper container if it isn't installed). Nothing was changed."
@@ -75,7 +82,13 @@ else
     *.age) echo "This file is named as an encrypted backup but isn't one: wrong file, or damaged? Nothing was changed."; exit 1 ;;
   esac
   [ -z "$IDENTITY" ] || echo "NOTE: this backup isn't encrypted, so the key wasn't needed."
-  tar -xzf "$ARCHIVE" -C "$TMP"
+  # Only tar's word counts here. Whatever follows the data doesn't matter to a restore, and the MANIFEST
+  # below is what vouches for the data: a copy with a damaged tail, unpacked by hand, restores this way.
+  set +e
+  gzip -dc < "$ARCHIVE" 2>/dev/null | { tar -xf - -C "$TMP"; TAR_RC=$?; cat >/dev/null; exit "$TAR_RC"; }
+  PLAIN_RC=("${PIPESTATUS[@]}")
+  set -e
+  if [ "${PLAIN_RC[1]}" -ne 0 ]; then echo "This archive couldn't be unpacked: it's damaged or incomplete. Nothing was changed."; exit 1; fi
 fi
 [ -f "$TMP/database.dump" ] || { echo "Archive has no database.dump — wrong file?"; exit 1; }
 if [ -f "$TMP/MANIFEST" ]; then
@@ -161,11 +174,38 @@ if [ "$DATA_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+# The data is back, so a recovery under way must never replace it again, however the rest goes: from here
+# the site can come up and be used.
+if [ -f "$RECOVERY_MARK" ]; then
+  env_set stage restored "$RECOVERY_MARK" || echo "WARNING: couldn't note in $RECOVERY_MARK that the data is back. Don't run bin/recover.sh again: remove that file."
+fi
+
 # The sign-in database brought its own signing key back. Read straight from that database, so before
 # anything that signs or checks a sign-in is running.
 KEY_PROBLEM=0
 if [ "$HAVE_AK" -eq 1 ]; then
   export_oidc_signing_key || KEY_PROBLEM=1
+fi
+
+# A different key means a different sign-in database: another installation's, without its settings
+# (Workforce ADR-0026), or this one's from before its key was changed. There's no telling which, so the
+# file goes, and the words allow for both. Settled now, as nothing that can fail below should skip it.
+if [ "$OIDC_KEY_CHANGED" -eq 1 ] && [ "$CONFIG_RESTORED" -eq 0 ]; then
+  rm -f secrets/initial-admin-password
+  cat <<'WORDS'
+
+Signing in after this restore:
+  The sign-in accounts have come back from the backup, and their signing key isn't the one this server had.
+  - secrets/initial-admin-password can't be relied on now, so it has been removed. It held the password this
+    server's own install made up, which normally opens nothing after this. If you changed the sign-in key on
+    this server yourself, and that password is written down somewhere, it may still be right.
+  - Everyone signs in with the password they had when the backup was made, and that includes admin.
+  - If nobody knows the admin password: on the sign-in page choose "Forgot your password?" and give the
+    recovery address (ADMIN_RECOVERY_EMAIL). A link is emailed there, if email is working and that
+    address is outside this server. If that can't work: ./bin/reset-admin.sh
+  - RUNBOOK, "Recovering onto a new server", says what else may need setting again.
+
+WORDS
 fi
 
 echo "Starting the sign-in server and the application…"
@@ -182,27 +222,11 @@ if [ -d "$TMP/branding" ]; then
     || echo "  (branding not restored — re-upload it in the admin settings)"
 fi
 sleep 15
-# Another installation's sign-in database, without that installation's settings (Workforce ADR-0026).
-if [ "$OIDC_KEY_CHANGED" -eq 1 ] && [ "$CONFIG_RESTORED" -eq 0 ]; then
-  rm -f secrets/initial-admin-password
-  cat <<'WORDS'
-
-Signing in after this restore:
-  The sign-in accounts have come back from the backup, but that server's settings and secrets haven't.
-  - secrets/initial-admin-password held the password this server's own install made up. It opens nothing
-    now, so it has been removed.
-  - Everyone signs in with the password they had when the backup was made, and that includes admin.
-  - If nobody knows the admin password: on the sign-in page choose "Forgot your password?" and give the
-    recovery address (ADMIN_RECOVERY_EMAIL). A link is emailed there, if email is working and that
-    address is outside this server. If that can't work: ./bin/reset-admin.sh
-  - RUNBOOK, "Recovering onto a new server", says what else needs setting again.
-WORDS
-fi
-
 ./bin/doctor.sh --gate || { echo "Restore finished but the health check is RED — copy the output above to support."; exit 1; }
 if [ "$KEY_PROBLEM" -eq 1 ]; then
   echo "Restore finished, but the sign-in key couldn't be read from the restored database, so nobody may be"
   echo "able to sign in. Run ./bin/refresh-signing-key.sh, and if it fails copy the output above to support."
   exit 1
 fi
+rm -f "$RECOVERY_MARK"
 echo "Restore complete."

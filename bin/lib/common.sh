@@ -173,6 +173,15 @@ export_oidc_signing_key() {
   chmod 644 secrets/oidc_signing_pub.pem
 }
 
+# ------------------------------------------------------------------ a recovery under way
+# bin/recover.sh keeps this while it works, as lines of the form stage=, copy= and size=. Read with
+# env_get, never run. The stages: placing (the copy's secrets are going in), installed (the server is
+# set up, with an empty install's data), restored (the data is back: it must not be replaced again).
+RECOVERY_MARK=state/recovery-in-progress
+
+# recovery_data_not_back — is there a recovery on this server that hasn't got the data back yet?
+recovery_data_not_back() { [ -f "$RECOVERY_MARK" ] && [ "$(env_get stage "$RECOVERY_MARK")" != restored ]; }
+
 # ------------------------------------------------------------------ the .env file
 # env_get KEY [FILE] — print KEY's value from the file WITHOUT running it: the last line wins, as it
 # would when sourced, and one pair of surrounding quotes is taken off. Prints nothing when unset.
@@ -325,14 +334,26 @@ age_keygen_text() {
 # still there to read. Says why and returns 1 if there's no key.
 AGE_IDENTITY=""
 read_age_identity() {
-  local src="$1" line eof=0 key_re='^AGE-SECRET-KEY-1[0-9A-Z]{58}$'
+  local src="$1" line eof=0 prompt key_re='^AGE-SECRET-KEY-1[0-9A-Z]{58}$'
   AGE_IDENTITY=""
   if [ "$src" = - ]; then
     if [ -t 0 ]; then
-      read -rs -p "Paste the private key (AGE-SECRET-KEY-…, not shown): " line || line=""
+      # A whole key file may be pasted, and its first lines are comments. Whatever isn't read here goes
+      # to the next thing reading this terminal, which is root's shell, and into its history.
+      prompt="Paste the private key (the line starting AGE-SECRET-KEY-1, not shown; Ctrl-D to stop): "
+      while [ "$eof" -eq 0 ]; do
+        IFS= read -rs -p "$prompt" line || eof=1
+        prompt=""
+        line="${line//[[:space:]]/}"
+        if [[ "$line" =~ $key_re ]]; then AGE_IDENTITY="$line"; break; fi
+        case "$line" in
+          ""|"#"*) ;;
+          *) echo >&2; echo "That line isn't the key, and it hasn't been kept. Paste the line starting AGE-SECRET-KEY-1." >&2 ;;
+        esac
+      done
       echo >&2
-      line="${line//[[:space:]]/}"
-      if [[ "$line" =~ $key_re ]]; then AGE_IDENTITY="$line"; fi
+      while IFS= read -rs -t 0.2 line; do :; done   # the rest of the paste, if there was more
+      line=""
     else
       while [ "$eof" -eq 0 ]; do
         IFS= read -r line || eof=1

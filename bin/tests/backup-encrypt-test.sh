@@ -56,7 +56,14 @@ SH
 REAL_TAR="$(command -v tar)"
 cat > "$FAKE/tar" <<SH
 #!/usr/bin/env bash
-case "\$* " in *" .env secrets "*) if [ -f "\$FAKE_SENT/config-unreadable" ]; then echo "tar: secrets/x: Permission denied" >&2; exit 2; fi ;; esac
+case "\$* " in *" .env secrets "*)
+  if [ -f "\$FAKE_SENT/config-unreadable" ]; then echo "tar: secrets/x: Permission denied" >&2; exit 2; fi
+  # Readable when first looked at, then not: the read-through passes and the real one fails.
+  if [ -f "\$FAKE_SENT/config-fails-later" ]; then
+    if [ -f "\$FAKE_SENT/config-read-once" ]; then echo "tar: secrets/x: Permission denied" >&2; exit 2; fi
+    touch "\$FAKE_SENT/config-read-once"
+  fi ;;
+esac
 exec "$REAL_TAR" "\$@"
 SH
 cat > "$FAKE/rsync" <<'SH'
@@ -259,8 +266,18 @@ else
   check "S3: the data, byte for byte" "$(decrypt "$SENT/s3-object" | first_part)" "$(sum < "$LOCAL")"
   contains "S3: the copy holds the secrets" "$(decrypt "$SENT/s3-object" | config_part | tar -tzf -)" "secrets/db_password"
   check "S3: no temp file" "$(send_dir_state)" gone
+  check "S3: nothing left in secrets/" "$(find "$B/secrets" -maxdepth 1 -name '.config-manifest' | wc -l | tr -d ' ')" 0
+  # It goes wrong part-way, with the data already on its way: not a credentials problem.
+  touch "$SENT/config-fails-later"
+  run_backup --offsite-only; check "S3, the config fails part-way: the test copy fails" "$?" 3
+  contains "S3, the config fails part-way: in words" "$(cat "$WORK/out")" "Off-site copy failed — the server's settings couldn't be read"
+  lacks "S3, the config fails part-way: not the credentials" "$(cat "$WORK/out")" "credentials"
+  check "S3, the config fails part-way: nothing left in secrets/" "$(find "$B/secrets" -maxdepth 1 -name '.config-manifest' | wc -l | tr -d ' ')" 0
+  find "$SENT" \( -name config-fails-later -o -name config-read-once \) -delete
+  run_backup --offsite-only; check "S3: a good copy again" "$?" 0
   touch "$SENT/s3-fails"
   run_backup --offsite-only; check "S3 fails: the test copy says so" "$?" 3
+  contains "S3 fails: blames the credentials" "$(cat "$WORK/out")" "credentials"
   find "$SENT" -name s3-fails -delete
   cp "$SENT/s3-object" "$WORK/copy.tar.gz.age"; cp "$LOCAL" "$WORK/plain.tar.gz"
 

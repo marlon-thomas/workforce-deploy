@@ -633,6 +633,13 @@ recovering_on_this_host() {
     say "This machine's Docker socket is now in .env."
   fi
   mkdir -p backups actions/requests actions/results
+  # .env doesn't hold TLS_MODE, and the environment file that set it may not be here: what the gateway
+  # was running with says.
+  case "${GATEWAY_CADDYFILE:-}" in
+    *duckdns*) TLS_MODE=dns01 ;;
+    *localca*) TLS_MODE=certs ;;
+    ?*)        TLS_MODE=http01 ;;
+  esac
   case "${TLS_MODE:-http01}" in
     dns01|certs) ;;   # certificates don't depend on these names pointing here
     *)

@@ -137,6 +137,14 @@ verify_key() {
 
 if [ -n "$VERIFY_KEY" ]; then verify_key "$VERIFY_KEY" "$VERIFY_COPY"; fi
 
+# Until a recovery has the data back, this server holds an empty install. A backup of that, sent off-site
+# as the newest copy, is worse than none. From then on it's real data, so backups run, even if nobody
+# ever comes back to finish the recovery: a marker left behind mustn't quietly stop them on a live site.
+if recovery_data_not_back; then
+  echo "A recovery is under way and the data isn't back yet, so no backup was taken ($RECOVERY_MARK)."
+  exit 1
+fi
+
 # Nothing else takes this lock, and it goes when the process does, however it ended.
 if { exec 8>>backups/.backup.lock; } 2>/dev/null && command -v flock >/dev/null 2>&1; then
   if [ -n "$TAG" ]; then
@@ -145,18 +153,34 @@ if { exec 8>>backups/.backup.lock; } 2>/dev/null && command -v flock >/dev/null 
     echo "Another backup is already running."; exit 75
   fi
 fi
-trap 'rm -rf "$SEND_DIR"' EXIT
+CONFIG_MANIFEST=secrets/.config-manifest
+trap 'rm -rf "$SEND_DIR" "$CONFIG_MANIFEST"' EXIT
+
+# config_manifest — the checksum of every file in the settings and secrets, so that a recovery can tell
+# it has all of them: an install would quietly regenerate a missing secret, and what it protected would
+# be lost. Inside the closed folder, and only for as long as the copy takes to pack.
+config_manifest() {
+  ( umask 077; find .env secrets -type f ! -name .config-manifest ! -path 'secrets/.recover*' -exec sha256sum {} + > "$CONFIG_MANIFEST" )
+}
 
 # config_stream — this server's settings and secrets as a gzipped tar, on stdout only, so they're never
-# in a plaintext file. The names a recovery leaves behind if it's interrupted stay out.
-config_stream() { tar -czf - --exclude='secrets/.recover*' .env secrets; }
+# in a plaintext file. The names a recovery leaves behind if it's interrupted stay out. The manifest
+# comes first (and again with the folder, which does no harm), so no cut can lose it and keep the rest.
+config_stream() { tar -czf - --exclude='secrets/.recover*' "$CONFIG_MANIFEST" .env secrets; }
 
 # offsite_stream ARCHIVE — what goes off-site: the archive as it is, then the settings and secrets as
 # a second gzip member. A gzip file may hold several and gunzip joins them, so an older copy (one
-# member) and a newer one read the same way, and the data comes first, byte for byte.
+# member) and a newer one read the same way, and the data comes first, byte for byte. The manifest is
+# made only now, as the data can take hours to send and a setting could change meanwhile.
+# Returns 1 if the archive couldn't be read, 2 if the settings couldn't.
 offsite_stream() {
   cat "$1" || return 1
-  if [ "$CONFIG_READABLE" -eq 1 ]; then config_stream; fi
+  [ "$CONFIG_READABLE" -eq 1 ] || return 0
+  if ! { config_manifest && config_stream; }; then
+    rm -f "$CONFIG_MANIFEST"
+    return 2
+  fi
+  rm -f "$CONFIG_MANIFEST"
 }
 
 # offsite_copy ARCHIVE — encrypt it and the server's settings, and send them as <name>.tar.gz.age. Says
@@ -178,23 +202,33 @@ offsite_copy() {
   # Read through once before anything is sent. An unreadable file mustn't stop the data leaving, so
   # the data still goes, and the copy is reported as failed because it can't rebuild the server.
   CONFIG_READABLE=1
-  if ! config_stream 2>/dev/null | cat >/dev/null; then CONFIG_READABLE=0; fi
+  if ! { config_manifest && config_stream 2>/dev/null | cat >/dev/null; }; then CONFIG_READABLE=0; fi
+  rm -f "$CONFIG_MANIFEST"
   case "$BACKUP_TARGET" in
     s3://*)
       echo "Copying off-site to ${BACKUP_TARGET}…"
       # .env sets these but doesn't export them, and `docker run -e NAME` only passes an exported value.
       export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
       offsite_stream "$1" | age_encrypt "$BACKUP_ENCRYPT_RECIPIENT" | docker run --rm -i -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
-        "$AWS_CLI_IMAGE" s3 cp - "${BACKUP_TARGET%/}/${sent}" --sse AES256 || {
+        "$AWS_CLI_IMAGE" s3 cp - "${BACKUP_TARGET%/}/${sent}" --sse AES256
+      local rc=("${PIPESTATUS[@]}")
+      if [ "${rc[0]}" -eq 2 ]; then
+        # The stream can't be taken back, so a file is there that looks complete.
+        echo "Off-site copy failed — the server's settings couldn't be read part-way, so ${sent} on the target holds the data but can't rebuild the server, and bin/recover.sh will refuse it. Check who owns the files in secrets/ (backup is still local)."
+        return 1
+      elif [ "${rc[0]}" -ne 0 ]; then
+        echo "Off-site copy failed — the backup itself couldn't be read, so ${sent} on the target is incomplete: don't rely on it (backup is still local)."
+        return 1
+      elif [ "${rc[1]}" -ne 0 ] || [ "${rc[2]}" -ne 0 ]; then
         echo "Off-site copy failed — check the backup target credentials (backup is still local)."
         return 1
-      }
+      fi
       ;;
     *:*)
       rm -rf "$SEND_DIR"; mkdir -p "$SEND_DIR"
       if ! offsite_stream "$1" | age_encrypt "$BACKUP_ENCRYPT_RECIPIENT" > "$SEND_DIR/$sent" || ! is_age_file "$SEND_DIR/$sent"; then
         rm -rf "$SEND_DIR"
-        echo "Off-site copy failed — encrypting it didn't finish, so nothing was sent; is the disk full? (backup is still local)."
+        echo "Off-site copy failed — making the encrypted copy didn't finish, so nothing was sent. Is the disk full, or is something in secrets/ unreadable? (backup is still local)."
         return 1
       fi
       echo "Copying off-site to ${BACKUP_TARGET}…"
