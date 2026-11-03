@@ -630,8 +630,9 @@ The machine's own checks can't tell you these. Go through them in a browser:
 - **Open an evidence file.**
 - **Webmail**, if staff email was on: sign in and read a message.
 - **Setup → Server health** is green, or says plainly what isn't. It can take 15 minutes to catch up.
-- **A new backup reaches the off-site target.** As `workforce_app_sa`, run `./bin/backup.sh` in `/opt/workforce-deploy`, then
-  look for the new file on the target. This is what puts you back to being protected. An rsync target's address will be
+- **A new backup reaches the off-site target.** As `workforce_app_sa`, in `/opt/workforce-deploy`, run
+  `docker compose exec -T -w /opt/workforce-deploy backup ./bin/backup.sh`, then look for the new file on the target. Run it
+  in the backup container, as the nightly job does: the host has no rsync, so a run there keeps the copy local. This is what puts you back to being protected. An rsync target's address will be
   trusted afresh on first use.
 
 Then, as root, `passwd workforce_app_sa` if you want a password on the service account: the recovery doesn't set one.

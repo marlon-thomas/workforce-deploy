@@ -107,6 +107,8 @@ NO_CONFIG_WORDS="This copy holds the data, but not the server's settings and sec
 # --------------------------------------------------------------- --check
 if [ "$CHECK" -eq 1 ]; then
   gnu_tar || fail "Checking a copy needs GNU tar."
+  # A check changes nothing, so it installs nothing: on a new server, say what it needs.
+  age_here || docker_socket >/dev/null 2>&1 || fail "Checking a copy needs age, and this server has neither age nor Docker yet. Install it first (apt-get install age), or go straight to the recovery, which installs it."
   age_here || use_docker_socket
   read_age_identity "$IDENTITY" || exit 1
   PICKED=0; pick_identity || PICKED=$?
@@ -185,7 +187,8 @@ finished() {
     - sign in with a real account, and look at People and the training matrix
     - open an evidence file, and webmail if staff email was on
     - look at Setup -> Server health
-    - from $TARGET as $SERVICE_USER, run ./bin/backup.sh and see a new copy reach the target
+    - from $TARGET as $SERVICE_USER, run: docker compose exec -T -w $TARGET backup ./bin/backup.sh
+      and see a new copy reach the target
 ------------------------------------------------------------------------
 DONE
 }
