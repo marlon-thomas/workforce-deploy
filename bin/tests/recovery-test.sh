@@ -212,6 +212,10 @@ make_clone() { # make_clone <dir>
 }
 
 # ------------------------------------------------------------------ the rule for secrets' modes
+# A folder inside secrets/ found at 0600, as on a real server, must be enterable again.
+MODES_DIR="$WORK/modes-dir"; mkdir -p "$MODES_DIR/secrets/tls"; printf 'x' > "$MODES_DIR/secrets/tls/tls.crt"; chmod 600 "$MODES_DIR/secrets/tls"
+( cd "$MODES_DIR" && . "$REPO/bin/lib/common.sh" && secret_modes )
+check "secret_modes repairs a folder inside secrets" "$(stat -c %a "$MODES_DIR/secrets/tls" 2>/dev/null || stat -f %Lp "$MODES_DIR/secrets/tls")" "700"
 # The real shell of the real tasks, run on a folder of its own, with their paths moved there.
 ROLE="$REPO/ansible/roles/workforce/tasks/main.yml"
 task_shell() { # task_shell <the start of the task's name> <folder>

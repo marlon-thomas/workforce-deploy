@@ -131,6 +131,9 @@ authentik_version() {
 secret_modes() {
   [ -d secrets ] || return 0
   chmod 700 secrets
+  # Folders inside need their execute bit: secrets/tls was found at 0600, which the service account
+  # can't enter, so a backup run on the host couldn't read it, and a recovery would carry that over.
+  find secrets -mindepth 1 -type d ! -name '.recover*' -exec chmod 700 {} +
   # backup_ssh_key is for ssh in the backup container, which refuses a key anyone else could read.
   find secrets -maxdepth 1 -type f ! -name initial-admin-password ! -name backup_ssh_key ! -name '.recover*' -exec chmod 644 {} +
   [ -e secrets/initial-admin-password ] && chmod 400 secrets/initial-admin-password
