@@ -116,6 +116,13 @@ archive_stream() {
   fi
 }
 
+# archive_part NAME — one part of the archive on stdout, or non-zero if it hasn't one. An off-site copy
+# has the server's settings after the data. tar stops before them, so what's left is read and dropped,
+# or the stream would die of a closed pipe and look like a failure.
+archive_part() {
+  archive_stream | gzip -dc | { tar -xOf - "$1" 2>/dev/null; rc=$?; cat >/dev/null; exit "$rc"; }
+}
+
 # Drill-only configuration: fresh throw-away credentials (dumps restore with
 # --no-owner as the drill's own superuser, so production passwords are never
 # needed), placeholder hostnames, and the image refs compose requires.
@@ -160,14 +167,14 @@ case "$FW" in 0*|'') check "app DB" fail "no successful migrations restored" ;; 
 
 AKU="$(in_c sh -c "cd $W && docker compose exec -T authentik-postgres psql -U authentik -d authentik -tAc \
   'select count(*) from authentik_core_user'" 2>/dev/null || echo "")"
-if archive_stream | tar -xzOf - authentik.dump >/dev/null 2>&1; then
+if archive_part authentik.dump >/dev/null; then
   case "$AKU" in ''|0) check "sign-in DB" fail "no authentik users restored" ;; *) check "sign-in DB" ok "$AKU users" ;; esac
 else
   check "sign-in DB" fail "archive has no authentik.dump (pre-fix backup format)"
 fi
 
-if archive_stream | tar -xzOf - evidence.tar >/dev/null 2>&1; then
-  WANT="$(archive_stream | tar -xzOf - evidence.tar | tar -tvf - | grep -c '^-' || true)"
+if archive_part evidence.tar >/dev/null; then
+  WANT="$(archive_part evidence.tar | tar -tvf - | grep -c '^-' || true)"
   # shellcheck disable=SC2016  # expanded inside the init container
   GOT="$(in_c sh -c "cd $W && docker compose run --rm --no-deps -T --entrypoint /bin/sh init -c '
     mc alias set local http://object-storage:9000 \"\$(cat /run/secrets/minio_access)\" \"\$(cat /run/secrets/minio_secret)\" >/dev/null

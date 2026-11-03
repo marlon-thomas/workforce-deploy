@@ -19,6 +19,7 @@ cd "$(dirname "$0")/.."   # bundle root
 
 SMOKE=0
 SYSTEM_DOCKER=0
+RECOVERING=0
 # Default for every phase/root-vs-service path (set -u kills raw $SERVICE_USER
 # reads on a truly fresh service-phase run — the fresh install must work too).
 SERVICE_USER="${SERVICE_USER:-workforce_app_sa}"
@@ -27,6 +28,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --smoke) SMOKE=1; shift ;;
     --system-docker) SYSTEM_DOCKER=1; shift ;;
+    # bin/recover.sh, which has already put .env and secrets/ back. Nothing is asked and nothing is
+    # generated, and that .env is kept as it came back.
+    --recovering) RECOVERING=1; shift ;;
     --env)
       if [ $# -lt 2 ]; then echo "--env needs a value (test|prod)"; exit 1; fi
       ENV_NAME_ARG="$2"; shift 2 ;;
@@ -42,6 +46,7 @@ done
 # What to type to resume after a failure (printed by every failure path).
 RESUME_CMD="./bin/install.sh${ENV_NAME_ARG:+ --env ${ENV_NAME_ARG}}"
 [ "${SMOKE}" -eq 1 ] && RESUME_CMD="${RESUME_CMD} --smoke"
+[ "${RECOVERING}" -eq 1 ] && RESUME_CMD="./bin/recover.sh (as root, the same command as before)"
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m ->\033[0m %s\n' "$*"; }
@@ -183,7 +188,6 @@ run_ansible_site() {
   if ! grep -qE '^[0-9a-f]{64}$' secrets/oidc_client_secret 2>/dev/null; then
     say "Rotating the OIDC client secret to the hex format (legacy base64 detected)…"
     openssl rand -hex 32 > secrets/oidc_client_secret
-    chmod 600 secrets/oidc_client_secret
     chown "$SERVICE_USER:$SERVICE_USER" secrets/oidc_client_secret 2>/dev/null || true
   fi
 
@@ -332,6 +336,8 @@ INV
   WFV_server_actions="${SERVER_ACTIONS:-on}" \
   WFV_server_actions_plain_relay="${SERVER_ACTIONS_PLAIN_RELAY:-}" \
   WFV_admin_recovery_email="${ADMIN_RECOVERY_EMAIL:-}" \
+  WFV_webmail_hostname="${WEBMAIL_HOSTNAME:-}" \
+  WFV_keep_env="$([ "${RECOVERING}" -eq 1 ] && echo true || echo false)" \
   WFV_backup_target="${BACKUP_TARGET:-}" \
   WFV_backup_encrypt_recipient="${BACKUP_ENCRYPT_RECIPIENT:-}" \
   WFV_docker_sock="${ANSIBLE_SOCK}" \
@@ -381,6 +387,15 @@ INV
      Fix the cause, then resume (safe — already-converged steps are skipped):
        cd $(pwd) && ${RESUME_CMD}"
   fi
+  # The playbook applies this too. Here as well, so that whatever made a secret, it ends readable.
+  # A file this account can't change shouldn't stop an install: the doctor's "app secrets" row names it.
+  secret_modes || warn "Some secret files' modes couldn't be set; ./bin/doctor.sh will say if it matters."
+}
+
+# registry_login USER TOKEN — on stdin, so the token is on no command line.
+registry_login() {
+  printf '%s\n' "$2" | sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
+    docker login ghcr.io -u "$1" --password-stdin
 }
 
 bootstrap() {
@@ -398,14 +413,18 @@ bootstrap() {
     adduser --disabled-password --gecos "Workforce service account,,," "$SERVICE_USER"
     usermod -aG sudo "$SERVICE_USER"
     echo "   user '$SERVICE_USER' created (sudo member)."
-    while true; do
-      if passwd "$SERVICE_USER"; then break; fi
-      echo "   Passwords did not match or were rejected — try again."
-    done
-    echo "   Service account password set."
+    if [ "${RECOVERING}" -eq 1 ]; then
+      echo "   No password set on it yet, so that this asks nothing: passwd $SERVICE_USER, when things are back."
+    else
+      while true; do
+        if passwd "$SERVICE_USER"; then break; fi
+        echo "   Passwords did not match or were rejected — try again."
+      done
+      echo "   Service account password set."
+    fi
   fi
 
-  TARGET="/opt/workforce-deploy"
+  TARGET="${WORKFORCE_TARGET:-/opt/workforce-deploy}"   # the variable is for bin/tests/recovery-test.sh
   CURRENT="$(cd "$(dirname "$0")/.." && pwd)"
   if [ "$CURRENT" != "$TARGET" ]; then
     # Legacy migration path: bootstrap now clones STRAIGHT to $TARGET, so this
@@ -491,7 +510,14 @@ PROF
     chown "$SERVICE_USER:$SERVICE_USER" "/home/${SERVICE_USER}/.bashrc" "/home/${SERVICE_USER}/.profile.d-docker"
   fi
 
-  if ! sudo -u "$SERVICE_USER" sh -c 'grep -q ghcr.io ~/.docker/config.json' 2>/dev/null; then
+  if [ "${RECOVERING}" -eq 1 ] && [ -s secrets/.recover-registry ] \
+     && ! sudo -u "$SERVICE_USER" sh -c 'grep -q ghcr.io ~/.docker/config.json' 2>/dev/null; then
+    # Asked for by bin/recover.sh at the start, so that nobody has to wait around to answer it.
+    { IFS= read -r GH_USER; IFS= read -r GH_TOKEN; } < secrets/.recover-registry
+    rm -f secrets/.recover-registry
+    registry_login "$GH_USER" "$GH_TOKEN" \
+      || fail "The image registry refused that GitHub token. It needs read:packages. Run ${RESUME_CMD}."
+  elif ! sudo -u "$SERVICE_USER" sh -c 'grep -q ghcr.io ~/.docker/config.json' 2>/dev/null; then
     echo ""
     echo "The container images are pulled from GitHub's registry (private while"
     echo "licensing is in development). A GitHub personal access token with"
@@ -500,9 +526,7 @@ PROF
     read -r GH_USER
     GH_USER="${GH_USER:-marlon-thomas}"
     read_mandatory GH_TOKEN "GitHub token (read:packages): " silent
-    until sudo -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" \
-        GH_USER="$GH_USER" GH_TOKEN="$GH_TOKEN" \
-        sh -c 'echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin'; do
+    until registry_login "$GH_USER" "$GH_TOKEN"; do
       echo "   Login failed — the token needs read:packages scope."
       read_mandatory GH_TOKEN "GitHub token (read:packages): " silent
     done
@@ -578,6 +602,13 @@ PROF
     dnf install -y -q git curl tar unzip ca-certificates openssl >/dev/null 2>&1 || true
   fi
 
+  # The questions are what open the firewall on a fresh install, and they're not being asked.
+  if [ "${RECOVERING}" -eq 1 ]; then
+    open_port 80
+    open_port 443
+    case ",$(env_get COMPOSE_PROFILES .env)," in *,staffmail,*) open_port 25 ;; esac
+  fi
+
   echo "Bootstrap complete. Continuing as '$SERVICE_USER' from $TARGET…"
   # Forward the environment selection — without it the service-user phase
   # loses the env-file prefill (domain, subdomains, TLS mode) entirely.
@@ -585,8 +616,35 @@ PROF
   [ -n "${ENV_NAME_ARG}" ] && FLAGS="--env ${ENV_NAME_ARG}"
   [ "${SMOKE}" -eq 1 ] && FLAGS="${FLAGS} --smoke"
   [ "${SYSTEM_DOCKER}" -eq 1 ] && FLAGS="${FLAGS} --system-docker"
+  [ "${RECOVERING}" -eq 1 ] && FLAGS="${FLAGS} --recovering"
   # shellcheck disable=SC2086
   exec sudo -u "$SERVICE_USER" bash "$TARGET/bin/install.sh" $FLAGS
+}
+
+# recovering_on_this_host — bin/recover.sh put back another machine's .env. What in it depends on this
+# machine, and what the questions would have checked on a fresh install.
+recovering_on_this_host() {
+  local sock
+  # The backup container mounts this socket. Ansible would set it, but it isn't rendering .env here.
+  sock="$(docker_socket || echo "/run/user/$(id -u)/docker.sock")"
+  if [ "${DOCKER_SOCK:-}" != "$sock" ]; then
+    env_set DOCKER_SOCK "$sock" .env
+    DOCKER_SOCK="$sock"
+    say "This machine's Docker socket is now in .env."
+  fi
+  mkdir -p backups actions/requests actions/results
+  case "${TLS_MODE:-http01}" in
+    dns01|certs) ;;   # certificates don't depend on these names pointing here
+    *)
+      PUBLIC_IP="$(curl -4 -fsS --max-time 8 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
+      say "Checking that ${APP_HOSTNAME} and ${AUTH_HOSTNAME} point at this machine (${PUBLIC_IP}): certificates depend on it…"
+      for i in $(seq 1 60); do
+        verify_dns && break
+        [ "$i" = 60 ] && fail "DNS still doesn't point here. Change the A records for ${APP_HOSTNAME} and
+       ${AUTH_HOSTNAME} to ${PUBLIC_IP} at your domain provider, then run ${RESUME_CMD}."
+        sleep 15
+      done ;;
+  esac
 }
 
 resume_or_start() {
@@ -610,6 +668,7 @@ if [ -f .env ]; then
       API_IMAGE="ghcr.io/marlon-thomas/workforce-suite"
       warn "Migrated the image registry path in .env (early placeholder)."
     fi
+    [ "${RECOVERING}" -eq 0 ] || recovering_on_this_host
     preflight_network
     preflight_and_pull
     # ADMIN_PASSWORD for the playbook: resume uses a fresh random value — the
@@ -633,6 +692,7 @@ if [ -f .env ]; then
     exit 0
   fi
 
+  [ "${RECOVERING}" -eq 0 ] || fail "--recovering needs the .env that bin/recover.sh puts back."
   [ -f compose.yaml ] || fail "compose.yaml not found — run me from the deployment bundle directory."
   [ -f ansible/site.yml ] || fail "ansible/site.yml not found — the bundle is incomplete."
   preflight_network

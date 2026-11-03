@@ -342,6 +342,25 @@ case "$AH" in
 esac
 if [ "$AH" = ok ]; then row "sign-in server" ok "healthy"; else row "sign-in server" fail "not healthy"; fi
 
+# --- does the app trust the key authentik signs with? Everything else stays green when it doesn't,
+#     and nobody can sign in. Yes or no only, never the keys.
+if ! command -v openssl >/dev/null 2>&1; then
+  row "sign-in key" skip "openssl is not installed here"
+else
+  AK_PUB="$(oidc_signing_pub)" || AK_PUB=""
+  case "$AK_PUB" in
+    *"BEGIN PUBLIC KEY"*)
+      if [ ! -s secrets/oidc_signing_pub.pem ]; then
+        row "sign-in key" fail "the application has no copy of the sign-in key, so nobody can sign in: run ./bin/refresh-signing-key.sh"
+      elif [ "$AK_PUB" = "$(cat secrets/oidc_signing_pub.pem)" ]; then
+        row "sign-in key" ok "the application trusts the key the sign-in server uses"
+      else
+        row "sign-in key" fail "the sign-in server uses a different key from the one the application trusts, so nobody can sign in: run ./bin/refresh-signing-key.sh"
+      fi ;;
+    *) row "sign-in key" warn "not checked — couldn't read the key from the sign-in database" ;;
+  esac
+fi
+
 # --- staff email (only when switched on: COMPOSE_PROFILES has staffmail — bin/staff-mail.sh)
 case ",${COMPOSE_PROFILES:-}," in
   *,staffmail,*)

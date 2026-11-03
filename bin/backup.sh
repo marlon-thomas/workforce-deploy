@@ -14,7 +14,10 @@
 # Optional off-site copy (BACKUP_TARGET), always encrypted first to BACKUP_ENCRYPT_RECIPIENT, the
 # public half of an age key pair whose private half is kept off this server. No usable recipient
 # means no off-site copy, never a plaintext one. Local archives stay as they are, on the same disk as
-# the live data. RUNBOOK, "Off-site backup targets".
+# the live data, and never hold the server's settings or secrets. Off-site copies do: after the
+# archive comes a second gzip member holding .env and secrets/, which is what bin/recover.sh rebuilds
+# a server from. tar stops at the end of the first, so everything that reads an archive sees only
+# the data. RUNBOOK, "Off-site backup targets" and "Recovering onto a new server".
 #
 #   ./bin/backup.sh [--tag NAME]     make an archive, copy it off-site, apply retention
 #   ./bin/backup.sh --offsite-only   copy the newest archive off-site by the same code and say whether
@@ -144,11 +147,23 @@ if { exec 8>>backups/.backup.lock; } 2>/dev/null && command -v flock >/dev/null 
 fi
 trap 'rm -rf "$SEND_DIR"' EXIT
 
-# offsite_copy ARCHIVE — encrypt it and send it as <name>.tar.gz.age. Says what happened, and returns
-# non-zero when it didn't work. Nothing is ever sent if it can't be encrypted. Works from the backup
-# container as well as from the host: S3 is a stream through stdin, with no bind mount and no second
-# copy on disk. rsync can't read a pipe, and its write-only key (rrsync -wo) allows nothing else, so
-# there it's an encrypted file beside the archive, removed as soon as the copy ends.
+# config_stream — this server's settings and secrets as a gzipped tar, on stdout only, so they're never
+# in a plaintext file. The names a recovery leaves behind if it's interrupted stay out.
+config_stream() { tar -czf - --exclude='secrets/.recover*' .env secrets; }
+
+# offsite_stream ARCHIVE — what goes off-site: the archive as it is, then the settings and secrets as
+# a second gzip member. A gzip file may hold several and gunzip joins them, so an older copy (one
+# member) and a newer one read the same way, and the data comes first, byte for byte.
+offsite_stream() {
+  cat "$1" || return 1
+  if [ "$CONFIG_READABLE" -eq 1 ]; then config_stream; fi
+}
+
+# offsite_copy ARCHIVE — encrypt it and the server's settings, and send them as <name>.tar.gz.age. Says
+# what happened, and returns non-zero when it didn't work. Nothing is ever sent if it can't be encrypted.
+# Works from the backup container as well as from the host: S3 is a stream through stdin, with no bind
+# mount and no second copy on disk. rsync can't read a pipe, and its write-only key (rrsync -wo) allows
+# nothing else, so there it's an encrypted file beside the archive, removed as soon as the copy ends.
 offsite_copy() {
   local problem sent
   problem="$(offsite_encryption_problem "${BACKUP_ENCRYPT_RECIPIENT:-}")"
@@ -160,12 +175,16 @@ offsite_copy() {
     return 1
   fi
   sent="$(basename "$1").age"
+  # Read through once before anything is sent. An unreadable file mustn't stop the data leaving, so
+  # the data still goes, and the copy is reported as failed because it can't rebuild the server.
+  CONFIG_READABLE=1
+  if ! config_stream 2>/dev/null | cat >/dev/null; then CONFIG_READABLE=0; fi
   case "$BACKUP_TARGET" in
     s3://*)
       echo "Copying off-site to ${BACKUP_TARGET}…"
       # .env sets these but doesn't export them, and `docker run -e NAME` only passes an exported value.
       export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
-      age_encrypt "$BACKUP_ENCRYPT_RECIPIENT" < "$1" | docker run --rm -i -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
+      offsite_stream "$1" | age_encrypt "$BACKUP_ENCRYPT_RECIPIENT" | docker run --rm -i -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
         "$AWS_CLI_IMAGE" s3 cp - "${BACKUP_TARGET%/}/${sent}" --sse AES256 || {
         echo "Off-site copy failed — check the backup target credentials (backup is still local)."
         return 1
@@ -173,7 +192,7 @@ offsite_copy() {
       ;;
     *:*)
       rm -rf "$SEND_DIR"; mkdir -p "$SEND_DIR"
-      if ! age_encrypt "$BACKUP_ENCRYPT_RECIPIENT" < "$1" > "$SEND_DIR/$sent" || ! is_age_file "$SEND_DIR/$sent"; then
+      if ! offsite_stream "$1" | age_encrypt "$BACKUP_ENCRYPT_RECIPIENT" > "$SEND_DIR/$sent" || ! is_age_file "$SEND_DIR/$sent"; then
         rm -rf "$SEND_DIR"
         echo "Off-site copy failed — encrypting it didn't finish, so nothing was sent; is the disk full? (backup is still local)."
         return 1
@@ -193,6 +212,10 @@ offsite_copy() {
       return 1
       ;;
   esac
+  if [ "$CONFIG_READABLE" -eq 0 ]; then
+    echo "Off-site copy failed — the data went off-site, but .env or something in secrets/ couldn't be read, so this copy can't rebuild the server. Check who owns the files in secrets/."
+    return 1
+  fi
 }
 
 if [ "$OFFSITE_ONLY" -eq 1 ]; then

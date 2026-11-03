@@ -11,14 +11,23 @@
 #        is never written down or logged. The wrong key changes nothing.
 #   ./bin/restore.sh --yes --data-only <archive>           (restore-drill.sh only:
 #        data plane only — no app/sign-in containers are stopped or started)
+#   ./bin/restore.sh --yes --config-restored ...           (bin/recover.sh only: this server's .env
+#        and secrets/ came from the same copy)
+# An off-site copy also holds the server's .env and secrets/, after the data. Nothing here reads them:
+# tar stops at the end of the data. Only bin/recover.sh puts them back.
+#
+# After a full restore of the sign-in database, the app is made to trust the signing key that came
+# back with it. If that key isn't this server's, the database came from another installation, and
+# secrets/initial-admin-password no longer means anything: it's removed, and this says what to do.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-YES=0; DATA_ONLY=0; IDENTITY=""
+YES=0; DATA_ONLY=0; IDENTITY=""; CONFIG_RESTORED=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes) YES=1; shift ;;
     --data-only) DATA_ONLY=1; shift ;;
+    --config-restored) CONFIG_RESTORED=1; shift ;;
     --identity)
       [ $# -ge 2 ] || { echo "--identity needs a key file, or - to give the key on stdin."; exit 1; }
       IDENTITY="$2"; shift 2 ;;
@@ -45,7 +54,10 @@ if is_age_file "$ARCHIVE"; then
   fi
   read_age_identity "$IDENTITY" || { echo "Nothing was changed."; exit 1; }
   set +e
-  age_decrypt < "$ARCHIVE" 2>"$AGE_ERR" | tar -xzf - -C "$TMP" 2>/dev/null
+  # Read to the end, past the config tar doesn't look at: age and gzip only vouch for what they've read,
+  # and left unread they'd die of a closed pipe.
+  age_decrypt < "$ARCHIVE" 2>"$AGE_ERR" | gzip -dc 2>/dev/null \
+    | { tar -xf - -C "$TMP" 2>/dev/null; TAR_RC=$?; cat >/dev/null; exit "$TAR_RC"; }
   DECRYPT_RC=("${PIPESTATUS[@]}")
   set -e
   if grep -q 'no identity matched' "$AGE_ERR"; then
@@ -53,7 +65,7 @@ if is_age_file "$ARCHIVE"; then
     echo "rotated since, this backup needs the older one. Nothing was changed."
     exit 1
   fi
-  if [ "${DECRYPT_RC[0]}" -ne 0 ] || [ "${DECRYPT_RC[1]}" -ne 0 ]; then
+  if [ "${DECRYPT_RC[0]}" -ne 0 ] || [ "${DECRYPT_RC[1]}" -ne 0 ] || [ "${DECRYPT_RC[2]}" -ne 0 ]; then
     echo "This backup couldn't be decrypted and unpacked: the file is damaged or incomplete, or age"
     echo "couldn't run here (it uses a helper container if it isn't installed). Nothing was changed."
     exit 1
@@ -149,14 +161,48 @@ if [ "$DATA_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+# The sign-in database brought its own signing key back. Read straight from that database, so before
+# anything that signs or checks a sign-in is running.
+KEY_PROBLEM=0
+if [ "$HAVE_AK" -eq 1 ]; then
+  export_oidc_signing_key || KEY_PROBLEM=1
+fi
+
 echo "Starting the sign-in server and the application…"
 docker compose start authentik-server authentik-worker
-docker compose start api worker
+if [ "$OIDC_KEY_CHANGED" -eq 1 ]; then
+  echo "Signing-in uses the key that came back with the sign-in database; the application now trusts it."
+  docker compose up -d --no-deps --force-recreate api worker
+else
+  docker compose start api worker
+fi
 if [ -d "$TMP/branding" ]; then
   echo "Restoring branding…"
   docker compose cp "$TMP/branding/." api:/app/data/branding \
     || echo "  (branding not restored — re-upload it in the admin settings)"
 fi
 sleep 15
+# Another installation's sign-in database, without that installation's settings (Workforce ADR-0026).
+if [ "$OIDC_KEY_CHANGED" -eq 1 ] && [ "$CONFIG_RESTORED" -eq 0 ]; then
+  rm -f secrets/initial-admin-password
+  cat <<'WORDS'
+
+Signing in after this restore:
+  The sign-in accounts have come back from the backup, but that server's settings and secrets haven't.
+  - secrets/initial-admin-password held the password this server's own install made up. It opens nothing
+    now, so it has been removed.
+  - Everyone signs in with the password they had when the backup was made, and that includes admin.
+  - If nobody knows the admin password: on the sign-in page choose "Forgot your password?" and give the
+    recovery address (ADMIN_RECOVERY_EMAIL). A link is emailed there, if email is working and that
+    address is outside this server. If that can't work: ./bin/reset-admin.sh
+  - RUNBOOK, "Recovering onto a new server", says what else needs setting again.
+WORDS
+fi
+
 ./bin/doctor.sh --gate || { echo "Restore finished but the health check is RED — copy the output above to support."; exit 1; }
+if [ "$KEY_PROBLEM" -eq 1 ]; then
+  echo "Restore finished, but the sign-in key couldn't be read from the restored database, so nobody may be"
+  echo "able to sign in. Run ./bin/refresh-signing-key.sh, and if it fails copy the output above to support."
+  exit 1
+fi
 echo "Restore complete."

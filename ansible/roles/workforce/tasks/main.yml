@@ -10,6 +10,9 @@
     group: "{{ service_user }}"
     mode: "0600"
   no_log: true   # carries SMTP_PASSWORD / DUCKDNS_API_TOKEN (--diff would print them)
+  # bin/recover.sh: the .env that came back holds settings this template has never heard of (staff
+  # email, the AI service, feedback), and rendering it here would lose them.
+  when: not (keep_env | default(false) | bool)
 
 - name: api JVM truststore — local test-CA file in certs mode (deterministic,
     network-free, no race with the gateway's own cert rotation), presented
@@ -33,14 +36,10 @@
 
 - name: Export authentik's JWT signing public key (static-key id_token validation)
   ansible.builtin.shell: |
-    set -o pipefail
-    docker exec workforce-deploy-authentik-postgres-1 psql -U authentik -d authentik -t -A -c \
-      "SELECT c.certificate_data FROM authentik_core_application a \
-         JOIN authentik_providers_oauth2_oauth2provider p ON p.provider_ptr_id = a.provider_id \
-         JOIN authentik_crypto_certificatekeypair c ON c.kp_uuid = p.signing_key_id \
-        WHERE a.name = 'Workforce'" \
-      | openssl x509 -pubkey -noout > /opt/workforce-deploy/secrets/oidc_signing_pub.pem
-    chmod 644 /opt/workforce-deploy/secrets/oidc_signing_pub.pem
+    set -euo pipefail
+    cd /opt/workforce-deploy
+    . ./bin/lib/common.sh
+    export_oidc_signing_key
   args:
     executable: /bin/bash
   changed_when: true
@@ -68,7 +67,6 @@
       | python3 -c 'import sys,base64;sys.stdout.write(base64.urlsafe_b64encode(bytes.fromhex(sys.stdin.read().strip())).decode().rstrip("="))' > secrets/push_vapid_private
     rm -f "$TMP"
     chown {{ service_user }}:{{ service_user }} secrets/push_vapid_public secrets/push_vapid_private
-    chmod 600 secrets/push_vapid_private; chmod 644 secrets/push_vapid_public
     echo "vapid: generated"
   args:
     executable: /bin/bash
@@ -96,14 +94,25 @@
     chown {{ service_user }}:{{ service_user }} secrets/ai_credential_key secrets/ai_api_key secrets/feedback_github_key \
       secrets/mail_admin_password secrets/mail_db_password secrets/mail_lookup_key secrets/mail_relay_password \
       secrets/webmail_oidc_secret secrets/webmail_des_key
-    chmod 600 secrets/ai_credential_key secrets/ai_api_key secrets/feedback_github_key \
-      secrets/mail_admin_password secrets/mail_db_password secrets/mail_lookup_key secrets/mail_relay_password \
-      secrets/webmail_oidc_secret secrets/webmail_des_key
     echo "ai secrets: ${made:-unchanged}"
   args:
     executable: /bin/bash
   register: ai_secrets
   changed_when: "'unchanged' not in ai_secrets.stdout"
+
+# One rule for every secret's mode, bin/lib/common.sh secret_modes, run after everything that makes
+# them. The containers read them as uid 999, so 0600 here left staff email, the assistant and feedback
+# silently off until the next update.
+- name: Secret files readable inside the containers, the folder closed
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cd /opt/workforce-deploy
+    . ./bin/lib/common.sh
+    # A file this account cannot change must not stop an install: the "app secrets" health row names it.
+    secret_modes || echo "some secret modes could not be set"
+  args:
+    executable: /bin/bash
+  changed_when: false
 
 - name: Service user uid
   ansible.builtin.command: id -u {{ service_user }}

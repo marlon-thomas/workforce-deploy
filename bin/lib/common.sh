@@ -132,10 +132,45 @@ secret_modes() {
   [ -d secrets ] || return 0
   chmod 700 secrets
   # backup_ssh_key is for ssh in the backup container, which refuses a key anyone else could read.
-  find secrets -maxdepth 1 -type f ! -name initial-admin-password ! -name backup_ssh_key -exec chmod 644 {} +
+  find secrets -maxdepth 1 -type f ! -name initial-admin-password ! -name backup_ssh_key ! -name '.recover*' -exec chmod 644 {} +
   [ -e secrets/initial-admin-password ] && chmod 400 secrets/initial-admin-password
   [ -e secrets/backup_ssh_key ] && chmod 600 secrets/backup_ssh_key
   return 0
+}
+
+# ------------------------------------------------------------------ the key sign-ins are signed with
+# The app pins authentik's public signing key in secrets/oidc_signing_pub.pem, so a sign-in database
+# from another installation means authentik signs with one key and the app trusts another: everyone
+# is locked out while every service looks healthy. Public keys, so safe to compare, but rows and
+# messages still say only yes or no.
+
+# oidc_signing_pub — the public key of the Workforce sign-in, as authentik holds it now, or nothing
+# when it can't be read. The exact name: this database also has "Workforce webmail".
+oidc_signing_pub() {
+  docker compose exec -T authentik-postgres psql -X -U "${AK_DB_USER:-authentik}" -d "${AK_DB_NAME:-authentik}" -t -A -c \
+    "SELECT c.certificate_data FROM authentik_core_application a \
+       JOIN authentik_providers_oauth2_oauth2provider p ON p.provider_ptr_id = a.provider_id \
+       JOIN authentik_crypto_certificatekeypair c ON c.kp_uuid = p.signing_key_id \
+      WHERE a.name = 'Workforce'" 2>/dev/null \
+    | openssl x509 -pubkey -noout 2>/dev/null
+}
+
+# export_oidc_signing_key — write that key to secrets/oidc_signing_pub.pem. Sets OIDC_KEY_CHANGED to
+# 1 when the file changed. Returns 1, leaving the file alone, when the key can't be read. Written in
+# place because the api's mount of this one file is bound to its inode; a running api still has to be
+# recreated to load it (bin/refresh-signing-key.sh).
+OIDC_KEY_CHANGED=0
+export_oidc_signing_key() {
+  local pub old=""
+  OIDC_KEY_CHANGED=0
+  pub="$(oidc_signing_pub)" || pub=""
+  case "$pub" in *"BEGIN PUBLIC KEY"*) ;; *) return 1 ;; esac
+  if [ -f secrets/oidc_signing_pub.pem ]; then old="$(cat secrets/oidc_signing_pub.pem)"; fi
+  if [ "$pub" != "$old" ]; then
+    printf '%s\n' "$pub" > secrets/oidc_signing_pub.pem
+    OIDC_KEY_CHANGED=1
+  fi
+  chmod 644 secrets/oidc_signing_pub.pem
 }
 
 # ------------------------------------------------------------------ the .env file

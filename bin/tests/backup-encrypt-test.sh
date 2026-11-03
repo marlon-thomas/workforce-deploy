@@ -15,6 +15,11 @@ cp -r "$HERE/.." "$B/bin"
 printf 'image: goauthentik/server:2026.8.1\n' > "$B/compose.yaml"
 PLAIN_MARK='STAFF-AND-CARE-RECORDS-PLAINTEXT'
 printf '%s\n' "$PLAIN_MARK" > "$WORK/ev/record.txt"
+# The server's settings and secrets, all made up here: they go off-site, and never in a local archive.
+SECRET_MARK='FICTITIOUS-SECRET-FILE-CONTENTS'
+printf '%s' "$SECRET_MARK" > "$B/secrets/db_password"
+mkdir -p "$B/secrets/tls"; printf 'fictitious' > "$B/secrets/tls/tls.key"
+printf 'interrupted recovery' > "$B/secrets/.recover-registry"
 
 PASS=0; FAILN=0; SKIPPED=0
 ok()  { PASS=$((PASS+1)); }
@@ -47,6 +52,13 @@ case "$*" in
 esac
 exit 0
 SH
+# In front of the real tar: fails when asked to pack the server's settings, while that's being tested.
+REAL_TAR="$(command -v tar)"
+cat > "$FAKE/tar" <<SH
+#!/usr/bin/env bash
+case "\$* " in *" .env secrets "*) if [ -f "\$FAKE_SENT/config-unreadable" ]; then echo "tar: secrets/x: Permission denied" >&2; exit 2; fi ;; esac
+exec "$REAL_TAR" "\$@"
+SH
 cat > "$FAKE/rsync" <<'SH'
 #!/usr/bin/env bash
 printf 'rsync %s\n' "$*" >> "$FAKE_CALLS"
@@ -60,7 +72,7 @@ cat > "$FAKE/age" <<SH
 printf 'age %s\n' "\$*" >> "\$FAKE_CALLS"
 exec "$REAL_AGE" "\$@"
 SH
-chmod +x "$FAKE/docker" "$FAKE/rsync" "$FAKE/age"
+chmod +x "$FAKE/docker" "$FAKE/rsync" "$FAKE/age" "$FAKE/tar"
 [ -n "$REAL_AGE" ] || rm -f "$FAKE/age"
 
 export PATH="$FAKE:$PATH"
@@ -151,6 +163,16 @@ nothing_sent "no target"
 lacks "no target: no complaint" "$(cat "$WORK/out")" "Off-site"
 run_backup --offsite-only; check "no target: the test copy says so" "$?" 4
 
+# --- the local archive never holds the server's settings or secrets, whatever else happens
+set_env "" ""
+run_backup
+LOCAL_ONLY="$(find "$B/backups" -maxdepth 1 -name '*.tar.gz' | head -1)"
+LOCAL_NAMES="$(tar -tzf "$LOCAL_ONLY")"
+lacks "local archive: no .env" "$LOCAL_NAMES" ".env"
+lacks "local archive: no secrets/" "$LOCAL_NAMES" "secrets"
+check "local archive: no secret anywhere in it" "$(gzip -dc "$LOCAL_ONLY" | grep -c "$SECRET_MARK")" 0
+check "local archive: nothing from .env in it" "$(gzip -dc "$LOCAL_ONLY" | grep -c exampleawssecret)" 0
+
 # --- 5. the doctor's row and its --gate (the real doctor.sh; everything it reaches is a fake)
 doctor_row() { # doctor_row [args] — the off-site row from --plain
   ( cd "$B" && bash ./bin/doctor.sh --plain --smoke "$@" 2>/dev/null ) | awk -F'\t' '$2 == "off-site backup" { print $1 "|" $3 }'
@@ -191,7 +213,19 @@ else
   check "rsync: one file arrived" "$(find "$SENT" -type f | wc -l | tr -d ' ')" 1
   check "rsync: age's format" "$(head -c 21 "$SENT_FILE")" "age-encryption.org/v1"
   check "rsync: not the plain archive" "$(cmp -s "$SENT_FILE" "$LOCAL" && echo same || echo different)" different
-  check "rsync: round trip" "$(decrypt "$SENT_FILE" | sum)" "$(sum < "$LOCAL")"
+  # The data first, byte for byte; the second gzip member after it holds the settings and secrets.
+  first_part() { head -c "$(wc -c < "$LOCAL")" | sum; }
+  config_part() { tail -c +"$(( $(wc -c < "$LOCAL") + 1 ))"; }
+  check "rsync: the data, byte for byte" "$(decrypt "$SENT_FILE" | first_part)" "$(sum < "$LOCAL")"
+  CONFIG_NAMES="$(decrypt "$SENT_FILE" | config_part | tar -tzf -)"
+  contains "rsync: the copy holds .env" "$CONFIG_NAMES" ".env"
+  contains "rsync: the copy holds the secrets" "$CONFIG_NAMES" "secrets/db_password"
+  contains "rsync: and the folders under them" "$CONFIG_NAMES" "secrets/tls/tls.key"
+  lacks "rsync: not what an interrupted recovery left" "$CONFIG_NAMES" ".recover"
+  check "rsync: the secret is in there" "$(decrypt "$SENT_FILE" | config_part | tar -xzOf - secrets/db_password)" "$SECRET_MARK"
+  check "rsync: no secret readable in the file" "$(grep -c "$SECRET_MARK" "$SENT_FILE")" 0
+  check "rsync: only the right key opens it" "$("$REAL_AGE" -d -i "$WORK/other-key.txt" "$SENT_FILE" 2>/dev/null | wc -c | tr -d ' ')" 0
+  check "rsync: the local archive still holds none" "$(gzip -dc "$LOCAL" | grep -c "$SECRET_MARK")" 0
   check "rsync: the local archive is still gzip" "$(head -c 2 "$LOCAL" | od -An -tx1 | tr -d ' \n')" 1f8b
   check "rsync: the encrypted file is gone" "$(send_dir_state)" gone
   contains "rsync: to the same place" "$(cat "$FAKE_CALLS")" "$RSYNC_T/backups/"
@@ -202,10 +236,19 @@ else
   find "$SENT" -name 'rsync-*' -delete
   run_backup --offsite-only; check "rsync test copy: works" "$?" 0
   check "rsync test copy: sent encrypted" "$(head -c 21 "$SENT_FILE")" "age-encryption.org/v1"
+  contains "rsync test copy: sends the same thing" "$(decrypt "$SENT_FILE" | config_part | tar -tzf -)" "secrets/db_password"
   touch "$SENT/rsync-fails"
   run_backup --offsite-only; check "rsync fails: the test copy says so" "$?" 3
   check "rsync fails: the encrypted file is gone" "$(send_dir_state)" gone
   find "$SENT" -name rsync-fails -delete
+
+  # An unreadable secret mustn't stop the data leaving, or pass for a good copy.
+  touch "$SENT/config-unreadable"
+  find "$SENT" -name 'rsync-*' -delete
+  run_backup --offsite-only; check "unreadable config: the test copy fails" "$?" 3
+  contains "unreadable config: in words" "$(cat "$WORK/out")" "Off-site copy failed — the data went off-site"
+  check "unreadable config: the data still went" "$(decrypt "$SENT_FILE" | sum)" "$(sum < "$LOCAL")"
+  find "$SENT" -name config-unreadable -delete
 
   # --- 8. S3: a stream, ciphertext only, and no file on the way
   set_env "$S3_T" "$RECIPIENT"
@@ -213,7 +256,8 @@ else
   LOCAL="$(newest_local)"; NAME="$(basename "$LOCAL")"
   check "S3: sent as <name>.tar.gz.age" "$(cat "$SENT/s3-dest")" "$S3_T/$NAME.age"
   check "S3: age's format" "$(head -c 21 "$SENT/s3-object")" "age-encryption.org/v1"
-  check "S3: round trip" "$(decrypt "$SENT/s3-object" | sum)" "$(sum < "$LOCAL")"
+  check "S3: the data, byte for byte" "$(decrypt "$SENT/s3-object" | first_part)" "$(sum < "$LOCAL")"
+  contains "S3: the copy holds the secrets" "$(decrypt "$SENT/s3-object" | config_part | tar -tzf -)" "secrets/db_password"
   check "S3: no temp file" "$(send_dir_state)" gone
   touch "$SENT/s3-fails"
   run_backup --offsite-only; check "S3 fails: the test copy says so" "$?" 3
@@ -299,6 +343,18 @@ else
   printf 'x' > "$WORK/not-encrypted.tar.gz.age"
   restore --yes --data-only --identity "$WORK/key.txt" "$WORK/not-encrypted.tar.gz.age"; check "restore: named .age, isn't" "$?" 1
   check "restore: still nothing touched" "$(cat "$FAKE_RESTORES")" ""
+
+  # A copy with the config in: every check above reads the data only, and the config stays unread.
+  check "restore: the copy holds the config" "$(decrypt "$WORK/copy.tar.gz.age" | tail -c +"$(( $(wc -c < "$WORK/plain.tar.gz") + 1 ))" | tar -tzf - | grep -c 'secrets/db_password')" 1
+  printf 'changed since the backup' > "$B/secrets/db_password"
+  restore --yes --data-only --identity "$WORK/key.txt" "$WORK/copy.tar.gz.age"; check "restore: a copy with config" "$?" 0
+  check "restore: --data-only ignores the config" "$(cat "$B/secrets/db_password")" "changed since the backup"
+  printf '%s' "$SECRET_MARK" > "$B/secrets/db_password"
+  # A copy from before the config was added: one gzip member, as they all were.
+  "$REAL_AGE" -r "$RECIPIENT" -o "$WORK/older-format.tar.gz.age" "$WORK/plain.tar.gz"
+  restore --yes --data-only --identity "$WORK/key.txt" "$WORK/older-format.tar.gz.age"; check "restore: an older copy" "$?" 0
+  contains "restore: an older copy, verified" "$(cat "$WORK/out")" "Backup verified."
+  : > "$FAKE_RESTORES"
 
   # The same check as a plain one: a decrypted archive that doesn't match its MANIFEST is refused.
   mkdir "$WORK/tamper"; tar -xzf "$WORK/plain.tar.gz" -C "$WORK/tamper"

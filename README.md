@@ -18,6 +18,8 @@ You do NOT need the private source repo to deploy or operate the product.
 | `bin/healthwatch.sh` | every 15 min (backup container): runs `doctor.sh`, emails `OPS_ALERT_EMAIL` outside the server when checks fail, remind daily, resolved; pings `OPS_HEARTBEAT_URL` for the outside uptime check; leaves `status/health.json` (masked, read-only to the `api` container) for the app's Setup → Server health page (RUNBOOK.md §7b, §7c) |
 | `bin/tests/` | hermetic shell self-tests, run by `ci-validate.sh` |
 | `bin/restore.sh` / `restore-drill.sh` | restore an archive (app DB + sign-in DB + evidence), plain or an encrypted off-site copy; prove an archive restores in a scratch Incus container (operator machine only) |
+| `bin/recover.sh` | rebuild a brand-new server from one encrypted off-site copy, with no installer questions (RUNBOOK.md, "Recovering onto a new server") |
+| `bin/refresh-signing-key.sh` | make the application trust the key the sign-in server signs with, when `doctor.sh`'s `sign-in key` row fails |
 | `bin/ci-validate.sh` | static checks run by `.github/workflows/validate.yml` (bash -n, python, `docker compose config`) — run before pushing |
 | `bin/lib/common.sh` | shared helpers: the ONE Docker-socket discovery (`docker_socket`) and the backup/restore data-plane functions |
 | `bin/deploy_to_test.py` | devbox orchestrator for the TEST appliance — the Incus container `workforce-test` (Tailscale + DuckDNS + installer + version converge) |
@@ -208,6 +210,8 @@ health check FAILS in plain words. Copies in `backups/` here stay as they are, o
 
 **Lose the private key and the off-site backups are lost.** Keep it in a password manager and a printed copy somewhere safe,
 both off the server, and never in this repo or the private one. Check it each year with `./bin/backup.sh --verify-key -`.
+A copy also holds the server's `.env` and `secrets/`, so the private key opens every secret as well as the data, and a copy
+is all a new server needs: RUNBOOK.md, "Recovering onto a new server". Local backups never hold them.
 RUNBOOK.md, "Off-site backup targets", has setup on an existing installation, rotation and restore.
 
 ## Server health in the app
@@ -228,13 +232,14 @@ The assistant is off until an AI service is set up, in either place:
 
 - **For every organisation on this server**: set `AI_PROVIDER` (`ANTHROPIC`, `OPENAI_COMPATIBLE`
   or `AZURE_OPENAI`), `AI_MODEL` and, if needed, `AI_ENDPOINT` in `environments/<env>.env`, put the
-  key in `secrets/ai_api_key` (mode 600, never committed), and re-run the deployer. `AI_LOCKED=true`
+  key in `secrets/ai_api_key` (never committed), and re-run the deployer. `AI_LOCKED=true`
   stops organisations choosing their own; `AI_ALLOWED_PROVIDERS` limits which kinds they may choose.
 - **By an organisation itself**: its registered manager or a director enters a provider, model and
   key in Setup → AI assistant. Keys are encrypted with `secrets/ai_credential_key`, which the
-  installer and every update create if absent. **Keep that file with the server's other secrets**:
-  backups hold the database but not the secrets, and without the same key organisations must enter
-  their AI keys again (the app says so).
+  installer and every update create if absent. Backups on the server itself hold the database but
+  not the secrets. The encrypted off-site copies hold both, so `bin/recover.sh` brings this key back.
+  Restoring without it, from a local backup or an older copy, means organisations must enter their
+  AI keys again (the app says so).
 - **An AI machine on the customer's network** (a DGX Spark, a Ryzen AI box running an
   OpenAI-compatible server): either set it server-wide with `AI_ENDPOINT=http://dgx-spark.lan:8000/v1`,
   or list it in `AI_TRUSTED_ENDPOINTS` (host names or CIDR ranges, comma-separated) so organisations
@@ -248,7 +253,7 @@ details removed — screenshots never) is filed as a GitHub issue for Care Angel
 
 - `FEEDBACK_GITHUB_REPO`, `FEEDBACK_GITHUB_APP_ID` and `FEEDBACK_GITHUB_INSTALLATION_ID` are set in
   `.env` (ansible: `feedback_github_repo`, `feedback_github_app_id`, `feedback_github_installation_id`),
-- the GitHub App's private key (`.pem`) is in `secrets/feedback_github_key` (mode 600, never
+- the GitHub App's private key (`.pem`) is in `secrets/feedback_github_key` (never
   committed; the installer and every update create it empty), and
 - the organisation leaves "Send reports to Care Angels Software" on (Setup → Feedback).
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # backup-encrypt-e2e.sh — off-site encryption end to end, with nothing faked but the databases:
 #   1. in an alpine:3.20 container like the backup container (same apk packages for this job): the
-#      real bin/backup.sh --offsite-only sends a fake archive through real rsync over real ssh to a
-#      local sshd, where the key is restricted with rrsync -wo as RUNBOOK says. It's fetched back with
-#      a separate key that can read, decrypted, and compared by checksum. The write-only key must not
-#      be able to read it. A plaintext copy must not arrive with no recipient.
+#      real bin/backup.sh --offsite-only sends a fake archive and the server's settings through real
+#      rsync over real ssh to a local sshd, where the key is restricted with rrsync -wo as RUNBOOK says.
+#      It's fetched back with a separate key that can read, decrypted, and compared by checksum. The
+#      write-only key must not be able to read it. A plaintext copy must not arrive with no recipient.
 #   2. on this machine: the same with no age installed, so through the helper container, which also
 #      proves its stdout carries binary data and that its key is in memory only; key generation too.
 # Needs Docker and the network (it pulls alpine:3.20 and apk packages). Not one of the hermetic
@@ -87,7 +87,14 @@ check "and got nothing" "$([ -e /tmp/stolen ] && echo yes || echo no)" no
 # Fetched with the operator's own access, decrypted, compared
 mkdir /tmp/fetched
 rsync -e "ssh -i /root/.ssh/operator -o StrictHostKeyChecking=accept-new" "backups@127.0.0.1:/srv/backups/backups/$NAME.age" /tmp/fetched/
-check "fetched back, decrypted, same checksum" "$(age -d -i /root/key.txt "/tmp/fetched/$NAME.age" | sha256sum | cut -d' ' -f1)" "$WANT"
+SIZE="$(wc -c < "backups/$NAME")"
+check "fetched back, decrypted, the data's checksum" "$(age -d -i /root/key.txt "/tmp/fetched/$NAME.age" | head -c "$SIZE" | sha256sum | cut -d' ' -f1)" "$WANT"
+AFTER="$(age -d -i /root/key.txt "/tmp/fetched/$NAME.age" | tail -c +"$((SIZE + 1))" | tar -tzf -)"
+contains "and after it, the settings" "$AFTER" ".env"
+contains "and the secrets, with the rsync key" "$AFTER" "secrets/backup_ssh_key"
+check "a local archive holds none of them" "$(tar -tzf "backups/$NAME" | grep -c -e '\.env' -e secrets)" 0
+RC=0; age -d -i /root/other.txt "/tmp/fetched/$NAME.age" >/dev/null 2>&1 || RC=$?
+check "the other key can't open it" "$([ "$RC" -ne 0 ] && echo refused || echo opened)" refused
 RC=0; OUT="$(./bin/backup.sh --verify-key /root/key.txt "/tmp/fetched/$NAME.age" 2>&1)" || RC=$?
 check "--verify-key: the right key opens the fetched copy" "$RC" 0
 contains "--verify-key: says so" "$OUT" "this key opens"
@@ -102,6 +109,13 @@ check "--verify-key: through stdin" "$RC" 0
 RC=0; OUT="$(./bin/restore.sh --identity /root/other.txt "/tmp/fetched/$NAME.age" 2>&1 </dev/null)" || RC=$?
 check "restore: the wrong key" "$RC" 1
 contains "restore: the wrong key, in words" "$OUT" "This key doesn't open this backup"
+
+# What restore.sh runs: with real age, real gzip and busybox tar, the data comes out and the settings don't.
+mkdir /tmp/unpack
+age -d -i /root/key.txt "/tmp/fetched/$NAME.age" | gzip -dc | { tar -xf - -C /tmp/unpack; RC=$?; cat >/dev/null; exit "$RC"; }
+check "unpacking: every step of the pipe was happy" "${PIPESTATUS[*]}" "0 0 0"
+check "unpacking: the data" "$(cat /tmp/unpack/database.dump)" "fictitious care records"
+check "unpacking: not the settings" "$([ -e /tmp/unpack/.env ] && echo yes || echo no)" no
 
 printf 'inside the container: %s passed, %s failed\n' "$PASS" "$FAILN"
 [ "$FAILN" -eq 0 ]

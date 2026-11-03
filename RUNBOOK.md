@@ -446,7 +446,9 @@ files, that part of the restore hasn't been tested. The drill doesn't check what
 database, or start the app on the restored data.
 
 It restores into a throw-away container with `bin/restore.sh --data-only`
-and checks app DB, sign-in DB and evidence object counts; exit 0 = PASS.
+and checks app DB, sign-in DB and evidence object counts; exit 0 = PASS. It proves the data, not
+the settings and secrets a copy also holds: `./bin/recover.sh --check` looks at those, and
+"Recovering onto a new server" is the whole thing.
 Not yet scheduled — run it at least monthly (nightly once automated).
 
 ## Hardening notes (for production, not the test)
@@ -471,14 +473,23 @@ health (or `./bin/backup.sh --offsite-only`), which sends the newest archive by 
 
 ### Encryption
 
-Off-site copies hold database dumps, evidence files and mail, so staff and care records. They're encrypted with
+Off-site copies hold database dumps, evidence files and mail, so staff and care records, and the server's `.env` and
+`secrets/`, so that a copy is enough to rebuild the server (see "Recovering onto a new server"). They're encrypted with
 [age](https://age-encryption.org) before they leave the server and arrive as `<name>.tar.gz.age`. This server holds only
 the public key (the recipient), as `BACKUP_ENCRYPT_RECIPIENT=age1…` in `.env`. The private key that opens them is never
 on it.
 
+- **The private key opens every secret as well as the data.** Whoever has it and a copy has the database passwords, the
+  sign-in server's secret, the mail and backup credentials, and all the staff and care records. Guard it accordingly.
+- **Old copies hold the secrets of their day.** A password you've since changed, or a key you've since rotated, is still
+  in every older copy. If a secret was exposed, change it, and remember those copies still hold the old one, which is one
+  more reason to remove old copies from the target. Recovering from an old copy also brings back its old secrets, so
+  anything changed since at the far end (a relay password, S3 credentials) may need setting again.
+
 - **What this protects against.** Anyone who gets at the target, or a stolen copy of it, or who takes over this server,
   can't read the off-site copies. Neither can this server. The copies in `backups/` here stay unencrypted, because they
-  sit on the same disk as the live data they copy. They're protected by the server's own access, not by this.
+  sit on the same disk as the live data they copy. They're protected by the server's own access, not by this, and they
+  never hold `.env` or `secrets/`.
 - **No recipient means no off-site copy.** With a target and no usable recipient, nothing leaves the server and nothing
   is ever sent as plaintext. `backups/cron.log` says why, the `off-site backup` row of `./bin/doctor.sh` FAILS, the health
   watch emails `OPS_ALERT_EMAIL`, and Setup → Server health shows it. Backups carry on here.
@@ -532,3 +543,122 @@ Neither `--identity` nor anything else ever takes the key itself on the command 
 `-`, so that the key never lands on its disk. No `age` needs installing: without it, a throw-away container decrypts, with
 the key held in memory. It verifies the decrypted archive exactly as it does a plain one. The wrong key is refused before
 anything changes, as is a damaged file. To prove a copy restores without touching a live system, see "Restore drill".
+
+`restore.sh` only ever puts the data back: it reads no further than the data in a copy, and leaves this server's `.env` and
+`secrets/` as they are. To put those back too, on a new server, see "Recovering onto a new server".
+
+If you unpack a copy by hand, `age -d` then `tar -xzf` gives you the data only. The settings and secrets are a second gzip
+part after it, which plain tar stops short of: `age -d -i <key file> <copy> | gzip -dc | tar -xif -` gets all of it, and
+writes every secret to the folder you're in, so don't.
+
+## Recovering onto a new server
+
+For when the server is gone: a dead disk, a provider failure, a break-in. It takes a new server with nothing on it, and
+puts back Workforce as it was when the copy was made. Anything entered after that copy is lost.
+
+### What you must already have, kept somewhere other than the server
+
+- **The private key** that opens the off-site copies (`AGE-SECRET-KEY-1…`). Without it the copies can't be opened by anyone.
+- **Your own access to the off-site target**, to fetch a copy. The server's own key can only write there.
+- **A GitHub token with `read:packages`**, to pull the images. A new one will do: Settings → Developer settings → Tokens (classic).
+- **Control of your DNS**, to point the names at the new server.
+
+Everything else, including the settings you gave the installer and every password, is inside the copy.
+
+### The steps
+
+1. **Start the clock**, and write down the time (see "How long it took", below).
+2. **Create a new server** with Ubuntu 24.04, at least as big as the old one, as in steps 0 and 1 at the top of this
+   runbook. Open 22, 80 and 443 in the provider's firewall, and 25 if staff email was on. Use a new server: this replaces
+   the secrets, and it refuses to run on one that's already set up.
+3. **If the old server could still be running, turn it off**, so that the two don't both send reminders and mail.
+4. **Point DNS at the new server.** At your domain provider, change the A records for the app and sign-in names
+   (`workforce.<your-domain>`, `auth.<your-domain>`) to the new address. If staff email was on, change the webmail and mail
+   names too, and the rest under "If staff email was on" below. Security certificates can't be issued until these point
+   at the new server, so the recovery waits up to 15 minutes for them, then stops and says so. Keeping those records' TTL
+   low, say 5 minutes, makes this quicker on the day.
+5. **Fetch the newest copy** with your own access to the target, then put it on the new server, for example
+   `scp <name>.tar.gz.age root@<new address>:/root/`.
+6. **Run the recovery** as root on the new server:
+
+   ```bash
+   git clone https://github.com/marlon-thomas/workforce-deploy.git /opt/workforce-deploy
+   cd /opt/workforce-deploy
+   ./bin/recover.sh --identity - /root/<name>.tar.gz.age
+   ```
+
+   Paste the private key when asked, then the GitHub token, and leave it to run: it asks nothing else. Neither is shown. The
+   key is never written down, and the token is kept in the service account's Docker login, as on any install. It installs Docker and every service using the secrets from the copy, then
+   restores the data, and tells you how long that took. Expect a good half hour, more with a lot of evidence.
+
+   - The token can come from a file: `--registry-token-file <file>`. Delete the file afterwards.
+   - On a machine that can't run rootless Docker, add `--system-docker`, as for the installer.
+   - **If it stops,** fix what it says and run the same command again. It carries on from where it got to.
+   - **If it says the backup's sign-in database is from another authentik version,** do what it says as `workforce_app_sa`:
+     `./bin/upgrade-authentik.sh --hold <version>`. Run the recovery again as root, then `./bin/upgrade-authentik.sh`.
+7. **Remove the copy** from `/root` when you've finished checking. It's encrypted, so this is only about disk space.
+
+### What a person should then check
+
+The machine's own checks can't tell you these. Go through them in a browser:
+
+- **Sign in with your real account**, not `admin`. This is the check that matters most: a problem with sign-in can leave
+  every health check green.
+- **People** shows your staff.
+- **The training matrix** shows what you expect.
+- **Open an evidence file.**
+- **Webmail**, if staff email was on: sign in and read a message.
+- **Setup → Server health** is green, or says plainly what isn't. It can take 15 minutes to catch up.
+- **A new backup reaches the off-site target.** As `workforce_app_sa`, run `./bin/backup.sh` in `/opt/workforce-deploy`, then
+  look for the new file on the target. This is what puts you back to being protected. An rsync target's address will be
+  trusted afresh on first use.
+
+Then, as root, `passwd workforce_app_sa` if you want a password on the service account: the recovery doesn't set one.
+If you're here because of a break-in, change the secrets too: they're the same ones the old server had. Make a new age key
+pair ("Rotating the key"), and change the passwords you hold elsewhere (relay, S3, GitHub token).
+
+### If staff email was on
+
+As well as the names above, point the MX record's mail host at the new address, update the address in your SPF record if it
+names the old one, and ask the provider to set reverse DNS on the new address. Mail arriving while the old server was
+gone waits at the sender for a few days, then bounces.
+
+### How long it took
+
+Keep these from every recovery and every practice run, because they're what you'd tell your organisation to expect:
+
+- **Time to recover**: from the time in step 1 until the checks above pass. `recover.sh` prints its own share of that.
+- **Data lost**: from the time the copy was made (it's in the file's name) until the server was lost. A nightly backup means up to a
+  day.
+
+Practise before you need it. A full practice needs the names in the copy to point at the practice server, so it means a
+planned outage, or a test installation's own copy. In between, at least once a year, run "Restore drill" for the data, and
+this for the rest. It proves a copy holds what a recovery needs without changing anything. It reads the whole copy, writes
+none of it down, and works on any Linux computer with this repository, GNU tar, and either `age` or Docker:
+
+    ./bin/recover.sh --check --identity - <name>.tar.gz.age
+
+Exit 0 = yes, 3 = it's an older copy with data only, 6 = the wrong key, 1 = it's damaged.
+
+### If the copy has no settings and secrets
+
+Copies made before this was added hold only the data, and `recover.sh` says so and stops. Backups from a server's own
+`backups/` folder never hold them. Those can still be restored, with more work and more lost:
+
+    ./bin/install.sh                                  # answer the questions as for a new server, with the same names
+    ./bin/restore.sh --identity - <name>.tar.gz.age   # or ./bin/restore.sh <name>.tar.gz, for a plain one
+
+`restore.sh` makes signing in work again by itself: it takes the sign-in key from the restored database, and restarts the
+application to trust it. If the health check's `sign-in key` row ever fails, `./bin/refresh-signing-key.sh` does the same.
+What did not survive, and what to do:
+
+- **Passwords.** Everyone signs in with the password they had at the time of the backup, including `admin`. The password the
+  new install made up opens nothing, so `secrets/initial-admin-password` is removed. If nobody knows the `admin` password,
+  use "Forgot your password?" on the sign-in page with the recovery address (`ADMIN_RECOVERY_EMAIL`), which emails a link
+  if email is working and the address is outside the server. If that can't work, `./bin/reset-admin.sh`.
+- **Organisations' own AI keys.** They were encrypted with the old `secrets/ai_credential_key`, so enter them again in Setup → AI assistant.
+- **Phone and browser notifications.** Each device has to switch them on again, because the push keys are new.
+- **Staff email.** Its settings were in the old `.env`: switch it on again in Setup → Email. Its database is restored only
+  if the mail server is set up first, so if mail matters, do that before the restore.
+- **Everything else in the old `.env`**: the relay, alerts, feedback. Set them again, from your own notes or the installer's questions.
+- **The off-site target's key** (`secrets/backup_ssh_key`), for rsync: put one back and allow it on the target.
