@@ -373,6 +373,10 @@ services:
       # B.AI): no data processing agreement, fictitious people only. Test appliance only — never
       # set it in production.
       AI_TEST_SERVICES: ${AI_TEST_SERVICES:-false}
+      # People we support is held back from the first release (Workforce issue 255): true offers it.
+      # Left empty, the app follows AI_TEST_SERVICES, so it's off wherever that's off. Don't default
+      # it to false here: that would turn it off on the test appliance too.
+      WORKFORCE_CARE_AVAILABLE: ${WORKFORCE_CARE_AVAILABLE:-}
       # Setup -> Server health. Keep it on for a server that runs one organisation; the hosted
       # platform sets it to false, because a tenant must not see server details.
       WORKFORCE_SERVER_HEALTH_VISIBLE: ${WORKFORCE_SERVER_HEALTH_VISIBLE:-true}
