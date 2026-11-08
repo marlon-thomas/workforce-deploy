@@ -31,13 +31,6 @@ def account(username):
     return User.objects.filter(username=username).first()
 
 
-def codes_to(user):
-    """Where the sign-in flow may send this account's codes (ADR-0039), or ''."""
-    if user is None:
-        return ""
-    return str(((user.attributes or {}).get("workforce") or {}).get("codes") or "")
-
-
 admin = account(SIGN_IN)
 bootstrap = account(BOOTSTRAP)
 
@@ -47,7 +40,6 @@ if mode == "read":
         others = User.objects.filter(email__iexact=email).exclude(username__in=[SIGN_IN, BOOTSTRAP]).count()
     print("ADMIN_RECOVERY " + json.dumps({
         "admin": admin.email if admin else None,
-        "admin_codes": codes_to(admin),
         "akadmin": bootstrap.email if bootstrap else None,
         "others": others,
     }))
@@ -60,17 +52,6 @@ elif mode == "write":
             user.email = wanted
             user.save(update_fields=["email"])
             changed.append(user.username)
-    # ADR-0039: the emergency administrator's sign-in codes go to the recovery address, its own code to the
-    # installation's contact. The sign-in flow sends codes only to an address stamped here; akadmin gets none.
-    if admin is not None and codes_to(admin) != email:
-        attributes = dict(admin.attributes or {})
-        workforce = dict(attributes.get("workforce") or {})
-        workforce["codes"] = email
-        attributes["workforce"] = workforce
-        admin.attributes = attributes
-        admin.save(update_fields=["attributes"])
-        if "admin" not in changed:
-            changed.append("admin")
     print("ADMIN_RECOVERY " + json.dumps({"changed": changed}))
 else:
     raise SystemExit("mode must be read or write")

@@ -19,9 +19,8 @@
   ansible.builtin.set_fact:
     recovery_email: "{{ admin_recovery_email | default('', true) | trim | lower }}"
 
-# ADR-0039 (Workforce): everyone signs in with a code, sent by email through SMTP_HOST, and the emergency
-# administrator's goes to ADMIN_RECOVERY_EMAIL. Said loudly rather than failing the update: staff with a
-# personal email still sign in when only the recovery address is missing.
+# ADR-0039 (Workforce): everyone signs in with a code sent by email, except the emergency administrator, which
+# signs in with its password alone (§5). Said loudly rather than failing the update.
 - name: Two-step sign-in can send codes (SIGNIN_SMTP_HOST or SMTP_HOST)
   when: (signin_smtp_host | default('', true) | trim | length == 0) and (smtp_host | default('', true) | trim | length == 0)
   ansible.builtin.debug:
@@ -36,14 +35,6 @@
       NOTE: sign-in codes and server alerts share the outgoing relay (SMTP_HOST) with notifications and staff
       mail. Set SIGNIN_SMTP_* in .env to a separate relay account to keep sign-in working if that relay is
       blocked or abused.
-
-- name: The emergency administrator can get a code (ADMIN_RECOVERY_EMAIL)
-  when: recovery_email | length == 0
-  ansible.builtin.debug:
-    msg: >-
-      WARNING: ADMIN_RECOVERY_EMAIL is empty, so the emergency administrator account has nowhere to get a
-      sign-in code and can't sign in. Set it in .env to an address you read outside this server, then run
-      ./bin/update.sh again.
 
 - name: Recovery address — checked before anything changes
   when: recovery_email | length > 0
@@ -166,7 +157,6 @@
       register: ak_recovery_write
       when: >-
         (ak_recovery_now.admin | default('', true) | lower) != recovery_email
-        or (ak_recovery_now.admin_codes | default('', true) | lower) != recovery_email
         or (ak_recovery_now.akadmin is not none and (ak_recovery_now.akadmin | default('', true) | lower) != ('akadmin@' ~ auth_hostname) | lower)
       failed_when: (ak_recovery_write.stdout_lines | default([]) | select('match', '^ADMIN_RECOVERY ') | list | length) == 0
       changed_when: true
