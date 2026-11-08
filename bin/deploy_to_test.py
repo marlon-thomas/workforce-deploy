@@ -691,6 +691,28 @@ def step5_version():
         say("  then store it in your password manager, change it after first sign-in, and delete the file")
 
 
+def step6_test_inbox():
+    """The test inbox (owner, 8 November 2026), when environments/test.env says TEST_INBOX=on: mailpit's web UI
+    at https://testmail.<app host>, behind its own password. bin/test-inbox.sh makes the password on the box and
+    keeps it only in its .env; it is handed back once, the first time, for the summary. Returns (url, new
+    password or None), or None when it's off."""
+    if (TEST_ENV.get("TEST_INBOX") or "").strip().lower() != "on":
+        return None
+    say("\n───────── STEP 6: test inbox ─────────")
+    rc, out = guest(f"cd {WORKDIR} && ./bin/test-inbox.sh on", as_service_user=True)
+    if rc != 0:
+        warn("the test inbox didn't start: " + (out.strip().splitlines() or ["no detail"])[-1])
+        return None
+    url = new = None
+    for line in out.splitlines():
+        if line.startswith("TEST_INBOX_URL="):
+            url = line.split("=", 1)[1].strip()
+        elif line.startswith("TEST_INBOX_NEW_PASSWORD="):
+            new = line.split("=", 1)[1].strip()
+    ok(f"test inbox at {url}")
+    return url, new
+
+
 def take_snapshot():
     """(Re)take the baseline snapshot --fresh restores. Only after a verified run."""
     if snapshot_exists():
@@ -745,6 +767,7 @@ def main():
         step4(args.reinstall)
     if args.skip_to <= 5:
         step5_version()
+    inbox = step6_test_inbox()
     if args.snapshot:
         take_snapshot()
 
@@ -753,6 +776,15 @@ def main():
     say("  TEST appliance deployed.")
     say(f"    App:     https://{APP_HOSTNAME}")
     say(f"    Sign-in: https://{AUTH_HOSTNAME}   (user: admin)")
+    if inbox:
+        say(f"    Test inbox: {inbox[0]}   (user: test)")
+        if inbox[1]:
+            # Shown this once, like the sign-in line: the owner reads test codes and emails here.
+            say(f"      password: {inbox[1]}")
+            say(f"      shown only now; kept in {WORKDIR}/.env (TEST_INBOX_PASSWORD) on the test box only")
+        else:
+            say(f"      password: in {WORKDIR}/.env on the test box (TEST_INBOX_PASSWORD); read it with")
+            say(f"      sudo incus exec --project {PROJECT} {INSTANCE} -- grep TEST_INBOX_PASSWORD {WORKDIR}/.env")
     say("  Reachable from any device on your tailnet (test-CA root installed).")
     say(f"  Reset to the baseline:  deploy_to_test.py --fresh   (snapshot '{SNAPSHOT}')")
     say("═══════════════════════════════════════════════════════")

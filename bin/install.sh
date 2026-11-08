@@ -898,6 +898,10 @@ case "${TLS_MODE:-http01}" in
       GATEWAY_CADDYFILE_DEFAULT="./gateway/Caddyfile.localca"
     fi ;;
 esac
+# The test inbox is for the TEST appliance only (bin/lib/prod-guards.sh): refuse before anything is written.
+# shellcheck source=lib/prod-guards.sh
+. ./bin/lib/prod-guards.sh
+prod_guard_start "${ENV_NAME:-prod}" "${TEST_INBOX:-}" || exit 1
 cat > .env <<ENV
 ENV_NAME=${ENV_NAME:-prod}
 APP_HOSTNAME=${APP_HOSTNAME}

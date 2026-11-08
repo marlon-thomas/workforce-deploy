@@ -309,6 +309,19 @@ else
     row "outgoing email" ok "relay ${SMTP_TO} reachable from the api$([ "${SMTP_STARTTLS:-false}" = true ] && echo ' (STARTTLS ok)')"
   fi
 fi
+# --- test-only things on a real install (owner, 8 November 2026): the test inbox and mailpit
+# shellcheck source=lib/prod-guards.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/prod-guards.sh"
+if [ "${ENV_NAME:-prod}" != test ]; then
+  mailpit_up=no
+  if docker compose ps --status running -q mailpit 2>/dev/null | grep -q .; then mailpit_up=yes; fi
+  if guard="$(prod_guard_runtime "${ENV_NAME:-prod}" "${TEST_INBOX:-}" "${TEST_INBOX_HOSTNAME:-}" "${COMPOSE_PROFILES:-}" "$mailpit_up")"; then
+    row "test-only parts" ok "no test inbox or mailpit"
+  else
+    oprow "test-only parts" fail "$(printf '%s' "$guard" | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
+  fi
+fi
+
 # --- sign-in codes and server alerts (Workforce ADR-0039): their own route, apart from staff mail's relay
 if [ -n "${SIGNIN_SMTP_HOST:-}" ]; then
   row "sign-in email" ok "codes and alerts go by their own route (${SIGNIN_SMTP_HOST}:${SIGNIN_SMTP_PORT:-587})"
