@@ -19,6 +19,24 @@
   ansible.builtin.set_fact:
     recovery_email: "{{ admin_recovery_email | default('', true) | trim | lower }}"
 
+# ADR-0039 (Workforce): everyone signs in with a code, sent by email through SMTP_HOST, and the emergency
+# administrator's goes to ADMIN_RECOVERY_EMAIL. Said loudly rather than failing the update: staff with a
+# personal email still sign in when only the recovery address is missing.
+- name: Two-step sign-in can send codes (SMTP_HOST)
+  when: smtp_host | default('', true) | trim | length == 0
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: SMTP_HOST is empty, so the sign-in server can't email sign-in codes and nobody can finish
+      signing in. Set the outgoing mail settings in .env, then run ./bin/update.sh again.
+
+- name: The emergency administrator can get a code (ADMIN_RECOVERY_EMAIL)
+  when: recovery_email | length == 0
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: ADMIN_RECOVERY_EMAIL is empty, so the emergency administrator account has nowhere to get a
+      sign-in code and can't sign in. Set it in .env to an address you read outside this server, then run
+      ./bin/update.sh again.
+
 - name: Recovery address — checked before anything changes
   when: recovery_email | length > 0
   block:
@@ -140,6 +158,7 @@
       register: ak_recovery_write
       when: >-
         (ak_recovery_now.admin | default('', true) | lower) != recovery_email
+        or (ak_recovery_now.admin_codes | default('', true) | lower) != recovery_email
         or (ak_recovery_now.akadmin is not none and (ak_recovery_now.akadmin | default('', true) | lower) != ('akadmin@' ~ auth_hostname) | lower)
       failed_when: (ak_recovery_write.stdout_lines | default([]) | select('match', '^ADMIN_RECOVERY ') | list | length) == 0
       changed_when: true

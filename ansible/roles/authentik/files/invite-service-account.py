@@ -1,7 +1,8 @@
 # ADR-0017: the Workforce app's invitation credential, converged idempotently inside authentik
 # (`ak shell`). Reads the token key from stdin (never argv/env). The account can create, view
-# and delete invitations, and (ADR-0024) look up a user and make them a password reset link —
-# nothing else (no flows, settings, groups or other tokens).
+# and delete invitations, (ADR-0024) look up a user and make them a password reset link, and
+# (ADR-0039) set where a staff account's sign-in codes go and remove its code methods — nothing else
+# (no flows, settings, groups or other tokens).
 import sys
 
 from authentik.core.models import Group, Token, TokenIntents, User, UserTypes
@@ -40,6 +41,16 @@ for perm in (
     "authentik_core.reset_user_password",
     # authentik 2026.8 also checks POST users/{pk}/recovery/ against the "add" permission
     "authentik_core.add_user",
+    # ADR-0039 (Workforce): two-step sign-in. Set a staff account's email to the personal email on their
+    # record, with the attribute saying Workforce gave it (sign-in codes go there), and remove a person's
+    # code methods when they switch between email and an app or a manager resets them. The app refuses
+    # superusers, "authentik Admins" members and service accounts before any of these calls, and authentik
+    # itself refuses adding anyone to a superuser group without enable_group_superuser (not given).
+    "authentik_core.change_user",
+    "authentik_stages_authenticator_email.view_emaildevice",
+    "authentik_stages_authenticator_email.delete_emaildevice",
+    "authentik_stages_authenticator_totp.view_totpdevice",
+    "authentik_stages_authenticator_totp.delete_totpdevice",
 ):
     assign(perm)
 
@@ -50,7 +61,7 @@ Token.objects.update_or_create(
         "intent": TokenIntents.INTENT_API,
         "expiring": False,
         "key": key,
-        "description": "Workforce app: staff invitations (ADR-0017) and password reset links (ADR-0024)",
+        "description": "Workforce app: staff invitations (ADR-0017), password reset links (ADR-0024) and sign-in codes (ADR-0039)",
     },
 )
 print("workforce-invites converged")

@@ -332,3 +332,152 @@ entries:
         - !Find [authentik_stages_prompt.prompt, [name, default-user-settings-field-name]]
         - !Find [authentik_stages_prompt.prompt, [name, default-user-settings-field-locale]]
 
+  # ---------- ADR-0039 (Workforce): two-step sign-in with codes ----------
+  # Everyone who signs in enters a code after their password: a 6-digit code sent to their personal email (10
+  # minutes, once), or one from an authenticator app if they switched to one in My Hub. Email goes through the
+  # installation's outgoing mail (compose.yaml, AUTHENTIK_EMAIL__*). Workforce sets each account's email to the
+  # personal email on the staff record and stamps attributes.workforce.codes with it; an account without that
+  # stamp is told to ask HR rather than sent a code to an address nobody checked. The ID token's amr then says a
+  # code was entered, and Workforce refuses a sign-in without it.
+  - model: authentik_stages_authenticator_email.authenticatoremailstage
+    id: wf-email-code
+    identifiers: { name: workforce-email-code }
+    attrs:
+      name: workforce-email-code
+      friendly_name: Code by email
+      use_global_settings: true
+      token_expiry: minutes=10
+      subject: Your Workforce sign-in code
+      # branding/email-templates/, mounted at authentik's custom-template folder (/templates).
+      template: workforce-sign-in-code.html
+  - model: authentik_stages_authenticator_totp.authenticatortotpstage
+    id: wf-authenticator-app
+    identifiers: { name: workforce-authenticator-app }
+    attrs:
+      name: workforce-authenticator-app
+      friendly_name: Authenticator app
+      digits: 6
+
+  # The code step of every sign-in. The default flow already binds this stage after the password; it used to
+  # let anyone with nothing set up straight through. Now someone with no code method yet gets the email one,
+  # proved by the first code (it goes to the account's email, which Workforce set), and nobody is excused
+  # because of a recent code elsewhere (last_auth_threshold 0): staying signed in is the session's job.
+  - model: authentik_stages_authenticator_validate.authenticatorvalidatestage
+    identifiers: { name: default-authentication-mfa-validation }
+    attrs:
+      name: default-authentication-mfa-validation
+      device_classes: [email, totp]
+      not_configured_action: configure
+      configuration_stages:
+        - !Find [authentik_stages_authenticator_email.authenticatoremailstage, [name, workforce-email-code]]
+      last_auth_threshold: seconds=0
+      webauthn_user_verification: preferred
+    state: present
+
+  # A device stays signed in up to 30 days here; each organisation's own number of days (1 to 30, 7 unless
+  # changed) is kept by Workforce from the token's auth_time, which sends the person back for a code sooner.
+  - model: authentik_stages_user_login.userloginstage
+    identifiers: { name: default-authentication-login }
+    attrs:
+      name: default-authentication-login
+      session_duration: days=30
+    state: present
+
+  # No personal email given by Workforce yet: no code is sent anywhere, and the person is told to ask HR.
+  # Evaluated when the stage is reached (after the password), so it says nothing about an account to someone
+  # who doesn't know its password. akadmin, authentik's own superuser, has no stamp and so can't sign in here
+  # at all (it never signs in to Workforce; the deployment works through `ak` inside the container).
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-codes-not-ready
+    identifiers: { name: workforce-codes-not-ready }
+    attrs:
+      name: workforce-codes-not-ready
+      expression: |
+        user = request.context.get("pending_user")
+        if user is None:
+            return False
+        wf = (user.attributes or {}).get("workforce") or {}
+        codes = str(wf.get("codes") or "").strip().lower()
+        return codes == "" or codes != str(user.email or "").strip().lower()
+  - model: authentik_stages_deny.denystage
+    id: wf-ask-hr
+    identifiers: { name: workforce-ask-hr }
+    attrs:
+      name: workforce-ask-hr
+      deny_message: >-
+        We can’t send you a sign-in code yet, because there’s no personal email on your staff record.
+        Please ask HR to add it, then try again.
+  - model: authentik_flows.flowstagebinding
+    id: wf-ask-hr-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-ask-hr
+    attrs:
+      order: 25
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-ask-hr-binding, policy: !KeyOf wf-codes-not-ready }
+    attrs: { order: 0, enabled: true }
+
+  # Wrong tries are limited: each wrong password or code lowers the account's score, and at five the next
+  # sign-in stops here for 15 minutes (AUTHENTIK_REPUTATION__EXPIRY in compose.yaml); after that a new code is
+  # sent. Each code also slows down after every wrong try, and lasts 10 minutes. By account, not by address: one
+  # office's shared connection mustn't lock everyone out.
+  - model: authentik_policies_reputation.reputationpolicy
+    id: wf-too-many-tries
+    identifiers: { name: workforce-too-many-tries }
+    attrs:
+      name: workforce-too-many-tries
+      check_ip: false
+      check_username: true
+      threshold: -5
+  - model: authentik_stages_deny.denystage
+    id: wf-too-many-tries-stage
+    identifiers: { name: workforce-too-many-tries }
+    attrs:
+      name: workforce-too-many-tries
+      deny_message: >-
+        That was wrong too many times. Wait 15 minutes, then sign in again, and we’ll send you a new code.
+  - model: authentik_flows.flowstagebinding
+    id: wf-too-many-tries-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-too-many-tries-stage
+    attrs:
+      order: 26
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-too-many-tries-binding, policy: !KeyOf wf-too-many-tries }
+    attrs: { order: 0, enabled: true }
+
+  # My Hub → "Use an authenticator app" opens this (signed in already): an email code first, so only the person
+  # who reads that email can add an app, then the app's QR code. Workforce then removes the email method when they
+  # press Finish, and puts it back if they switch back (both from My Hub).
+  - model: authentik_stages_authenticator_validate.authenticatorvalidatestage
+    id: wf-confirm-by-email
+    identifiers: { name: workforce-confirm-by-email }
+    attrs:
+      name: workforce-confirm-by-email
+      device_classes: [email]
+      not_configured_action: deny
+      last_auth_threshold: seconds=0
+      webauthn_user_verification: preferred
+  - model: authentik_flows.flow
+    id: wf-authenticator-app-flow
+    identifiers: { slug: workforce-authenticator-app }
+    attrs:
+      name: Workforce authenticator app
+      slug: workforce-authenticator-app
+      title: Use an authenticator app
+      designation: stage_configuration
+      authentication: require_authenticated
+      layout: stacked
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-authenticator-app-flow, stage: !KeyOf wf-confirm-by-email }
+    attrs: { order: 10 }
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-authenticator-app-flow, stage: !KeyOf wf-authenticator-app }
+    attrs: { order: 20 }
+

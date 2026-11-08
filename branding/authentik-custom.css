@@ -54,3 +54,14 @@ body,
   --ak-c-flow-executor__locale-select--Color: #344054 !important;
   --ak-c-locale-select--Color: #344054 !important;
 }
+
+/* ADR-0039 (Workforce): the password page says not to reuse the email password, because sign-in codes go to
+   that email. authentik adopts this stylesheet into its pages' shadow roots, so both forms are given. */
+:host(ak-stage-password) form::after,
+ak-stage-password form::after {
+  content: "Please don’t use the same password for Workforce as for your email.";
+  display: block;
+  margin-top: 1rem;
+  font-size: 0.9rem;
+  color: #475467;
+}

@@ -10,6 +10,21 @@
 # spring.config.import=configtree:/run/secrets/ (see application.yml). Images
 # with native *_FILE support (postgres, minio, authentik) consume them directly.
 
+# ADR-0039 (Workforce): authentik sends the sign-in codes through the installation's outgoing mail (the same
+# SMTP_* settings Workforce uses; no new outside service). Codes depend on it: with SMTP_HOST empty nobody can
+# finish signing in, so the identity converge warns. Five wrong tries (password or code) for one
+# account mean a 15-minute wait (the blueprint's reputation check); the score is forgotten after REPUTATION
+# seconds.
+x-ak-sign-in-codes: &ak-sign-in-codes
+  AUTHENTIK_EMAIL__HOST: ${SMTP_HOST:-}
+  AUTHENTIK_EMAIL__PORT: ${SMTP_PORT:-587}
+  AUTHENTIK_EMAIL__USERNAME: ${SMTP_USERNAME:-}
+  AUTHENTIK_EMAIL__PASSWORD: ${SMTP_PASSWORD:-}
+  AUTHENTIK_EMAIL__USE_TLS: ${SMTP_STARTTLS:-false}
+  AUTHENTIK_EMAIL__FROM: ${SMTP_FROM:-workforce@localhost}
+  AUTHENTIK_EMAIL__TIMEOUT: "10"
+  AUTHENTIK_REPUTATION__EXPIRY: "900"
+
 x-logging: &default-logging
   driver: json-file
   options:
@@ -560,7 +575,12 @@ services:
       MAIL_RELAY_PASSWORD_FILE: /run/secrets/mail_relay_password
       MAIL_RELAY_IMPLICIT_TLS: ${MAIL_RELAY_IMPLICIT_TLS:-false}
       MAIL_RELAY_SPF_INCLUDE: ${MAIL_RELAY_SPF_INCLUDE:-}
+      # ADR-0039: the sign-in-codes job gives authentik each person's personal email for their codes.
+      WORKFORCE_AUTHENTIK_API_URL: http://authentik-server:9000/api/v3
     secrets:
+      - source: ak_invite_token
+        target: workforce.authentik.invite-token
+        mode: 0444
       # The installation's GitHub App private key (feedback); an empty file = not connected.
       - source: feedback_github_key
         target: feedback_github_key
@@ -754,6 +774,7 @@ services:
       AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS: "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12"
       # Required from 2026.11.
       AUTHENTIK_WEB__BASE_URL: "https://${AUTH_HOSTNAME}"
+      <<: *ak-sign-in-codes
     secrets: [ak_db_password, ak_secret]
     volumes:
       # 2025.12 moved file storage to /data; the volume keeps its name and contents.
@@ -771,6 +792,8 @@ services:
       # the brand's custom CSS (`!File`); authentik stopped reading /web/dist/custom.css in 2025.
       # A directory, not the file: a single-file mount keeps the old inode after `git pull`.
       - ./branding:/branding:ro
+      # ADR-0039 (Workforce): the sign-in code email's words (authentik's custom-template folder).
+      - ./branding/email-templates:/templates:ro
     logging: *default-logging
     stop_grace_period: 30s
     depends_on:
@@ -793,6 +816,7 @@ services:
       # trusted-proxy + base-url posture as the server.
       AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS: "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12"
       AUTHENTIK_WEB__BASE_URL: "https://${AUTH_HOSTNAME}"
+      <<: *ak-sign-in-codes
     secrets: [ak_db_password, ak_secret]
     volumes:
       - ak_media:/data/media
@@ -803,6 +827,8 @@ services:
       - ./blueprints/workforce-app.yaml:/blueprints/workforce-app.yaml:ro
       - ./blueprints/webmail-app.yaml:/blueprints/webmail-app.yaml:ro
       - ./secrets/ak_config.yml:/etc/authentik/config.yml:ro
+      # ADR-0039 (Workforce): the worker sends the sign-in code emails, so it needs their words too.
+      - ./branding/email-templates:/templates:ro
     logging: *default-logging
     stop_grace_period: 30s
     depends_on:
