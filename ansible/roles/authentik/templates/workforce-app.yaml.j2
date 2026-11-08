@@ -41,8 +41,17 @@ entries:
       description: Links this login to the staff record it was invited for
       # authentik's user-write stage treats "_" in an attribute key as a path separator, so the
       # invitation's `attributes.workforce_invite` is stored as attributes.workforce.invite.
+      # ADR-0039: workforce_email_code_set_up is when the account's email-code method was set up, which authentik
+      # does only after the person typed the code it sent. authentik's amr says "mfa" only when its code step
+      # checks a code against an existing method, so a first sign-in that set the method up would otherwise look
+      # like no code at all and be asked for a second one; Workforce counts this instead (SecondStep.proven).
       expression: |
-        return {"workforce_invite": (request.user.attributes.get("workforce") or {}).get("invite")}
+        from authentik.stages.authenticator_email.models import EmailDevice
+        device = EmailDevice.objects.filter(user=request.user, confirmed=True).order_by("-created").first()
+        return {
+            "workforce_invite": (request.user.attributes.get("workforce") or {}).get("invite"),
+            "workforce_email_code_set_up": int(device.created.timestamp()) if device else None,
+        }
   - attrs:
       name: Workforce
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
@@ -480,4 +489,40 @@ entries:
   - model: authentik_flows.flowstagebinding
     identifiers: { target: !KeyOf wf-authenticator-app-flow, stage: !KeyOf wf-authenticator-app }
     attrs: { order: 20 }
+
+  # ADR-0039 review: only the page above (an email code first) can add an authenticator app. authentik's own
+  # set-up pages (an app, recovery codes, a security key) would let any signed-in session add one with no code,
+  # so they refuse everyone, and the default app and recovery-code stages no longer offer them on authentik's
+  # account page. (authentik's default blueprints are re-applied only when their files change.)
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-nobody
+    identifiers: { name: workforce-nobody }
+    attrs:
+      name: workforce-nobody
+      expression: |
+        ak_message("Add an authenticator app from Workforce: My record, then Signing in.")
+        return False
+{% for slug in ['default-authenticator-totp-setup', 'default-authenticator-static-setup', 'default-authenticator-webauthn-setup'] %}
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, {{ slug }}]]
+      policy: !KeyOf wf-nobody
+    attrs: { order: 0, enabled: true }
+{% endfor %}
+  - model: authentik_stages_authenticator_totp.authenticatortotpstage
+    identifiers: { name: default-authenticator-totp-setup }
+    attrs:
+      name: default-authenticator-totp-setup
+      friendly_name: TOTP Device
+      digits: 6
+      configure_flow: null
+    state: present
+  - model: authentik_stages_authenticator_static.authenticatorstaticstage
+    identifiers: { name: default-authenticator-static-setup }
+    attrs:
+      name: default-authenticator-static-setup
+      friendly_name: Static tokens
+      token_count: 6
+      configure_flow: null
+    state: present
 

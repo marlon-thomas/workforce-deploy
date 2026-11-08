@@ -326,6 +326,12 @@ INV
   WFV_smtp_password="${SMTP_PASSWORD:-}" \
   WFV_smtp_starttls="${SMTP_STARTTLS:-false}" \
   WFV_smtp_from="${SMTP_FROM:-}" \
+  WFV_signin_smtp_host="${SIGNIN_SMTP_HOST:-}" \
+  WFV_signin_smtp_port="${SIGNIN_SMTP_PORT:-587}" \
+  WFV_signin_smtp_username="${SIGNIN_SMTP_USERNAME:-}" \
+  WFV_signin_smtp_password="${SIGNIN_SMTP_PASSWORD:-}" \
+  WFV_signin_smtp_starttls="${SIGNIN_SMTP_STARTTLS:-false}" \
+  WFV_signin_smtp_from="${SIGNIN_SMTP_FROM:-}" \
   WFV_compose_profiles="${COMPOSE_PROFILES:-}" \
   WFV_ops_alert_email="${OPS_ALERT_EMAIL}" \
   WFV_ops_alert_from="${OPS_ALERT_FROM:-}" \

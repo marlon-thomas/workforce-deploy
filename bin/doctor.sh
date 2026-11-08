@@ -309,6 +309,14 @@ else
     row "outgoing email" ok "relay ${SMTP_TO} reachable from the api$([ "${SMTP_STARTTLS:-false}" = true ] && echo ' (STARTTLS ok)')"
   fi
 fi
+# --- sign-in codes and server alerts (Workforce ADR-0039): their own route, apart from staff mail's relay
+if [ -n "${SIGNIN_SMTP_HOST:-}" ]; then
+  row "sign-in email" ok "codes and alerts go by their own route (${SIGNIN_SMTP_HOST}:${SIGNIN_SMTP_PORT:-587})"
+elif [ -n "${SMTP_HOST:-}" ]; then
+  row "sign-in email" warn "sign-in codes and alerts share the outgoing relay with notifications and staff mail: set SIGNIN_SMTP_* in .env to keep them apart"
+else
+  oprow "sign-in email" fail "no outgoing mail: nobody can get a sign-in code (set SIGNIN_SMTP_* or SMTP_* in .env)"
+fi
 if [ -z "${NOTIFICATION_BASE_URL:-}" ]; then
   row "email links" warn "NOTIFICATION_BASE_URL not set — links in emails won't open Workforce"
 fi

@@ -191,6 +191,9 @@ contract & onboarding magic links) go through a durable ledger: rows are only
 
 - **No SMTP configured (default)**: mails are not delivered; contract/onboarding
   links remain copyable in the UI, and the Settings → Notifications run says so.
+- **Sign-in codes and alerts** (Workforce ADR-0039): set `SIGNIN_SMTP_*` to a relay account of
+  their own, apart from `SMTP_*`, so staff mail or a busy notification relay can't stop people signing
+  in. Unset, they use `SMTP_*` and `doctor.sh` says so.
 - **Real relay**: set `SMTP_HOST` (+ port/username/password/starttls) and `SMTP_FROM`
   in `environments/<env>.env`, then re-run the environment's deployer. Queued
   notifications are dispatched by the worker's drain automatically — enabling mail

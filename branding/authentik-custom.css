@@ -65,3 +65,14 @@ ak-stage-password form::after {
   font-size: 0.9rem;
   color: #475467;
 }
+
+/* ADR-0039 review: the code page says what to do when the email doesn't come. authentik's own page has the way to
+   send a new one (choosing the email method again); this says to use it, and when to ask for help. */
+:host(ak-stage-authenticator-validate-code) form::after,
+ak-stage-authenticator-validate-code form::after {
+  content: "Didn’t get it? Check your junk folder, or send a new code. Still nothing after a few tries? Ask your manager to check your email address.";
+  display: block;
+  margin-top: 1rem;
+  font-size: 0.9rem;
+  color: #475467;
+}

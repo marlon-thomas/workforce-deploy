@@ -51,6 +51,10 @@ for perm in (
     "authentik_stages_authenticator_email.delete_emaildevice",
     "authentik_stages_authenticator_totp.view_totpdevice",
     "authentik_stages_authenticator_totp.delete_totpdevice",
+    # ADR-0039 review: a reset ends the person's sign-in server sessions (and, with them, their tokens and
+    # webmail): DELETE core/authenticated_sessions/bulk_delete/?user_pks=<pk>.
+    "authentik_core.view_authenticatedsession",
+    "authentik_core.delete_authenticatedsession",
 ):
     assign(perm)
 

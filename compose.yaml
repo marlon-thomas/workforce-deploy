@@ -10,18 +10,19 @@
 # spring.config.import=configtree:/run/secrets/ (see application.yml). Images
 # with native *_FILE support (postgres, minio, authentik) consume them directly.
 
-# ADR-0039 (Workforce): authentik sends the sign-in codes through the installation's outgoing mail (the same
-# SMTP_* settings Workforce uses; no new outside service). Codes depend on it: with SMTP_HOST empty nobody can
-# finish signing in, so the identity converge warns. Five wrong tries (password or code) for one
-# account mean a 15-minute wait (the blueprint's reputation check); the score is forgotten after REPUTATION
-# seconds.
+# ADR-0039 (Workforce): authentik sends the sign-in codes by the sign-in route, SIGNIN_SMTP_*: its own relay
+# account (or direct sending), kept apart from the relay staff mail and notifications use, so a mailbox abused
+# there can't stop anyone signing in. Server alerts (bin/healthwatch.sh) use the same route. Unset = SMTP_*, and
+# doctor.sh and the identity converge say they're shared. With neither set nobody can finish signing in.
+# Five wrong tries (password or code) for one account mean a 15-minute wait (the blueprint's reputation check);
+# the score is forgotten after REPUTATION seconds.
 x-ak-sign-in-codes: &ak-sign-in-codes
-  AUTHENTIK_EMAIL__HOST: ${SMTP_HOST:-}
-  AUTHENTIK_EMAIL__PORT: ${SMTP_PORT:-587}
-  AUTHENTIK_EMAIL__USERNAME: ${SMTP_USERNAME:-}
-  AUTHENTIK_EMAIL__PASSWORD: ${SMTP_PASSWORD:-}
-  AUTHENTIK_EMAIL__USE_TLS: ${SMTP_STARTTLS:-false}
-  AUTHENTIK_EMAIL__FROM: ${SMTP_FROM:-workforce@localhost}
+  AUTHENTIK_EMAIL__HOST: ${SIGNIN_SMTP_HOST:-${SMTP_HOST:-}}
+  AUTHENTIK_EMAIL__PORT: ${SIGNIN_SMTP_PORT:-${SMTP_PORT:-587}}
+  AUTHENTIK_EMAIL__USERNAME: ${SIGNIN_SMTP_USERNAME:-${SMTP_USERNAME:-}}
+  AUTHENTIK_EMAIL__PASSWORD: ${SIGNIN_SMTP_PASSWORD:-${SMTP_PASSWORD:-}}
+  AUTHENTIK_EMAIL__USE_TLS: ${SIGNIN_SMTP_STARTTLS:-${SMTP_STARTTLS:-false}}
+  AUTHENTIK_EMAIL__FROM: ${SIGNIN_SMTP_FROM:-${SMTP_FROM:-workforce@localhost}}
   AUTHENTIK_EMAIL__TIMEOUT: "10"
   AUTHENTIK_REPUTATION__EXPIRY: "900"
 
