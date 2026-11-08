@@ -309,6 +309,22 @@ else
     row "outgoing email" ok "relay ${SMTP_TO} reachable from the api$([ "${SMTP_STARTTLS:-false}" = true ] && echo ' (STARTTLS ok)')"
   fi
 fi
+# --- sign-in code emails the sign-in server couldn't send in the last day (Workforce issue 290). authentik keeps a
+# failed send only as a failed send_mail task; counted inside it, no addresses read. Shown in Setup -> Server health
+# through the health watch, and with the latest error in Setup -> Email delivery.
+if docker compose ps --status running -q authentik-server 2>/dev/null | grep -q .; then
+  # shellcheck disable=SC2016
+  CODE_FAILS="$(docker compose exec -T authentik-server ak shell -c 'from datetime import timedelta
+from django.utils.timezone import now
+from authentik.tasks.models import Task
+print("CODEFAIL", Task.objects.filter(actor_name__endswith="send_mail", aggregated_status="error", mtime__gte=now() - timedelta(days=1)).count())' 2>/dev/null | sed -n 's/^CODEFAIL //p' | tail -1)" || CODE_FAILS=""
+  case "$CODE_FAILS" in
+    0) row "sign-in code emails" ok "every sign-in code email in the last day went" ;;
+    ''|*[!0-9]*) row "sign-in code emails" skip "couldn't ask the sign-in server" ;;
+    *) oprow "sign-in code emails" fail "${CODE_FAILS} sign-in code email(s) couldn't be sent in the last day — people can't sign in without them (check SIGNIN_SMTP_* / SMTP_*)" ;;
+  esac
+fi
+
 # --- test-only things on a real install (owner, 8 November 2026): the test inbox and mailpit
 # shellcheck source=lib/prod-guards.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/prod-guards.sh"

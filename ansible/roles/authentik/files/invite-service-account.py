@@ -55,6 +55,9 @@ for perm in (
     # webmail): DELETE core/authenticated_sessions/bulk_delete/?user_pks=<pk>.
     "authentik_core.view_authenticatedsession",
     "authentik_core.delete_authenticatedsession",
+    # Workforce issue 290: count failed sign-in code emails (authentik keeps them only as failed send_mail
+    # tasks) for Setup -> Email delivery. Read-only; the app shows a count and an error with addresses removed.
+    "authentik_tasks.view_task",
 ):
     assign(perm)
 
