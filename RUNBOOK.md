@@ -155,7 +155,7 @@ on the host (it belongs to a mapped uid under rootless docker). Removing the who
 **Turning it off.** `SERVER_ACTIONS=off` in `.env` stops the helper at its next pass, needs no restart,
 and doesn't rely on the app: requests get a written refusal. `WORKFORCE_SERVER_ACTIONS=false` then
 `docker compose up -d api` takes the buttons away; **the hosted platform sets this**, and they're also
-gone whenever `WORKFORCE_SERVER_HEALTH_VISIBLE` is false.
+gone whenever `WORKFORCE_SERVER_HEALTH_VISIBLE` is false or the server holds more than one organisation.
 
 **When the app says the helper isn't running.** `docker compose ps backup`, then
 `docker compose up -d backup`. `actions/results/helper.json` is rewritten about every minute, so its
@@ -317,10 +317,11 @@ what Setup → Server health and the server items in Setup status read:
 - **Failure.** A write that fails is logged (`status file NOT written`) and changes nothing else:
   the alert and the heartbeat have already gone by then. The page reports that the watch hasn't
   been heard from once the file is over an hour old, or that it hasn't reported at all.
-- **Who sees it.** The registered manager, director and data administrator. Set
+- **Who sees it.** The registered manager, director and data administrator, and only on a server with
+  one organisation: **with more than one, such as the hosted platform, the app hides it by itself**
+  (Workforce issue 341), because a tenant must not see server details. Set
   `WORKFORCE_SERVER_HEALTH_VISIBLE=false` in `.env` and run `docker compose up -d api` to turn the
-  page off and have Setup status say only what is configured. **The hosted platform sets it off**,
-  because a tenant must not see server details.
+  page off on a one-organisation server too and have Setup status say only what is configured.
 - **The off-site result** comes from the newest run in `backups/cron.log`: the nightly one, or a backup
   or off-site test started from the app, which log there too. A copy made by running `./bin/backup.sh`
   by hand doesn't change it. `encrypted` is true when there's a target and a usable recipient. A target

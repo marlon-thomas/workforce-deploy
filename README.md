@@ -223,9 +223,32 @@ set up but down no longer shows as done. The watch writes `status/health.json`; 
 mounts that folder read-only and has no other view of the server: no Docker socket and no way to
 write anything here. If the watch stops, the page says so.
 
-`WORKFORCE_SERVER_HEALTH_VISIBLE` (default `true`) turns the page off. **The hosted platform sets it
-to `false`**, because a tenant must not see server details; Setup status then says only what is
-configured. See RUNBOOK.md §7b for the file's format and what is masked.
+**On a server with more than one organisation, such as the hosted platform, the app hides the page
+and the jobs from Setup by itself** (Workforce issue 341), because a tenant must not see server
+details: there is no setting to remember, and adding a second organisation hides them at once. Setup
+status then says only what is configured. `WORKFORCE_SERVER_HEALTH_VISIBLE=false` (default `true`)
+hides the page on a server with one organisation too. See RUNBOOK.md §7b for the file's format and
+what is masked.
+
+## The app's name and logo
+
+The app's name and logo are the same for every organisation on a server, so only whoever runs the
+server sets them (Workforce issue 332), here, never in the app. Each organisation keeps its own name,
+colour scheme and phone icon in Setup.
+
+- `BRAND_PRODUCT_NAME` in `.env`: the app's name, at the top of every page, on sign-in, on PDFs and
+  under the icon on staff's phones. Default `Workforce`.
+- The logo: a PNG or JPG at `branding/logo.png` in this bundle (or another file in `branding/`, named
+  by `BRAND_LOGO_FILE`), at most 2 MB and 4096 pixels a side. **SVG and WebP are refused.** git
+  ignores it: it's this server's, not the repo's, and backups don't hold it, so keep your own copy.
+  The app reads it once, at start, through its hardened picture reader and only ever serves or
+  prints a PNG it draws from it.
+- After changing either: `docker compose up -d api worker`. A file the app refuses is named in
+  `docker compose logs api`, and Workforce's own mark is shown meanwhile.
+
+Before this, a registered manager or director could set them in the app. What that left
+(`branding.json`, `logo.*` in the `app_data` volume) is moved aside to
+`branding/retired-in-app-branding/` inside that volume at the first start, and never used again.
 
 ## The AI assistant (ADR-0021)
 

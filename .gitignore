@@ -11,6 +11,10 @@ secrets/*
 backups/
 logs/
 state/
+# The installation's own logo (BRAND_LOGO_FILE, Workforce issue 332): this server's, not the repo's.
+branding/*.png
+branding/*.jpg
+branding/*.jpeg
 # The health watch's report to the app. Masked, but it is this server's, not the repo's.
 status/*
 !status/.gitkeep
