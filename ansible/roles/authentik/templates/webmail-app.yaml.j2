@@ -71,6 +71,8 @@ entries:
         - matching_mode: strict
           redirect_uri_type: logout
           url: https://{{ webmail_hostname }}/
+      # Workforce issue 299: never the offline-access scope, so no refresh token is ever issued: once the person's
+      # sessions here end (a reset, or a newer device replacing this one), webmail stops within its 5 minutes.
       property_mappings:
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]

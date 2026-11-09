@@ -312,14 +312,26 @@ fi
 # --- sign-in code emails the sign-in server couldn't send in the last day (Workforce issue 290). authentik keeps a
 # failed send only as a failed send_mail task; counted inside it, no addresses read. Shown in Setup -> Server health
 # through the health watch, and with the latest error in Setup -> Email delivery.
+# Issue 290: also unusually many in the last hour. The sign-in page asks for a new code at most once a minute, three
+# times, but authentik itself sends one whenever it's asked, so someone with a person's password could ask for many:
+# more than 30 in an hour, and four times the last week's hourly average, is a warning.
 if docker compose ps --status running -q authentik-server 2>/dev/null | grep -q .; then
   # shellcheck disable=SC2016
-  CODE_FAILS="$(docker compose exec -T authentik-server ak shell -c 'from datetime import timedelta
+  CODE_ROW="$(docker compose exec -T authentik-server ak shell -c 'from datetime import timedelta
 from django.utils.timezone import now
 from authentik.tasks.models import Task
-print("CODEFAIL", Task.objects.filter(actor_name__endswith="send_mail", aggregated_status="error", mtime__gte=now() - timedelta(days=1)).count())' 2>/dev/null | sed -n 's/^CODEFAIL //p' | tail -1)" || CODE_FAILS=""
+mail = Task.objects.filter(actor_name__endswith="send_mail")
+print("CODEFAIL", mail.filter(aggregated_status="error", mtime__gte=now() - timedelta(days=1)).count(),
+      mail.filter(mtime__gte=now() - timedelta(hours=1)).count(), mail.filter(mtime__gte=now() - timedelta(days=7)).count())' 2>/dev/null | sed -n 's/^CODEFAIL //p' | tail -1)" || CODE_ROW=""
+  CODE_FAILS=""; CODE_HOUR=""; CODE_WEEK=""
+  read -r CODE_FAILS CODE_HOUR CODE_WEEK <<< "$CODE_ROW" || true
   case "$CODE_FAILS" in
-    0) row "sign-in code emails" ok "every sign-in code email in the last day went" ;;
+    0) if is_count "$CODE_HOUR" && is_count "$CODE_WEEK" && [ "$CODE_HOUR" -gt 30 ] \
+          && [ "$CODE_HOUR" -ge $(( (CODE_WEEK * 4 + 167) / 168 )) ]; then
+         row "sign-in code emails" warn "${CODE_HOUR} sign-in emails in the last hour, far more than usual — someone may be asking for codes with a person's password"
+       else
+         row "sign-in code emails" ok "every sign-in code email in the last day went"
+       fi ;;
     ''|*[!0-9]*) row "sign-in code emails" skip "couldn't ask the sign-in server" ;;
     *) oprow "sign-in code emails" fail "${CODE_FAILS} sign-in code email(s) couldn't be sent in the last day — people can't sign in without them (check SIGNIN_SMTP_* / SMTP_*)" ;;
   esac
@@ -456,6 +468,34 @@ else
     row "mail sync" skip "staff email not in use"
   else
     row "mail sync" ok "no sync errors (${M_ACTIVE} mailbox(es))"
+  fi
+fi
+
+# --- staff email sending (Workforce issue 290): a mailbox that reached its outside-sending limit, or sent far more than
+# usual, in the last day (each is a line on Today for whoever manages email), and whether the mail server's reports are
+# reaching Workforce at all (without them neither can be noticed). App DB, read-only; counts only, no addresses.
+if [ "$DB_OK" != yes ]; then
+  row "mail volume" skip "database not answering"
+elif ! db_has_table mail_send_alert; then
+  row "mail volume" skip "not in this version"
+else
+  VR="$(db_value "select (select count(*) from mail_setting where enabled)
+                  || '|' || (select count(distinct address) from mail_send_alert where kind = 'LIMIT_REACHED' and first_at > now() - interval '24 hours')
+                  || '|' || (select count(distinct address) from mail_send_alert where kind = 'UNUSUAL' and first_at > now() - interval '24 hours')
+                  || '|' || coalesce((select floor(extract(epoch from now() - last_at) / 3600)::int from mail_event_feed where id = 1), -1)")" || VR=""
+  IFS='|' read -r V_ORGS V_LIMIT V_UNUSUAL V_HOURS <<< "$VR" || true
+  if ! is_count "${V_ORGS:-}" || ! is_count "${V_LIMIT:-}" || ! is_count "${V_UNUSUAL:-}" || [ -z "${V_HOURS:-}" ]; then
+    row "mail volume" warn "could not read staff email sending from the database"
+  elif [ "$V_ORGS" -eq 0 ]; then
+    row "mail volume" skip "staff email not in use"
+  elif [ "$V_LIMIT" -gt 0 ] || [ "$V_UNUSUAL" -gt 0 ]; then
+    row "mail volume" warn "in the last day ${V_LIMIT} mailbox(es) reached the sending limit and ${V_UNUSUAL} sent far more than usual — Today says whose; their passwords may be known to someone else"
+  elif [ "$V_HOURS" = -1 ]; then
+    row "mail volume" skip "no reports from the mail server yet (they start with the first email sent or received)"
+  elif [ "$V_HOURS" -ge 48 ]; then
+    row "mail volume" warn "no reports from the mail server for ${V_HOURS} hours — sending limits still hold, but nobody would be told (is MAIL_EVENTS_URL set for the api and worker?)"
+  else
+    row "mail volume" ok "no mailbox reached its sending limit or sent far more than usual in the last day"
   fi
 fi
 

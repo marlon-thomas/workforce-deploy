@@ -52,7 +52,11 @@ for perm in (
     "authentik_stages_authenticator_totp.view_totpdevice",
     "authentik_stages_authenticator_totp.delete_totpdevice",
     # ADR-0039 review: a reset ends the person's sign-in server sessions (and, with them, their tokens and
-    # webmail): DELETE core/authenticated_sessions/bulk_delete/?user_pks=<pk>.
+    # webmail): DELETE core/authenticated_sessions/bulk_delete/?user_pks=<pk>. Issue 299: that is all it takes;
+    # authentik deletes a session's access tokens with it, and no refresh tokens exist (neither app is given the
+    # offline_access scope; bin/tests/blueprint-test.sh keeps it so). So no permission on refresh tokens, and the
+    # account is no longer switched off and on: authentik lists and deletes refresh tokens only for superusers or
+    # their owner anyway, whatever permission this account holds.
     "authentik_core.view_authenticatedsession",
     "authentik_core.delete_authenticatedsession",
     # Workforce issue 290: count failed sign-in code emails (authentik keeps them only as failed send_mail

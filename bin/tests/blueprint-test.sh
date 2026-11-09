@@ -124,5 +124,33 @@ check "the operator's recovery removes the emergency administrator's app (new pr
   "$(grep -c 'TOTPDevice.objects.filter(user=u).delete()' "$REPO/bin/reset-admin.sh")" 1
 check "the staff relay's password reaches authentik only without a sign-in route (new problem 8)" \
   "$(grep -c 'SMTP_PASSWORD: ${SIGNIN_SMTP_HOST:-${SMTP_PASSWORD:-}}' "$REPO/compose.yaml")" 1
+# Issue 299: ending a person's sessions at the sign-in server revokes all their tokens only while no app is given a
+# refresh token; authentik gives one only with the offline_access scope, so neither provider may map it.
+for t in workforce-app webmail-app; do
+  check "$t: no refresh tokens (no offline_access scope)" \
+    "$(grep -v '^ *#' "$REPO/ansible/roles/authentik/templates/$t.yaml.j2" | grep -c 'offline_access')" 0
+done
+# Issue 299: the emergency administrator can't remove its own app on authentik's page: the delete button is hidden there.
+check "authentik's MFA page offers no delete" "$(grep -c '^ak-user-settings-mfa ak-forms-delete-bulk' "$REPO/branding/authentik-custom.css")" 1
+# Issue 290: the sign-in page with "Send a new code": authentik's own page, extended, from its custom-template folder.
+FLOW="$REPO/branding/authentik-templates/if/flow.html"
+check "the sign-in page extends authentik's own" "$(head -1 "$FLOW")" '{% extends "if/flow.html" %}'
+check "and adds only its script" "$(grep -c '{% block scripts %}' "$FLOW")" 1
+check "it limits new codes" "$(grep -c 'var MOST = 3;' "$FLOW")" 1
+check "and ends with asking the manager" "$(grep -c 'ask your manager to check your email address' "$FLOW")" 1
+check "authentik's server reads it" "$(grep -c '\./branding/authentik-templates:/templates:ro' "$REPO/compose.yaml")" 2
+check "the code email is still there" "$(test -f "$REPO/branding/authentik-templates/workforce-sign-in-code.html" && echo yes)" yes
+if command -v node >/dev/null 2>&1; then
+  JS_DIR="$(mktemp -d)"; JS="$JS_DIR/new-code.js"   # a .js name: node refuses mktemp's own suffix
+  python3 -I -c 'import re, sys; t = open(sys.argv[1], encoding="utf-8").read(); m = re.search(r"<script data-id=\"workforce-new-code\">(.*?)</script>", t, re.S); sys.stdout.write(m.group(1) if m and "{{" not in m.group(1) and "{%" not in m.group(1) else "(")' "$FLOW" > "$JS"
+  if node --check "$JS"; then check "its script is valid JavaScript, with no template tags in it" ok ok
+  else check "its script is valid JavaScript, with no template tags in it" bad ok; fi
+  rm -rf "$JS_DIR"
+fi
+# Issue 290: the mail server's reports reach the api, inside.
+check "the api and the worker tell the mail server where to report" "$(grep -c 'MAIL_EVENTS_URL: http://api:8080/api/public/mail/events' "$REPO/compose.yaml")" 2
+for f in "$REPO"/gateway/Caddyfile "$REPO"/gateway/Caddyfile.duckdns "$REPO"/gateway/Caddyfile.localca; do
+  check "$(basename "$f"): the reports' address isn't reachable from outside" "$(grep -c 'respond /api/public/mail/\* 404' "$f")" 1
+done
 echo "gateway and converge self-test: ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ] && [ "$PY_RC" -eq 0 ]

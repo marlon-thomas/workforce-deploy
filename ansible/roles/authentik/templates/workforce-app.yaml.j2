@@ -79,6 +79,8 @@ entries:
         - matching_mode: strict
           redirect_uri_type: logout
           url: https://{{ app_hostname }}/
+      # Workforce issue 299: never the offline-access scope, so no refresh token is ever issued and ending a person's
+      # sessions here ends every token they hold (bin/tests/blueprint-test.sh checks it).
       property_mappings:
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
@@ -374,7 +376,7 @@ entries:
       use_global_settings: true
       token_expiry: minutes=10
       subject: Your Workforce sign-in code
-      # branding/email-templates/, mounted at authentik's custom-template folder (/templates).
+      # branding/authentik-templates/, mounted at authentik's custom-template folder (/templates).
       template: workforce-sign-in-code.html
   - model: authentik_stages_authenticator_totp.authenticatortotpstage
     id: wf-authenticator-app

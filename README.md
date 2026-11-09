@@ -193,7 +193,11 @@ contract & onboarding magic links) go through a durable ledger: rows are only
   links remain copyable in the UI, and the Settings → Notifications run says so.
 - **Sign-in codes and alerts** (Workforce ADR-0039): set `SIGNIN_SMTP_*` to a relay account of
   their own, apart from `SMTP_*`, so staff mail or a busy notification relay can't stop people signing
-  in. Unset, they use `SMTP_*` and `doctor.sh` says so.
+  in. Unset, they use `SMTP_*` and `doctor.sh` says so. The sign-in page's "Send a new code" button is
+  `branding/authentik-templates/if/flow.html` (authentik's own page, extended), next to the code email's words.
+- **Staff email sending alerts** (Workforce issue 290): the mail server reports what staff send to the api
+  (`MAIL_EVENTS_URL`, set in `compose.yaml`; private network only). A mailbox that reaches its sending limit or
+  sends far more than usual is a line on Today and a `mail volume` warning in `doctor.sh`.
 - **Real relay**: set `SMTP_HOST` (+ port/username/password/starttls) and `SMTP_FROM`
   in `environments/<env>.env`, then re-run the environment's deployer. Queued
   notifications are dispatched by the worker's drain automatically — enabling mail

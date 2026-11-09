@@ -435,6 +435,9 @@ services:
       MAIL_SIGN_IN_AUDIENCE: workforce-webmail
       MAIL_SIGN_IN_ALLOW_INVALID_CERTS: ${MAIL_SIGN_IN_ALLOW_INVALID_CERTS:-false}
       MAIL_SIGN_IN_LOOKUP_KEY_FILE: /run/secrets/mail_lookup_key
+      # Workforce issue 290: the mail server sends its signed reports of what staff send here (the api, on the
+      # private network; the gateway never routes /api/public/mail/ from outside).
+      MAIL_EVENTS_URL: http://api:8080/api/public/mail/events
       MAIL_RELAY_HOST: ${MAIL_RELAY_HOST:-}
       MAIL_RELAY_PORT: ${MAIL_RELAY_PORT:-587}
       MAIL_RELAY_USER: ${MAIL_RELAY_USER:-}
@@ -585,6 +588,9 @@ services:
       MAIL_SIGN_IN_AUDIENCE: workforce-webmail
       MAIL_SIGN_IN_ALLOW_INVALID_CERTS: ${MAIL_SIGN_IN_ALLOW_INVALID_CERTS:-false}
       MAIL_SIGN_IN_LOOKUP_KEY_FILE: /run/secrets/mail_lookup_key
+      # Workforce issue 290: the mail server sends its signed reports of what staff send here (the api, on the
+      # private network; the gateway never routes /api/public/mail/ from outside).
+      MAIL_EVENTS_URL: http://api:8080/api/public/mail/events
       MAIL_RELAY_HOST: ${MAIL_RELAY_HOST:-}
       MAIL_RELAY_PORT: ${MAIL_RELAY_PORT:-587}
       MAIL_RELAY_USER: ${MAIL_RELAY_USER:-}
@@ -811,8 +817,9 @@ services:
       # the brand's custom CSS (`!File`); authentik stopped reading /web/dist/custom.css in 2025.
       # A directory, not the file: a single-file mount keeps the old inode after `git pull`.
       - ./branding:/branding:ro
-      # ADR-0039 (Workforce): the sign-in code email's words (authentik's custom-template folder).
-      - ./branding/email-templates:/templates:ro
+      # ADR-0039 (Workforce): authentik's custom-template folder. The sign-in code email's words, and (issue 290)
+      # the sign-in page itself with a "Send a new code" button added (if/flow.html extends authentik's own).
+      - ./branding/authentik-templates:/templates:ro
     logging: *default-logging
     stop_grace_period: 30s
     depends_on:
@@ -850,7 +857,7 @@ services:
       - ./authentik:/workforce:ro   # a folder: a single-file mount keeps the old inode after git pull
       - ./secrets/ak_config.yml:/etc/authentik/config.yml:ro
       # ADR-0039 (Workforce): the worker sends the sign-in code emails, so it needs their words too.
-      - ./branding/email-templates:/templates:ro
+      - ./branding/authentik-templates:/templates:ro
     logging: *default-logging
     stop_grace_period: 30s
     depends_on:
