@@ -692,6 +692,7 @@ def step5_version():
              "(install failed?)")
     if current == target:
         ok(f"appliance already on the pinned version {target}")
+        deploylib.reload_gateway(run)      # update.sh does this itself on a version change
     else:
         deploylib.converge(run, target)
     ca = os.path.expanduser(

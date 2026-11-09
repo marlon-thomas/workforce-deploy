@@ -8,8 +8,8 @@
 
 services:
   gateway:
-    volumes:
-      - ./gateway/Caddyfile.smoke:/etc/caddy/Caddyfile:ro
+    # compose.yaml mounts the whole ./gateway folder; this only names the smoke Caddyfile in it.
+    command: ["caddy", "run", "--config", "/etc/caddy/gateway/Caddyfile.smoke", "--adapter", "caddyfile"]
 
   api:
     environment:

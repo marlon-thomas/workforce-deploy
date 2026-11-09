@@ -250,6 +250,8 @@ def main():
         if current == target and on_ref == ref:
             ok(f"box already on the pinned version {target} at {ref} — "
                "STEP 2/3 skipped, STEP 4 still verifies")
+            # The gateway still runs this tag's Caddyfile (update.sh does this on a version change).
+            deploylib.reload_gateway(ssh.run)
         else:
             step2_gate(current, target, on_ref, ref)
             step3_converge(ssh, target, ref)

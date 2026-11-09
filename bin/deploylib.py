@@ -10,6 +10,9 @@ the same steps and cannot drift:
     converge(run, target, ref)   — drive a box to a pinned version
                                    (bundle git pull, or checkout of the release
                                    tag `ref`, + update.sh when behind)
+    reload_gateway(run)          — the running gateway serves the bundle's
+                                   Caddyfile (update.sh does it itself; this is
+                                   for a converge whose version is already right)
     verify_buildmeta(url, want)  — ask the running application what version
                                    it believes it is
 
@@ -116,6 +119,30 @@ def box_ref(run):
     return lines[-1].strip() if lines else ""
 
 
+def gateway_outcome(out):
+    """The closing "XX  Gateway …" lines bin/gateway-reload.sh prints on failure: whether it changed
+    the gateway, and what to do. Empty when there are none (an older bundle, or no gateway step)."""
+    lines = [ln.strip() for ln in (out or "").splitlines()]
+    return " ".join(ln[4:] for ln in lines if ln.startswith("XX  Gateway"))
+
+
+def reload_gateway(run):
+    """Issue 289: Caddy reads its Caddyfile only at start, so a deploy must also bring the running
+    gateway in line with the bundle's Caddyfile: a zero-downtime `caddy reload` when it changed,
+    nothing when it did not (bin/gateway-reload.sh, which checks the result). A bundle older than
+    that script is left alone, with a warning."""
+    rc, out = run(f"cd {WORKDIR} && if [ -x bin/gateway-reload.sh ]; then ./bin/gateway-reload.sh; "
+                  "else echo 'gateway-reload: not in this bundle'; fi")
+    if rc != 0:
+        fail(f"the gateway step failed (bin/gateway-reload.sh exited {rc}). "
+             f"{gateway_outcome(out) or 'See its output above.'}")
+    lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    if "gateway-reload: not in this bundle" in lines:
+        warn("this bundle predates bin/gateway-reload.sh — the gateway's configuration was not checked")
+    else:
+        ok(re.sub(r"^==> ", "", lines[-1]) if lines else "gateway checked")
+
+
 def converge(run, target, ref=None):
     """Bring the box to `target` using its bundle checkout — at release tag `ref` when given
     (production), else main (test). Idempotent: already-there is a no-op; anything else goes
@@ -131,9 +158,19 @@ def converge(run, target, ref=None):
         say(f"  bundle pins {target}; box runs {current}")
     if current == target and (not ref or on_ref == ref):
         ok("box already on the pinned version — nothing to deploy")
+        reload_gateway(run)
         return current
     ok_rc, out = run(f"cd {WORKDIR} && sh -c '{bundle_update(ref)}' && ./bin/update.sh {target}")
     if ok_rc != 0:
+        pinned = box_version(run)
+        if ok_rc == 4 and pinned == target:
+            # update.sh's last step: the update and its health check passed, nothing rolled back.
+            fail(f"the box was updated {current} -> {target} and is healthy (nothing was rolled back), "
+                 f"but the gateway step failed. {gateway_outcome(out) or 'See the output above.'} "
+                 "Deploying again redoes only the gateway step.")
+        if pinned == target:
+            fail(f"update.sh {target} exited {ok_rc} with the box pinned to {target}: it did not finish "
+                 "and did not roll back — check its output above, then run ./bin/doctor.sh on the box.")
         fail(f"update.sh {target} exited {ok_rc}. update.sh rolls itself back on "
              "failure — check its output above, then run ./bin/doctor.sh on the box.")
     after = box_version(run)
