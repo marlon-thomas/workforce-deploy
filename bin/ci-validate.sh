@@ -6,7 +6,8 @@
 #   2. python byte-compile of every python script (no __pycache__ written)
 #   3. `docker compose config -q` for compose.yaml (+ each overlay) against a
 #      placeholder env file — catches YAML/interpolation breakage at PR time,
-#      not at an appliance's next converge
+#      not at an appliance's next converge; and bin/check-docreader.py on the
+#      resolved file (the docreader's isolation, the api's /tmp size and init)
 #   4. shellcheck -S error, when shellcheck is installed
 #   5. the hermetic shell self-tests in bin/tests/ (no Docker, no network)
 set -euo pipefail
@@ -53,6 +54,13 @@ ENV
       bad "compose config: $label"
     fi
   done
+  # Workforce ADR-0042 and issue 333: the docreader's isolation and the api's /tmp and init, as compose resolves them.
+  if docker compose --env-file "$TMP/ci.env" -f compose.yaml config --format json > "$TMP/compose.json" \
+     && python3 -I bin/check-docreader.py "$TMP/compose.json"; then
+    echo "ok   docreader isolation and api tmpfs/init"
+  else
+    bad "docreader isolation or api tmpfs/init"
+  fi
 else
   bad "docker compose is not available — the compose check cannot be skipped"
 fi
