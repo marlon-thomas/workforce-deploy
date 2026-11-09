@@ -10,6 +10,9 @@ the same steps and cannot drift:
     converge(run, target, ref)   — drive a box to a pinned version
                                    (bundle git pull, or checkout of the release
                                    tag `ref`, + update.sh when behind)
+    reload_gateway(run)          — the running gateway serves the bundle's
+                                   Caddyfile (update.sh does it itself; this is
+                                   for a converge whose version is already right)
     verify_buildmeta(url, want)  — ask the running application what version
                                    it believes it is
 
@@ -116,6 +119,23 @@ def box_ref(run):
     return lines[-1].strip() if lines else ""
 
 
+def reload_gateway(run):
+    """Issue 289: Caddy reads its Caddyfile only at start, so a deploy must also bring the running
+    gateway in line with the bundle's Caddyfile: a zero-downtime `caddy reload` when it changed,
+    nothing when it did not (bin/gateway-reload.sh, which checks the result). A bundle older than
+    that script is left alone, with a warning."""
+    rc, out = run(f"cd {WORKDIR} && if [ -x bin/gateway-reload.sh ]; then ./bin/gateway-reload.sh; "
+                  "else echo 'gateway-reload: not in this bundle'; fi")
+    if rc != 0:
+        fail("the gateway did not take the bundle's Caddyfile (bin/gateway-reload.sh, output above); "
+             "it keeps serving its previous configuration — fix the cause, then deploy again")
+    lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    if "gateway-reload: not in this bundle" in lines:
+        warn("this bundle predates bin/gateway-reload.sh — the gateway's configuration was not checked")
+    else:
+        ok(re.sub(r"^==> ", "", lines[-1]) if lines else "gateway checked")
+
+
 def converge(run, target, ref=None):
     """Bring the box to `target` using its bundle checkout — at release tag `ref` when given
     (production), else main (test). Idempotent: already-there is a no-op; anything else goes
@@ -131,6 +151,7 @@ def converge(run, target, ref=None):
         say(f"  bundle pins {target}; box runs {current}")
     if current == target and (not ref or on_ref == ref):
         ok("box already on the pinned version — nothing to deploy")
+        reload_gateway(run)
         return current
     ok_rc, out = run(f"cd {WORKDIR} && sh -c '{bundle_update(ref)}' && ./bin/update.sh {target}")
     if ok_rc != 0:

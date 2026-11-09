@@ -142,3 +142,16 @@
   retries: 60
   delay: 10
   until: buildmeta.status == 200
+
+# Issue 289: Caddy reads its Caddyfile only at start, and the compose task above leaves a gateway
+# whose definition did not change running. A re-run of the installer after a bundle change reloads
+# it here (no downtime); a fresh install, or an unchanged Caddyfile, only confirms it.
+- name: Gateway runs this bundle's Caddyfile (reloaded when it changed)
+  ansible.builtin.command: ./bin/gateway-reload.sh
+  args:
+    chdir: /opt/workforce-deploy
+  environment:
+    DOCKER_HOST: "unix:///run/user/{{ su_uid.stdout }}/docker.sock"
+    XDG_RUNTIME_DIR: "/run/user/{{ su_uid.stdout }}"
+  register: gateway_reload
+  changed_when: "'gateway unchanged' not in gateway_reload.stdout"

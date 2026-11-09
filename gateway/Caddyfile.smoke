@@ -1,5 +1,5 @@
 # Smoke-test gateway config: plain HTTP, no ACME (pre-provisioning environments).
-# Mounted by compose.smoke.yaml in place of the production Caddyfile.
+# Run by compose.smoke.yaml in place of the production Caddyfile.
 {
 	auto_https off
 	admin off

@@ -33,8 +33,13 @@ services:
       # Only consumed by the duckdns gateway build (TLS_MODE=dns01); empty is
       # harmless for the stock HTTP-01 image.
       DUCKDNS_API_TOKEN: ${DUCKDNS_API_TOKEN:-}
+    # The gateway folder, not the one Caddyfile (issue 289): a deploy replaces the file (a new
+    # inode), which a single-file bind never shows the container. GATEWAY_CADDYFILE names a file in
+    # ./gateway, so the same relative path resolves under /etc/caddy. Caddy reads it only at start:
+    # bin/gateway-reload.sh reloads it after every install, update and converge.
+    command: ["caddy", "run", "--config", "/etc/caddy/${GATEWAY_CADDYFILE:-./gateway/Caddyfile}", "--adapter", "caddyfile"]
     volumes:
-      - ${GATEWAY_CADDYFILE:-./gateway/Caddyfile}:/etc/caddy/Caddyfile:ro
+      - ./gateway:/etc/caddy/gateway:ro
       # Leaf cert dir for TLS_MODE=certs (test env, private CA). Empty under
       # HTTP-01/DNS-01 and simply unused there; install.sh always creates it so
       # this read-only bind never trips Docker's "create missing dir as root".
