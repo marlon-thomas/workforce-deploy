@@ -5,8 +5,9 @@
 #    anyone could open /setup, set akadmin's password and be the authentik superuser with no code. The blueprint
 #    also refuses the flow and the gateway doesn't route it; this is the third lock.
 # 2. Wrong tries keep counting. authentik stops lowering an account's score at its lower limit (-5 by default),
-#    which is also where the blueprint's lock starts, so a password stage that cancels on a drop of 1 could still
-#    be held open for ever just above the floor. With the floor far below the lock, every wrong try counts.
+#    which is also where the blueprint's lock starts, and its password stage gives up only on a drop in the score,
+#    which the floor capped. With the floor far below the lock, every wrong try lowers the score; the blueprint
+#    checks the lock on every password sent (finding 6).
 # 3. The emergency administrator's authenticator apps from before ADR-0039 (added when no code was needed) are
 #    removed once; one it adds through its own page afterwards is kept and is then always asked for.
 from authentik.core.apps import Setup

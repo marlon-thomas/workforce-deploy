@@ -438,10 +438,10 @@ entries:
     identifiers: { target: !KeyOf wf-code-step-binding, policy: !KeyOf wf-not-emergency }
     attrs: { order: 0, enabled: true }
 
-  # Second security review (finding 6): every wrong password restarts the sign-in, so the wrong-tries lock before
-  # the password (order 15) is checked again after each one; the floor of the score is moved far below the lock
-  # inside authentik (sign-in-hardening.py), so each wrong try counts. authentik validates the whole stage on
-  # update, so its other fields are restated as its default blueprint has them.
+  # Second security review (finding 6): the lock is checked on every password sent, not once per sign-in (see
+  # wf-password-binding below), so a wrong password may be tried again on the same page, as authentik's default
+  # has it (5; an earlier fix set 1, which made people start again after one typo). authentik validates the whole
+  # stage on update, so its other fields are restated as its default blueprint has them.
   - model: authentik_stages_password.passwordstage
     identifiers: { name: default-authentication-password }
     attrs:
@@ -452,7 +452,7 @@ entries:
         - authentik.sources.ldap.auth.LDAPBackend
         - authentik.core.auth.TokenBackend
       configure_flow: !Find [authentik_flows.flow, [slug, default-password-change]]
-      failed_attempts_before_cancel: 1
+      failed_attempts_before_cancel: 5
     state: present
 
   # A device stays signed in up to 30 days here; each organisation's own number of days (1 to 30, 7 unless
@@ -538,6 +538,56 @@ entries:
   - model: authentik_policies.policybinding
     identifiers: { target: !KeyOf wf-too-many-tries-binding, policy: !KeyOf wf-too-many-tries }
     attrs: { order: 0, enabled: true }
+
+  # Third review of finding 6: the lock at 15 is checked once, when a sign-in reaches it, so many sign-ins opened
+  # before the first wrong try each still took a password afterwards, and a right one went on (a different answer:
+  # the password was right). So the lock is also checked on every password sent: authentik re-checks a stage's
+  # policies on every request to it, and the password stage now runs only while the account isn't locked (the
+  # lock's policy, negated, and all of the binding's policies must pass). A locked account's password is never
+  # checked; the step after (21) then refuses, because no password was checked.
+  - model: authentik_flows.flowstagebinding
+    id: wf-password-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !Find [authentik_stages_password.passwordstage, [name, default-authentication-password]]
+    attrs:
+      order: 20
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+      policy_engine_mode: all
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-password-binding, policy: !KeyOf wf-too-many-tries }
+    attrs: { order: 5, enabled: true, negate: true }
+  # Nothing goes past the password step without a password checked in this sign-in (authentik's password stage
+  # records which backend accepted it). Decided by what happened, not by the score, so a lock that ends between
+  # two checks can't let anyone through; an error refuses too.
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-password-not-checked
+    identifiers: { name: workforce-password-not-checked }
+    attrs:
+      name: workforce-password-not-checked
+      expression: |
+        plan = request.context.get("flow_plan")
+        return plan is None or not plan.context.get("user_backend")
+  - model: authentik_stages_deny.denystage
+    id: wf-password-not-checked-stage
+    identifiers: { name: workforce-password-not-checked }
+    attrs:
+      name: workforce-password-not-checked
+      deny_message: >-
+        That was wrong too many times. Wait 15 minutes, then sign in again, and we’ll send you a new code.
+  - model: authentik_flows.flowstagebinding
+    id: wf-password-not-checked-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-password-not-checked-stage
+    attrs:
+      order: 21
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-password-not-checked-binding, policy: !KeyOf wf-password-not-checked }
+    attrs: { order: 0, enabled: true, failure_result: true }
 
   # My Hub → "Use an authenticator app" opens this (signed in already): an email code first, so only the person
   # who reads that email can add an app, then the app's QR code. Workforce then removes the email method when they
@@ -655,8 +705,47 @@ entries:
     identifiers: { target: !KeyOf wf-too-many-tries-codes-binding, policy: !KeyOf wf-too-many-tries }
     attrs: { order: 0, enabled: true }
 
+  # Third review of finding 6: wrong codes count too (authentik lowers the score for each one), but the code step
+  # asks again in place, so the lock at 29 isn't seen again. It is checked once more after the code: after too
+  # many wrong tries, even a right code doesn't sign anyone in. (Not a lock on the code step itself: a skipped code
+  # step would sign in without a code.)
+  - model: authentik_stages_deny.denystage
+    id: wf-too-many-tries-after-code
+    identifiers: { name: workforce-too-many-tries-after-code }
+    attrs:
+      name: workforce-too-many-tries-after-code
+      deny_message: >-
+        That was wrong too many times. Wait 15 minutes, then sign in again, and we’ll send you a new code.
+  - model: authentik_flows.flowstagebinding
+    id: wf-too-many-tries-after-code-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-too-many-tries-after-code
+    attrs:
+      order: 31
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-too-many-tries-after-code-binding, policy: !KeyOf wf-too-many-tries }
+    attrs: { order: 0, enabled: true }
+
   # Second security review (finding 1): authentik's first-run page (initial-setup) sets akadmin's password with no
-  # code. It refuses everyone; the gateway doesn't route it and sign-in-hardening.py sets authentik's Setup flag.
+  # code. The flow itself is closed, as authentik closes it after its own setup: only a superuser may run it, and
+  # every policy bound to it must pass. (A flow needs ANY of its policies by default, and authentik's own
+  # default-oobe-password-usable passes on a fresh install, so a refusing policy alone did nothing: third review.)
+  # Name, title and designation are restated as authentik's first-run blueprint has them, so this works whichever
+  # of the two runs first. The gateway doesn't route the page and sign-in-hardening.py sets authentik's Setup flag.
+  - model: authentik_flows.flow
+    id: wf-first-run-flow
+    identifiers: { slug: initial-setup }
+    attrs:
+      name: default-oobe-setup
+      title: Welcome to authentik!
+      designation: stage_configuration
+      denied_action: message_continue
+      authentication: require_superuser
+      policy_engine_mode: all
+    state: present
   - model: authentik_policies_expression.expressionpolicy
     id: wf-no-first-run
     identifiers: { name: workforce-no-first-run-page }
@@ -666,6 +755,6 @@ entries:
         return False
   - model: authentik_policies.policybinding
     identifiers:
-      target: !Find [authentik_flows.flow, [slug, initial-setup]]
+      target: !KeyOf wf-first-run-flow
       policy: !KeyOf wf-no-first-run
     attrs: { order: 0, enabled: true }

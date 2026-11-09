@@ -62,13 +62,46 @@ settings = next((e for e in entries if "name: default-user-settings }" in e), ""
 check("no username field in the user's own settings", "field-username" not in settings and "field-email" not in settings)
 
 # Second review, finding 1: authentik's first-run page refuses everyone (and the gateway doesn't route it).
-first_run = next((e for e in entries if "[slug, initial-setup]" in e and "policybinding" in e), "")
-check("the first-run page refuses everyone", "wf-no-first-run" in first_run)
+# A flow needs ANY one of its policies by default, and authentik's own first-run policy passes on a fresh install,
+# so the flow itself must need a superuser and ALL of its policies (third review).
+first_run_flow = next((e for e in entries if "model: authentik_flows.flow\n" in e and "slug: initial-setup" in e), "")
+check("the first-run flow needs a superuser", "authentication: require_superuser" in first_run_flow)
+check("and all of its policies", "policy_engine_mode: all" in first_run_flow)
+check("and is made here, not found (either blueprint may run first)", "id: wf-first-run-flow" in first_run_flow
+      and all(k in first_run_flow for k in ("name: default-oobe-setup", "designation: stage_configuration")))
+first_run = next((e for e in entries if "policybinding" in e and "wf-no-first-run" in e), "")
+check("the first-run page refuses everyone", "target: !KeyOf wf-first-run-flow" in first_run)
 check("its policy says no", any("id: wf-no-first-run" in e and "return False" in e for e in entries))
 
-# Second review, finding 6: every wrong password restarts the sign-in, so the lock is checked again each time.
+# Any refusing or negated policy we bind must not be outvoted: its target needs all of its policies to pass.
+for e in entries:
+    if "policybinding" in e and ("negate: true" in e or "wf-no-first-run" in e):
+        m = re.search(r"target: !KeyOf ([\w-]+)", e)
+        target = next((t for t in entries if m and ("id: " + m.group(1) + "\n") in t), "")
+        check("the target of a refusing binding needs all its policies (%s)" % (m.group(1) if m else "?"),
+              "policy_engine_mode: all" in target)
+
+# Second review, finding 6, and its third review: the lock is checked on every password sent, not once per
+# sign-in. The password stage runs only while the account isn't locked (re-checked on every request to it)...
+pw = binding("default-authentication-flow", "default-authentication-password")
+check("the password step is re-checked on every try", "re_evaluate_policies: true" in pw and order(pw) == 20)
+check("all of its policies must pass", "policy_engine_mode: all" in pw)
+check("one of them: not locked", any("policybinding" in e and "target: !KeyOf wf-password-binding" in e
+                                     and "policy: !KeyOf wf-too-many-tries" in e and "negate: true" in e for e in entries))
+# ... and nothing goes past it without a password checked in this sign-in (a skipped password step refuses).
+guard = binding("default-authentication-flow", "wf-password-not-checked-stage")
+check("no password checked, no further", guard and 20 < order(guard) < 25 and "re_evaluate_policies: true" in guard)
+guard_policy = next((e for e in entries if "id: wf-password-not-checked\n" in e), "")
+check("decided by the password stage's own record", 'plan.context.get("user_backend")' in guard_policy)
+check("an error refuses too", any("target: !KeyOf wf-password-not-checked-binding" in e and "failure_result: true" in e
+                                  for e in entries))
 password = next((e for e in entries if "name: default-authentication-password }" in e), "")
-check("a wrong password restarts the sign-in", "failed_attempts_before_cancel: 1" in password)
+check("a wrong password can be retyped (authentik's default)", "failed_attempts_before_cancel: 5" in password)
+# Wrong codes count too; after too many, even a right code doesn't sign anyone in.
+after_code = binding("default-authentication-flow", "wf-too-many-tries-after-code")
+check("the lock again after the code", after_code and 30 < order(after_code) < 100 and "re_evaluate_policies: true" in after_code)
+check("with the same lock", any("target: !KeyOf wf-too-many-tries-after-code-binding" in e
+                                and "policy: !KeyOf wf-too-many-tries" in e for e in entries))
 
 print("blueprint self-test: %d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
