@@ -529,6 +529,23 @@ def read_duckdns_token():
     return getpass.getpass("  DuckDNS token (input hidden): ").strip()
 
 
+def ensure_guest_dns():
+    """Public names must resolve inside the guest (image pulls, mail relays, AI providers). Tailscale
+    must not own its DNS: with MagicDNS on and no tailnet-wide resolvers it answered SERVFAIL for every
+    public name (8 November 2026). Idempotent, so it runs on every deploy, --skip-to 5 included."""
+    rc, _ = guest("command -v tailscale >/dev/null && tailscale set --accept-dns=false")
+    rc, _ = guest('test "$(readlink /etc/resolv.conf)" = /run/systemd/resolve/stub-resolv.conf')
+    if rc != 0:
+        note("pointing the guest's resolv.conf back at systemd-resolved…")
+        guest("cp -a /etc/resolv.conf /root/resolv.conf.before-$(date +%F) 2>/dev/null; "
+              "ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf && "
+              "systemctl restart systemd-resolved")
+    rc, _ = guest("for i in 1 2 3 4 5; do getent hosts ghcr.io >/dev/null && exit 0; sleep 2; done; exit 1")
+    if rc != 0:
+        fail("the guest can't resolve public names (ghcr.io). Check `resolvectl status` inside it.")
+    ok("guest resolves public names")
+
+
 def step3_tailnet():
     """Put the guest on the tailnet and point DuckDNS at it BEFORE any install:
     the playbook's OIDC discovery check resolves the public hostname, which
@@ -546,7 +563,9 @@ def step3_tailnet():
             rc, out = guest("curl -fsSL https://tailscale.com/install.sh | sh")
             if rc != 0:
                 fail("Tailscale install failed in the guest:\n" + out[-800:])
-        join = f"tailscale up --hostname={shlex.quote(TS_HOSTNAME)}"
+        # --accept-dns=false: the guest is reached over the tailnet but never needs its names; letting
+        # Tailscale own resolv.conf broke every public lookup (ghcr.io, mail relays) on 8 November 2026.
+        join = f"tailscale up --hostname={shlex.quote(TS_HOSTNAME)} --accept-dns=false"
         if getattr(main, "ts_auth_key", None):
             join += f" --auth-key={shlex.quote(main.ts_auth_key)}"
             note("joining the tailnet with the provided auth key…")
@@ -741,6 +760,7 @@ def main():
         step2()
     if args.skip_to <= 3:
         step3_tailnet()
+    ensure_guest_dns()   # every run: public DNS must work in the guest before anything is pulled
     if args.skip_to <= 4:
         step4(args.reinstall)
     if args.skip_to <= 5:
