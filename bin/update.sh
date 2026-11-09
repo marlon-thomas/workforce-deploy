@@ -8,6 +8,8 @@
 #   5. pin the new version, run migrate EXPLICITLY (never implicitly via
 #      `compose up`, whose depends_on would migrate before we could dump)
 #   6. start the new version, health check
+#   7. reload the gateway when the bundle's Caddyfile changed (bin/gateway-reload.sh); if that
+#      step fails the update itself stands: exit 4 = updated and healthy, gateway step failed
 #   on failure at 5/6: restore the pre-update dump, re-pin the previous
 #   version, start it. Rolling back the image alone against a migrated schema
 #   is NOT a rollback. Never crosses major versions silently.
@@ -166,4 +168,15 @@ done
 [ "$HEALTHY" -eq 1 ] || rollback "The new version did not pass the health check"
 
 rm -f "$ROLLBACK_DUMP" .env.pre-update
+
+# Issue 289: Caddy reads its Caddyfile only at start, and `compose up` leaves a gateway whose
+# definition did not change running. Reload it when this bundle's Caddyfile differs from what it
+# runs (no downtime; nothing happens when it is the same). After the health check, so the new
+# version is not rolled back for it. Its own last lines say what state the gateway is in.
+say "Gateway configuration…"
+if ! ./bin/gateway-reload.sh; then
+  printf '\033[1;31mXX\033[0m %s\n' "Updated to $TARGET and healthy (nothing was rolled back), but the gateway step failed:
+  the \"Gateway\" lines just above say what state the gateway is in and what to do."
+  exit 4
+fi
 say "Updated to $TARGET successfully. Your pre-update backup is kept in ./backups."

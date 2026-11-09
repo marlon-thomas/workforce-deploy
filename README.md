@@ -16,6 +16,7 @@ You do NOT need the private source repo to deploy or operate the product.
 | `bin/install.sh` | the appliance installer (service user → rootless Docker → prompts → Ansible) |
 | `bin/update.sh` / `doctor.sh` / `backup.sh` / `smoke.sh` | versioned updates with rollback, health check, backups, OIDC-less smoke run |
 | `bin/healthwatch.sh` | every 15 min (backup container): runs `doctor.sh`, emails `OPS_ALERT_EMAIL` outside the server when checks fail, remind daily, resolved; pings `OPS_HEARTBEAT_URL` for the outside uptime check; leaves `status/health.json` (masked, read-only to the `api` container) for the app's Setup → Server health page (RUNBOOK.md §7b, §7c) |
+| `bin/gateway-reload.sh` | run by install, `update.sh` and both deployers: when the bundle's Caddyfile differs from what the gateway runs (compared by config hash), `caddy reload` with no downtime (recreate as the fallback), then checks it answers and serves the new config; a gateway change never needs a restart by hand |
 | `bin/tests/` | hermetic shell self-tests, run by `ci-validate.sh` |
 | `bin/restore.sh` / `restore-drill.sh` | restore an archive (app DB + sign-in DB + evidence), plain or an encrypted off-site copy; prove an archive restores in a scratch Incus container (operator machine only) |
 | `bin/recover.sh` | rebuild a brand-new server from one encrypted off-site copy, with no installer questions (RUNBOOK.md, "Recovering onto a new server") |
