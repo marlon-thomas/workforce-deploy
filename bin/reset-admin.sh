@@ -56,6 +56,10 @@ from authentik.core.models import User
 u = User.objects.get(username="admin")
 u.set_password(os.environ["WF_NEW_PW"])
 u.save()
+# Workforce ADR-0039 §5: an authenticator app added to the emergency administrator is required once added, and this
+# server step is the only way to remove it (a lost phone mustn't lose the last-resort account).
+from authentik.stages.authenticator_totp.models import TOTPDevice
+TOTPDevice.objects.filter(user=u).delete()
 print("OK")
 PYEOF' 2>&1 | tail -1)"
 
@@ -63,7 +67,8 @@ PYEOF' 2>&1 | tail -1)"
 
 cat <<EOF
 
-Done. The administrator password is now:
+Done. Any authenticator app on the account has been removed too (add one again from
+Workforce if you want it). The administrator password is now:
 
   ${NEW_PW}
 

@@ -683,6 +683,10 @@ if [ -f .env ]; then
       warn "Migrated the image registry path in .env (early placeholder)."
     fi
     [ "${RECOVERING}" -eq 0 ] || recovering_on_this_host
+    # The test inbox is for the TEST appliance only (bin/lib/prod-guards.sh), on a resume too.
+    # shellcheck source=lib/prod-guards.sh
+    . ./bin/lib/prod-guards.sh
+    prod_guard_start "${ENV_NAME:-prod}" "${TEST_INBOX:-}" "${TEST_INBOX_HOSTNAME:-}" "${COMPOSE_PROFILES:-}" || exit 1
     preflight_network
     preflight_and_pull
     # ADMIN_PASSWORD for the playbook: resume uses a fresh random value — the

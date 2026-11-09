@@ -6,7 +6,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 T="$HERE/../../ansible/roles/authentik/templates/workforce-app.yaml.j2"
 
-python3 -I - "$T" <<'PY'
+PY_RC=0
+python3 -I - "$T" <<'PY' || PY_RC=1
 import re, sys
 text = open(sys.argv[1], encoding="utf-8").read()
 entries = re.split(r"\n  - ", text)
@@ -60,6 +61,35 @@ check("its own app page is for it alone",
 settings = next((e for e in entries if "name: default-user-settings }" in e), "")
 check("no username field in the user's own settings", "field-username" not in settings and "field-email" not in settings)
 
+# Second review, finding 1: authentik's first-run page refuses everyone (and the gateway doesn't route it).
+first_run = next((e for e in entries if "[slug, initial-setup]" in e and "policybinding" in e), "")
+check("the first-run page refuses everyone", "wf-no-first-run" in first_run)
+check("its policy says no", any("id: wf-no-first-run" in e and "return False" in e for e in entries))
+
+# Second review, finding 6: every wrong password restarts the sign-in, so the lock is checked again each time.
+password = next((e for e in entries if "name: default-authentication-password }" in e), "")
+check("a wrong password restarts the sign-in", "failed_attempts_before_cancel: 1" in password)
+
 print("blueprint self-test: %d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
 PY
+
+# Outside the blueprint: the gateway, the converge and the operator's recovery (second review).
+REPO="$HERE/../.."
+PASS=0; FAILN=0
+check() { if [ "$2" = "$3" ]; then PASS=$((PASS+1)); else FAILN=$((FAILN+1)); printf 'FAIL: %s: expected [%s] got [%s]\n' "$1" "$3" "$2"; fi; }
+for f in "$REPO"/gateway/Caddyfile "$REPO"/gateway/Caddyfile.duckdns "$REPO"/gateway/Caddyfile.localca; do
+  auth="$(awk '/^\{\$AUTH_HOSTNAME\}/{on=1} on{print} on&&/^\}/{exit}' "$f")"
+  check "$(basename "$f"): code methods can't be changed from outside (finding 14)" "$(printf '%s' "$auth" | grep -c 'path /api/v3/authenticators/\*')" 1
+  check "$(basename "$f"): only reading them" "$(printf '%s' "$auth" | grep -c 'not method GET HEAD')" 1
+  check "$(basename "$f"): no first-run page (finding 1)" "$(printf '%s' "$auth" | grep -c 'respond /if/flow/initial-setup\* 404')" 1
+done
+check "the converge closes the first-run page" "$(grep -c 'Setup.set(True)' "$REPO/ansible/roles/authentik/files/sign-in-hardening.py")" 1
+check "and moves the score's floor below the lock" "$(grep -c 'reputation_lower_limit = -100' "$REPO/ansible/roles/authentik/files/sign-in-hardening.py")" 1
+check "the converge runs it" "$(grep -c "ak shell -c \"exec(open(./tmp/sign-in-hardening.py.)" "$REPO/ansible/roles/authentik/tasks/main.yml")" 1
+check "the operator's recovery removes the emergency administrator's app (new problem 6)" \
+  "$(grep -c 'TOTPDevice.objects.filter(user=u).delete()' "$REPO/bin/reset-admin.sh")" 1
+check "the staff relay's password reaches authentik only without a sign-in route (new problem 8)" \
+  "$(grep -c 'SMTP_PASSWORD: ${SIGNIN_SMTP_HOST:-${SMTP_PASSWORD:-}}' "$REPO/compose.yaml")" 1
+echo "gateway and converge self-test: ${PASS} passed, ${FAILN} failed"
+[ "$FAILN" -eq 0 ] && [ "$PY_RC" -eq 0 ]

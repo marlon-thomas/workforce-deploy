@@ -27,8 +27,10 @@ x-ak-sign-in-codes: &ak-sign-in-codes
   SIGNIN_SMTP_FROM: ${SIGNIN_SMTP_FROM:-}
   SMTP_HOST: ${SMTP_HOST:-}
   SMTP_PORT: ${SMTP_PORT:-587}
-  SMTP_USERNAME: ${SMTP_USERNAME:-}
-  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  # Second security review: the staff relay's account goes to authentik only when there is no sign-in route. With
+  # SIGNIN_SMTP_HOST set these carry that host name instead (not a secret), which email-route.sh never reads.
+  SMTP_USERNAME: ${SIGNIN_SMTP_HOST:-${SMTP_USERNAME:-}}
+  SMTP_PASSWORD: ${SIGNIN_SMTP_HOST:-${SMTP_PASSWORD:-}}
   SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
   SMTP_FROM: ${SMTP_FROM:-workforce@localhost}
   AUTHENTIK_EMAIL__TIMEOUT: "10"

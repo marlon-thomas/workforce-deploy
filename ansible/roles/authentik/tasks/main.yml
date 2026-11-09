@@ -200,6 +200,23 @@
   environment:
     DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
 
+# ---------- Workforce ADR-0039: settings inside authentik a blueprint can't make ----------
+# The first-run page closed (Setup flag), wrong tries counted below the lock, and the emergency administrator's
+# pre-ADR authenticator apps removed once. Idempotent.
+- name: sign-in hardening converged
+  ansible.builtin.shell: >-
+    docker cp {{ role_path }}/files/sign-in-hardening.py
+    workforce-deploy-authentik-server-1:/tmp/sign-in-hardening.py &&
+    docker exec -i -w / workforce-deploy-authentik-server-1
+    ak shell -c "exec(open('/tmp/sign-in-hardening.py').read())"
+  register: ak_sign_in_hardening
+  until: "'sign-in hardening converged' in (ak_sign_in_hardening.stdout | default(''))"
+  retries: 10
+  delay: 6
+  changed_when: false
+  environment:
+    DOCKER_HOST: "unix:///run/user/{{ ak_su_uid.stdout }}/docker.sock"
+
 # ---------- ADR-0026 (Workforce): the emergency administrator's recovery address ----------
 # Static import, so the tasks carry the role's `identity` tag: update.sh converges them too.
 - name: Emergency administrator recovery address (ADMIN_RECOVERY_EMAIL)

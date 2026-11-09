@@ -331,7 +331,9 @@ fi
 if [ "${ENV_NAME:-prod}" != test ]; then
   mailpit_up=no
   if docker compose ps --status running -q mailpit 2>/dev/null | grep -q .; then mailpit_up=yes; fi
-  if guard="$(prod_guard_runtime "${ENV_NAME:-prod}" "${TEST_INBOX:-}" "${TEST_INBOX_HOSTNAME:-}" "${COMPOSE_PROFILES:-}" "$mailpit_up")"; then
+  # The gateway config this install really uses (GATEWAY_CADDYFILE), not only the ones in the repo (finding 35).
+  guard="$(prod_guard_caddyfile "${GATEWAY_CADDYFILE:-./gateway/Caddyfile}")" || true
+  if [ -z "$guard" ] && guard="$(prod_guard_runtime "${ENV_NAME:-prod}" "${TEST_INBOX:-}" "${TEST_INBOX_HOSTNAME:-}" "${COMPOSE_PROFILES:-}" "$mailpit_up")"; then
     row "test-only parts" ok "no test inbox or mailpit"
   else
     # A real FAIL even under --gate (review finding 22): the install and update gates stop on it.
@@ -341,7 +343,11 @@ fi
 
 # --- sign-in codes and server alerts (Workforce ADR-0039): their own route, apart from staff mail's relay
 if [ -n "${SIGNIN_SMTP_HOST:-}" ]; then
-  row "sign-in email" ok "codes and alerts go by their own route (${SIGNIN_SMTP_HOST}:${SIGNIN_SMTP_PORT:-587})"
+  case "$SIGNIN_SMTP_HOST" in
+    mail|stalwart|"${MAIL_HOSTNAME:-mail.localhost}")
+      row "sign-in email" fail "SIGNIN_SMTP_HOST is this server's own mail server: sign-in codes would depend on staff mail (use a relay account of its own)" ;;
+    *) row "sign-in email" ok "codes and alerts go by their own route (${SIGNIN_SMTP_HOST}:${SIGNIN_SMTP_PORT:-587})" ;;
+  esac
 elif [ -n "${SMTP_HOST:-}" ]; then
   row "sign-in email" warn "sign-in codes and alerts share the outgoing relay with notifications and staff mail: set SIGNIN_SMTP_* in .env to keep them apart"
 else

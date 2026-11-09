@@ -25,12 +25,15 @@ check "an empty SERVER_ACTIONS_PLAIN_RELAY is fine" "$(env_with 'SERVER_ACTIONS_
 check "an exported TEST_INBOX (finding 36)" "$(env_with 'export TEST_INBOX=on')" 1
 check "an indented, exported mail profile" "$(env_with '  export COMPOSE_PROFILES=staffmail,mail')" 1
 check "mailpit in capitals" "$(env_with 'SMTP_HOST=MailPit')" 1
+check "every profile (*) includes mail" "$(env_with 'COMPOSE_PROFILES=*')" 1
 
 printf 'example.org {\n\treverse_proxy api:8080\n}\n' > "$WORK/Caddyfile"
 check "a clean production Caddyfile" "$(rc prod_guard_caddyfile "$WORK/Caddyfile")" 0
 printf 'testmail.example.org {\n\treverse_proxy mailpit:8025\n}\n' >> "$WORK/Caddyfile"
 check "a production Caddyfile with the inbox" "$(rc prod_guard_caddyfile "$WORK/Caddyfile")" 1
 check "a missing Caddyfile fails (finding 35)" "$(rc prod_guard_caddyfile "$WORK/no-such-Caddyfile")" 1
+mkdir -p "$WORK/a-directory"
+check "a Caddyfile grep can't search fails" "$(rc prod_guard_caddyfile "$WORK/a-directory")" 1
 
 check "runtime: the test appliance may" "$(rc prod_guard_runtime test on testmail.x mail yes)" 0
 check "runtime: prod, nothing test-only" "$(rc prod_guard_runtime prod '' '' staffmail no)" 0
@@ -46,6 +49,10 @@ check "start: prod without it" "$(rc prod_guard_start prod '')" 0
 check "start: prod with the mail profile refuses (finding 22)" "$(rc prod_guard_start prod '' '' staffmail,mail)" 1
 check "start: prod with the inbox host refuses" "$(rc prod_guard_start prod '' testmail.example.org '')" 1
 check "start: test with all of it" "$(rc prod_guard_start test on testmail.x mail)" 0
+check "start: '*' starts mailpit too (second review)" "$(rc prod_guard_start prod '' '' '*')" 1
+check "start: 'staffmail, mail' with a space" "$(rc prod_guard_start prod '' '' 'staffmail, mail')" 1
+check "start: ' mail'" "$(rc prod_guard_start prod '' '' ' mail')" 1
+check "start: 'staffmail' alone is fine" "$(rc prod_guard_start prod '' '' 'staffmail')" 0
 
 # The real files in this repo.
 REPO="$HERE/../.."

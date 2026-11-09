@@ -438,6 +438,23 @@ entries:
     identifiers: { target: !KeyOf wf-code-step-binding, policy: !KeyOf wf-not-emergency }
     attrs: { order: 0, enabled: true }
 
+  # Second security review (finding 6): every wrong password restarts the sign-in, so the wrong-tries lock before
+  # the password (order 15) is checked again after each one; the floor of the score is moved far below the lock
+  # inside authentik (sign-in-hardening.py), so each wrong try counts. authentik validates the whole stage on
+  # update, so its other fields are restated as its default blueprint has them.
+  - model: authentik_stages_password.passwordstage
+    identifiers: { name: default-authentication-password }
+    attrs:
+      name: default-authentication-password
+      backends:
+        - authentik.core.auth.InbuiltBackend
+        - authentik.sources.kerberos.auth.KerberosBackend
+        - authentik.sources.ldap.auth.LDAPBackend
+        - authentik.core.auth.TokenBackend
+      configure_flow: !Find [authentik_flows.flow, [slug, default-password-change]]
+      failed_attempts_before_cancel: 1
+    state: present
+
   # A device stays signed in up to 30 days here; each organisation's own number of days (1 to 30, 7 unless
   # changed) is kept by Workforce from the token's auth_time, which sends the person back for a code sooner.
   - model: authentik_stages_user_login.userloginstage
@@ -636,4 +653,19 @@ entries:
       re_evaluate_policies: true
   - model: authentik_policies.policybinding
     identifiers: { target: !KeyOf wf-too-many-tries-codes-binding, policy: !KeyOf wf-too-many-tries }
+    attrs: { order: 0, enabled: true }
+
+  # Second security review (finding 1): authentik's first-run page (initial-setup) sets akadmin's password with no
+  # code. It refuses everyone; the gateway doesn't route it and sign-in-hardening.py sets authentik's Setup flag.
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-no-first-run
+    identifiers: { name: workforce-no-first-run-page }
+    attrs:
+      name: workforce-no-first-run-page
+      expression: |
+        return False
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, initial-setup]]
+      policy: !KeyOf wf-no-first-run
     attrs: { order: 0, enabled: true }
