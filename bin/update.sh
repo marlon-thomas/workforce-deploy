@@ -22,7 +22,7 @@ cd "$(dirname "$0")/.."
 # The test inbox is for the TEST appliance only (bin/lib/prod-guards.sh): refuse before anything changes.
 # shellcheck source=lib/prod-guards.sh
 . ./bin/lib/prod-guards.sh
-prod_guard_start "${ENV_NAME:-prod}" "${TEST_INBOX:-}" || exit 1
+prod_guard_start "${ENV_NAME:-prod}" "${TEST_INBOX:-}" "${TEST_INBOX_HOSTNAME:-}" "${COMPOSE_PROFILES:-}" || exit 1
 use_docker_socket
 
 # The backup container runs the nightly backup and the health watch through this socket. An older

@@ -71,7 +71,8 @@ for f in environments/*.env; do
   [ "$(basename "$f")" = test.env ] && continue
   out="$(prod_guard_env_file "$f")" || bad "$out"
 done
-for f in gateway/Caddyfile gateway/Caddyfile.duckdns; do
+for f in gateway/Caddyfile*; do
+  [ "$f" = gateway/Caddyfile.localca ] && continue
   out="$(prod_guard_caddyfile "$f")" || bad "$out"
 done
 [ "$RC" -ne 0 ] || echo "ok   no test inbox, mailpit or plain relay outside the TEST appliance"

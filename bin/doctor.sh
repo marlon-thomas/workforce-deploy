@@ -334,7 +334,8 @@ if [ "${ENV_NAME:-prod}" != test ]; then
   if guard="$(prod_guard_runtime "${ENV_NAME:-prod}" "${TEST_INBOX:-}" "${TEST_INBOX_HOSTNAME:-}" "${COMPOSE_PROFILES:-}" "$mailpit_up")"; then
     row "test-only parts" ok "no test inbox or mailpit"
   else
-    oprow "test-only parts" fail "$(printf '%s' "$guard" | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
+    # A real FAIL even under --gate (review finding 22): the install and update gates stop on it.
+    row "test-only parts" fail "$(printf '%s' "$guard" | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
   fi
 fi
 
@@ -576,12 +577,15 @@ alerts_row() {
     ok_to="${ok_to:+${ok_to}, }${a}"
   done
   [ -z "$onhost" ] || issues="${issues}; ${onhost} on this server's own domain — if this server handles that mail, alerts stop with it: use an address elsewhere"
-  if [ -z "${SMTP_HOST:-}" ]; then
-    issues="${issues}; SMTP_HOST is empty — alerts cannot be sent, only logged"
+  # Alerts go by the sign-in route when it has its own host (bin/healthwatch.sh use_signin_route; review finding 34).
+  alert_host="${SIGNIN_SMTP_HOST:-${SMTP_HOST:-}}"
+  alert_var=SMTP_HOST; [ -z "${SIGNIN_SMTP_HOST:-}" ] || alert_var=SIGNIN_SMTP_HOST
+  if [ -z "$alert_host" ]; then
+    issues="${issues}; SIGNIN_SMTP_HOST and SMTP_HOST are empty — alerts cannot be sent, only logged"
   else
-    case "$SMTP_HOST" in
+    case "$alert_host" in
       mail|stalwart|"${MAIL_HOSTNAME:-mail.localhost}")
-        issues="${issues}; SMTP_HOST is this server's own mail server — alerts stop when it does" ;;
+        issues="${issues}; ${alert_var} is this server's own mail server — alerts stop when it does" ;;
     esac
   fi
   ts="$(sed -n 's/^last_run=\([0-9][0-9]*\)$/\1/p' state/healthwatch.state 2>/dev/null | head -1)" || ts=""

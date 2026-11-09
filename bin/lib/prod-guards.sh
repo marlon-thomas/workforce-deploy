@@ -10,9 +10,11 @@ prod_guard_env_file() {
   local f="$1" bad=0 line key val
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"        # leading whitespace
+    case "$line" in export[[:space:]]*) line="${line#export}"; line="${line#"${line%%[![:space:]]*}"}" ;; esac
     case "$line" in *=*) ;; *) continue ;; esac
     key="$(printf '%s' "${line%%=*}" | tr -d '[:space:]')"
-    val="$(printf '%s' "${line#*=}" | tr -d "[:space:]\"'")"
+    val="$(printf '%s' "${line#*=}" | tr -d "[:space:]\"'" | tr '[:upper:]' '[:lower:]')"
     case "$key" in
       TEST_INBOX|TEST_INBOX_HOSTNAME|TEST_INBOX_PASSWORD|TEST_INBOX_HASH)
         echo "$f sets $key: the test inbox is for the TEST appliance only"; bad=1 ;;
@@ -30,6 +32,10 @@ prod_guard_env_file() {
 # prod_guard_caddyfile <Caddyfile> — a production gateway config never routes to mailpit or the test inbox.
 prod_guard_caddyfile() {
   local f="$1"
+  if [ ! -r "$f" ]; then
+    echo "$f can't be read, so it can't be checked"
+    return 1
+  fi
   if grep -n -i -E 'mailpit|testmail|TEST_INBOX' "$f" >/dev/null; then
     echo "$f mentions mailpit or the test inbox: only gateway/Caddyfile.localca (the test CA) may"
     return 1
@@ -51,9 +57,13 @@ prod_guard_runtime() {
 
 # prod_guard_start <env name> <TEST_INBOX> — install.sh and update.sh refuse to start with the test inbox on
 # anywhere but the test appliance.
+# prod_guard_start <env name> <TEST_INBOX> [<TEST_INBOX_HOSTNAME> <COMPOSE_PROFILES>]
 prod_guard_start() {
-  if [ -n "${2:-}" ] && [ "${1:-prod}" != test ]; then
-    echo "TEST_INBOX is set but this isn't the TEST appliance (ENV_NAME=${1:-prod}). Remove it from .env; nothing was changed."
+  local env_name="${1:-prod}" out
+  [ "$env_name" = test ] && return 0
+  if ! out="$(prod_guard_runtime "$env_name" "${2:-}" "${3:-}" "${4:-}" no)"; then
+    printf '%s\n' "$out"
+    echo "This isn't the TEST appliance (ENV_NAME=$env_name): remove those from .env. Nothing was changed."
     return 1
   fi
   return 0

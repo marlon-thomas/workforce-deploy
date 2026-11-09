@@ -14,15 +14,23 @@
 # account (or direct sending), kept apart from the relay staff mail and notifications use, so a mailbox abused
 # there can't stop anyone signing in. Server alerts (bin/healthwatch.sh) use the same route. Unset = SMTP_*, and
 # doctor.sh and the identity converge say they're shared. With neither set nobody can finish signing in.
+# The route is chosen as one unit by authentik/email-route.sh, authentik's entrypoint wrapper: never a sign-in host
+# with the staff relay's account (review findings 8, 9 and 18).
 # Five wrong tries (password or code) for one account mean a 15-minute wait (the blueprint's reputation check);
 # the score is forgotten after REPUTATION seconds.
 x-ak-sign-in-codes: &ak-sign-in-codes
-  AUTHENTIK_EMAIL__HOST: ${SIGNIN_SMTP_HOST:-${SMTP_HOST:-}}
-  AUTHENTIK_EMAIL__PORT: ${SIGNIN_SMTP_PORT:-${SMTP_PORT:-587}}
-  AUTHENTIK_EMAIL__USERNAME: ${SIGNIN_SMTP_USERNAME:-${SMTP_USERNAME:-}}
-  AUTHENTIK_EMAIL__PASSWORD: ${SIGNIN_SMTP_PASSWORD:-${SMTP_PASSWORD:-}}
-  AUTHENTIK_EMAIL__USE_TLS: ${SIGNIN_SMTP_STARTTLS:-${SMTP_STARTTLS:-false}}
-  AUTHENTIK_EMAIL__FROM: ${SIGNIN_SMTP_FROM:-${SMTP_FROM:-workforce@localhost}}
+  SIGNIN_SMTP_HOST: ${SIGNIN_SMTP_HOST:-}
+  SIGNIN_SMTP_PORT: ${SIGNIN_SMTP_PORT:-}
+  SIGNIN_SMTP_USERNAME: ${SIGNIN_SMTP_USERNAME:-}
+  SIGNIN_SMTP_PASSWORD: ${SIGNIN_SMTP_PASSWORD:-}
+  SIGNIN_SMTP_STARTTLS: ${SIGNIN_SMTP_STARTTLS:-}
+  SIGNIN_SMTP_FROM: ${SIGNIN_SMTP_FROM:-}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+  SMTP_FROM: ${SMTP_FROM:-workforce@localhost}
   AUTHENTIK_EMAIL__TIMEOUT: "10"
   AUTHENTIK_REPUTATION__EXPIRY: "900"
 
@@ -757,6 +765,8 @@ services:
   authentik-server:
     image: ghcr.io/goauthentik/server:2026.8.5
     restart: unless-stopped
+    # Workforce ADR-0039: picks the sign-in codes' outgoing mail as one route, then runs authentik as its image does.
+    entrypoint: ["dumb-init", "--", "sh", "/workforce/email-route.sh"]
     networks:
       # Alias pinned to the BACK network only: containers on both networks
       # otherwise resolve authentik-server to the data-network IP first, and
@@ -794,6 +804,7 @@ services:
       # Rendered by the identity converge from ansible/roles/authentik/templates/workforce-app.yaml.j2
       - ./blueprints/workforce-app.yaml:/blueprints/workforce-app.yaml:ro
       - ./blueprints/webmail-app.yaml:/blueprints/webmail-app.yaml:ro
+      - ./authentik:/workforce:ro   # a folder: a single-file mount keeps the old inode after git pull
       # Workforce look for the sign-in pages (R5): the blueprint loads authentik-custom.css into
       # the brand's custom CSS (`!File`); authentik stopped reading /web/dist/custom.css in 2025.
       # A directory, not the file: a single-file mount keeps the old inode after `git pull`.
@@ -809,6 +820,8 @@ services:
   authentik-worker:
     image: ghcr.io/goauthentik/server:2026.8.5
     restart: unless-stopped
+    # Workforce ADR-0039: picks the sign-in codes' outgoing mail as one route, then runs authentik as its image does.
+    entrypoint: ["dumb-init", "--", "sh", "/workforce/email-route.sh"]
     networks: [data]
     command: worker
     shm_size: 512mb
@@ -832,6 +845,7 @@ services:
       # deployment failed exactly here: provider never created).
       - ./blueprints/workforce-app.yaml:/blueprints/workforce-app.yaml:ro
       - ./blueprints/webmail-app.yaml:/blueprints/webmail-app.yaml:ro
+      - ./authentik:/workforce:ro   # a folder: a single-file mount keeps the old inode after git pull
       - ./secrets/ak_config.yml:/etc/authentik/config.yml:ro
       # ADR-0039 (Workforce): the worker sends the sign-in code emails, so it needs their words too.
       - ./branding/email-templates:/templates:ro

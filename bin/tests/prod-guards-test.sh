@@ -22,11 +22,15 @@ check "mailpit as SIGNIN_SMTP_HOST" "$(env_with 'SIGNIN_SMTP_HOST=mailpit:1025')
 check "SERVER_ACTIONS_PLAIN_RELAY in prod.env" "$(env_with 'SERVER_ACTIONS_PLAIN_RELAY=relay.example.org:25')" 1
 check "a comment saying never is fine" "$(env_with '# NEVER set TEST_INBOX here')" 0
 check "an empty SERVER_ACTIONS_PLAIN_RELAY is fine" "$(env_with 'SERVER_ACTIONS_PLAIN_RELAY=')" 0
+check "an exported TEST_INBOX (finding 36)" "$(env_with 'export TEST_INBOX=on')" 1
+check "an indented, exported mail profile" "$(env_with '  export COMPOSE_PROFILES=staffmail,mail')" 1
+check "mailpit in capitals" "$(env_with 'SMTP_HOST=MailPit')" 1
 
 printf 'example.org {\n\treverse_proxy api:8080\n}\n' > "$WORK/Caddyfile"
 check "a clean production Caddyfile" "$(rc prod_guard_caddyfile "$WORK/Caddyfile")" 0
 printf 'testmail.example.org {\n\treverse_proxy mailpit:8025\n}\n' >> "$WORK/Caddyfile"
 check "a production Caddyfile with the inbox" "$(rc prod_guard_caddyfile "$WORK/Caddyfile")" 1
+check "a missing Caddyfile fails (finding 35)" "$(rc prod_guard_caddyfile "$WORK/no-such-Caddyfile")" 1
 
 check "runtime: the test appliance may" "$(rc prod_guard_runtime test on testmail.x mail yes)" 0
 check "runtime: prod, nothing test-only" "$(rc prod_guard_runtime prod '' '' staffmail no)" 0
@@ -39,6 +43,9 @@ check "runtime: no ENV_NAME counts as prod" "$(rc prod_guard_runtime '' on '' ''
 check "start: test with the inbox" "$(rc prod_guard_start test on)" 0
 check "start: prod with the inbox refuses" "$(rc prod_guard_start prod on)" 1
 check "start: prod without it" "$(rc prod_guard_start prod '')" 0
+check "start: prod with the mail profile refuses (finding 22)" "$(rc prod_guard_start prod '' '' staffmail,mail)" 1
+check "start: prod with the inbox host refuses" "$(rc prod_guard_start prod '' testmail.example.org '')" 1
+check "start: test with all of it" "$(rc prod_guard_start test on testmail.x mail)" 0
 
 # The real files in this repo.
 REPO="$HERE/../.."
@@ -46,7 +53,8 @@ for f in "$REPO"/environments/*.env; do
   [ "$(basename "$f")" = test.env ] && continue
   check "$(basename "$f") has nothing test-only" "$(rc prod_guard_env_file "$f")" 0
 done
-for f in "$REPO"/gateway/Caddyfile "$REPO"/gateway/Caddyfile.duckdns; do
+for f in "$REPO"/gateway/Caddyfile*; do
+  [ "$(basename "$f")" = Caddyfile.localca ] && continue
   check "$(basename "$f") has no test inbox" "$(rc prod_guard_caddyfile "$f")" 0
 done
 check "the test CA's Caddyfile has the inbox" "$(grep -c 'TEST_INBOX_HOSTNAME' "$REPO/gateway/Caddyfile.localca")" 1
