@@ -41,7 +41,7 @@ reset() {
   RELOADS=0; RECREATES=0; VALIDATES=0
 }
 gw_state()       { printf '%s\n' "$G_STATE"; }
-gw_sees_config() { [ "$G_SEES" = 1 ]; }
+gw_sees_config() { case "$G_SEES" in 1) echo yes ;; 0) echo no ;; esac; }   # anything else: exec fails
 gw_render() {
   if [ "$G_BAD" = 1 ]; then echo "Error: adapting config using caddyfile: ${GW_IN}:3: unrecognized directive: bogus" >&2; return 1; fi
   printf '%s\n' "$G_FILE"
@@ -63,8 +63,9 @@ gw_recreate() { RECREATES=$((RECREATES+1)); G_STATE=running; G_SEES=1; G_ADMIN=1
 probe_http() { echo "$G_HTTP"; }
 probe_csp() { if [ "$G_CSP" = auto ]; then printf '%s' "$G_RUN" | json_tool csp | head -1; else printf '%s' "$G_CSP"; fi; }
 pause() { :; }
-run() { gateway_converge > "$WORK/out" 2>&1; RC=$?; OUT="$(cat "$WORK/out")"; }
+run() { gateway_reload > "$WORK/out" 2>&1; RC=$?; OUT="$(cat "$WORK/out")"; LAST="$(tail -n 1 "$WORK/out")"; }
 calls() { echo "reload=$RELOADS validate=$VALIDATES recreate=$RECREATES"; }
+UNTOUCHED="XX  Gateway not changed: it still serves its previous configuration. Fix ./gateway/Caddyfile.localca, then run ./bin/gateway-reload.sh"
 
 # 1. canonical hashing: key order and spacing don't count, content does; CSP values are found
 check "hash ignores order and spacing" "$(adapted "$NEW_CSP" | json_tool hash)" "$(admin "$NEW_CSP" | json_tool hash)"
@@ -87,15 +88,16 @@ contains "changed reloaded" "$OUT" "gateway reloaded: runs ./gateway/Caddyfile.l
 
 # 4. reload says yes but the gateway keeps the old configuration: a clear failure
 reset; G_RUN="$(admin "$OLD_CSP")"; G_RELOAD=noop; run
-check "stale exit" "$RC" 1
+check "stale exit (changed, not confirmed)" "$RC" 3
 contains "stale names it" "$OUT" "still runs another configuration"
+contains "stale outcome" "$OUT" "XX  Gateway changed but not confirmed: it may be down. See: docker compose logs --tail 50 gateway"
 
 # 5. the new Caddyfile does not load: the gateway is not touched
 reset; G_RUN="$(admin "$OLD_CSP")"; G_BAD=1; run
 check "bad exit" "$RC" 1
 check "bad touches nothing" "$(calls)" "reload=0 validate=0 recreate=0"
 contains "bad gives caddy's reason" "$OUT" "unrecognized directive: bogus"
-contains "bad keeps serving" "$OUT" "keeps serving its current configuration"
+check "bad outcome, last line" "$LAST" "$UNTOUCHED"
 
 # 6. the gateway is not running: validated, then started
 reset; G_STATE=exited; G_ADMIN=0; run
@@ -109,30 +111,35 @@ reset; G_STATE=""; G_VALID=0; run
 check "stopped+invalid exit" "$RC" 1
 check "stopped+invalid not started" "$(calls)" "reload=0 validate=1 recreate=0"
 contains "stopped+invalid reason" "$OUT" "does not pass caddy validate"
+check "stopped+invalid outcome" "$LAST" "XX  Gateway not changed: it is still not running (no container). Fix ./gateway/Caddyfile.localca, then run ./bin/gateway-reload.sh"
 
 # 8. a gateway from before the folder mount can't see the file: recreated (once, on upgrade)
 reset; G_SEES=0; G_RUN="$(admin "$OLD_CSP")"; run
 check "single-file mount exit" "$RC" 0
 check "single-file mount recreated" "$(calls)" "reload=0 validate=1 recreate=1"
 contains "single-file mount why" "$OUT" "created before compose.yaml mounted the gateway folder"
+reset; G_SEES=x; run
+check "exec fails: recreated" "$(calls)" "reload=0 validate=1 recreate=1"
+contains "exec fails: why" "$OUT" "does not answer docker exec"
 
 # 9. admin API silent: the fallback is a recreate
 reset; G_ADMIN=0; run
 check "admin silent exit" "$RC" 0
 check "admin silent recreated" "$(calls)" "reload=0 validate=1 recreate=1"
 
-# 10. reload refused although the configuration is valid: recreate; invalid: left alone
+# 10. a live gateway refuses the reload (here: fails as it starts listening, which caddy validate
+#     can't see): Caddy has rolled back, so it keeps serving and is never recreated into a crash loop
 reset; G_RUN="$(admin "$OLD_CSP")"; G_RELOAD=fail; run
-check "reload refused exit" "$RC" 0
-check "reload refused recreated" "$(calls)" "reload=1 validate=1 recreate=1"
+check "reload refused exit" "$RC" 1
+check "reload refused: no recreate" "$(calls)" "reload=1 validate=0 recreate=0"
 contains "reload refused reason" "$OUT" "address already in use"
-reset; G_RUN="$(admin "$OLD_CSP")"; G_RELOAD=fail; G_VALID=0; run
-check "reload refused+invalid exit" "$RC" 1
-check "reload refused+invalid kept" "$(calls)" "reload=1 validate=1 recreate=0"
+contains "reload refused rolled back" "$OUT" "went back to the configuration it was serving"
+check "reload refused outcome" "$LAST" "$UNTOUCHED"
 
 # 11. the served Content-Security-Policy is not the new one: a clear failure
 reset; G_CSP="$OLD_CSP"; run
 check "old csp exit" "$RC" 1
+check "old csp outcome (unchanged gateway)" "$LAST" "XX  Gateway not changed: it already runs this bundle's configuration. See: docker compose logs --tail 50 gateway"
 contains "old csp names it" "$OUT" "serves a Content-Security-Policy that ./gateway/Caddyfile.localca does not set"
 
 # 12. no HTTPS answer yet (certificate being issued): a note, not a failure
@@ -144,6 +151,17 @@ contains "no https note" "$OUT" "no Content-Security-Policy over HTTPS to compar
 reset; G_HTTP=000; run
 check "no answer exit" "$RC" 1
 contains "no answer names it" "$OUT" "does not answer on port 80"
+
+# 13b. recreated and then not answering: changed, not confirmed; how to go back
+reset; G_SEES=0; G_HTTP=000; run
+check "recreated, no answer exit" "$RC" 3
+contains "recreated, no answer outcome" "$OUT" "XX  Gateway changed but not confirmed: it may be down. See: docker compose logs --tail 50 gateway"
+check "go back (no git)" "$LAST" "XX  Gateway: to go back, put the previous ./gateway/Caddyfile.localca in place, then run ./bin/gateway-reload.sh"
+gitq() { git -c user.name=t -c user.email=t@example.test -c init.defaultBranch=main "$@" >/dev/null 2>&1; }
+gitq init -q . && gitq add -A && gitq commit -qm one && echo "# changed" > gateway/Caddyfile.localca && gitq commit -qam two
+reset; G_SEES=0; G_HTTP=000; run
+check "go back (git)" "$LAST" "XX  Gateway: to go back to the Caddyfile the bundle had before its last update: git checkout HEAD@{1} -- ./gateway/Caddyfile.localca && ./bin/gateway-reload.sh (then git checkout -- ./gateway/Caddyfile.localca before the next deploy)"
+rm -rf .git
 
 # 14. GATEWAY_CADDYFILE: in ./gateway only, and present; the default is ./gateway/Caddyfile
 for bad_path in /etc/caddy/Caddyfile ./Caddyfile ./gateway/../secrets/x ./gateway/; do
@@ -166,12 +184,68 @@ cd "$ROOT" || exit 1
 contains "compose mounts the folder" "$(cat compose.yaml)" "- ./gateway:/etc/caddy/gateway:ro"
 contains "compose runs the named file" "$(cat compose.yaml)" '"--config", "/etc/caddy/${GATEWAY_CADDYFILE:-./gateway/Caddyfile}"'
 check "no single-file Caddyfile mount" "$(grep -l ':/etc/caddy/Caddyfile' compose*.yaml)" ""
-contains "update.sh runs it" "$(cat bin/update.sh)" "./bin/gateway-reload.sh ||"
+contains "update.sh runs it" "$(cat bin/update.sh)" "if ! ./bin/gateway-reload.sh; then"
 contains "installer playbook runs it" "$(cat ansible/roles/workforce/tasks/main.yml)" "ansible.builtin.command: ./bin/gateway-reload.sh"
 contains "converge runs it" "$(cat bin/deploylib.py)" "./bin/gateway-reload.sh"
 contains "deploy_to_test runs it" "$(cat bin/deploy_to_test.py)" "deploylib.reload_gateway(run)"
 contains "deploy_to_prod runs it" "$(cat bin/deploy_to_prod.py)" "deploylib.reload_gateway(ssh.run)"
 check "the script is executable" "$([ -x bin/gateway-reload.sh ] && echo yes)" "yes"
+# the callers repeat the script's outcome; they never claim the gateway kept its configuration
+check "no fixed claim in update.sh/deploylib" "$(grep -l 'keeps serving its previous configuration' bin/update.sh bin/deploylib.py)" ""
+contains "update.sh: gateway step exits 4" "$(sed -n '/^if ! .\/bin\/gateway-reload.sh; then/,/^fi/p' bin/update.sh)" "exit 4"
+
+# 16. deploylib: reload_gateway and converge say what happened (fake transport, no box)
+DEPLOY_OUT="$(python3 -I - "$ROOT/bin" <<'PY'
+import contextlib, io, sys
+sys.path.insert(0, sys.argv[1])
+import deploylib
+
+def attempt(fn, *args):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        try:
+            fn(*args)
+            code = 0
+        except SystemExit as e:
+            code = e.code
+    return code, buf.getvalue()
+
+CHANGED = ("XX  The gateway does not answer on port 80 (reloaded).\r\n"
+           "XX  Gateway changed but not confirmed: it may be down. See: docker compose logs --tail 50 gateway\r\n"
+           "XX  Gateway: to go back, put the previous ./gateway/Caddyfile in place, then run ./bin/gateway-reload.sh\r\n")
+
+def box(versions, update_rc, update_out="", gw_rc=0, gw_out="==> gateway unchanged: runs ./gateway/Caddyfile\n"):
+    state = {"v": versions[0]}
+    def run(cmd):
+        if "APP_VERSION=" in cmd:
+            return 0, f"APP_VERSION={state['v']}\n"
+        if "update.sh" in cmd:
+            state["v"] = versions[1]
+            return update_rc, update_out
+        if "gateway-reload.sh" in cmd:
+            return gw_rc, gw_out
+        return 0, ""
+    return run
+
+out = []
+code, text = attempt(deploylib.reload_gateway, box(["1.0.1", "1.0.1"], 0, gw_rc=3, gw_out=CHANGED))
+out.append(f"A|{code}|{text!r}")
+code, text = attempt(deploylib.reload_gateway, box(["1.0.1", "1.0.1"], 0))
+out.append(f"E|{code}|{text!r}")
+code, text = attempt(deploylib.converge, box(["1.0.0", "1.0.1"], 4, update_out=CHANGED), "1.0.1")
+out.append(f"C|{code}|{text!r}")
+code, text = attempt(deploylib.converge, box(["1.0.0", "1.0.0"], 1), "1.0.1")
+out.append(f"D|{code}|{text!r}")
+print("\n".join(out))
+PY
+)"
+row() { printf '%s\n' "$DEPLOY_OUT" | grep "^$1|"; }
+contains "reload_gateway failure exits" "$(row A)" "A|1|"
+contains "reload_gateway repeats the outcome" "$(row A)" "Gateway changed but not confirmed: it may be down. See: docker compose logs --tail 50 gateway Gateway: to go back"
+contains "reload_gateway success line" "$(row E)" "[OK]   gateway unchanged: runs ./gateway/Caddyfile"
+contains "converge: gateway step after a good update" "$(row C)" "the box was updated 1.0.0 -> 1.0.1 and is healthy (nothing was rolled back), but the gateway step failed. Gateway changed but not confirmed"
+case "$(row C)" in *"rolls itself back"*) bad "converge claims a rollback after a completed update: $(row C)" ;; *) ok ;; esac
+contains "converge: a real rollback still says so" "$(row D)" "update.sh 1.0.1 exited 1. update.sh rolls itself back on failure"
 
 echo "gateway-reload-test: ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]

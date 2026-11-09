@@ -9,17 +9,23 @@
 #      (its environment fills the {$VAR}s), ask the running gateway what it runs (its admin API,
 #      which listens only inside the container), and compare the sha256 of both as canonical JSON.
 #      Equal: nothing to do, nothing restarts.
-#   2. different: `caddy reload`, which has no downtime; a configuration that does not load leaves
-#      the old one serving. When the gateway can't be reloaded (not running, created before
-#      compose.yaml mounted the gateway folder, admin API silent, reload refused) the fallback is to
-#      recreate the container, and only after the configuration passed `caddy validate` in a one-off
-#      container, so a bad Caddyfile never takes the gateway down.
+#   2. different: `caddy reload`, which has no downtime. A reload Caddy refuses (the configuration
+#      does not load, or fails as it starts listening) is rolled back by Caddy itself, so the gateway
+#      keeps serving the old one; the script stops there and never recreates a gateway that serves.
+#      Only a gateway that can't be reloaded at all (not running, created before compose.yaml
+#      mounted the gateway folder, not answering docker exec, admin API silent) is recreated, after
+#      `caddy validate` in a one-off container. Validate opens no listeners, so it catches a bad
+#      configuration but not one that fails only as it starts; the check below then reports it.
 #   3. check: the gateway answers, its admin API reports the new configuration's hash, and the
 #      Content-Security-Policy it serves for the app is one the new configuration sets.
-#      Anything else exits non-zero with the reason.
+#
+# On failure the last lines ("XX  Gateway …") say what state the gateway is in and what to do;
+# update.sh and deploylib.py repeat them rather than guess.
 #
 # Usage (on the server, in the bundle folder; safe to run any time):
 #   ./bin/gateway-reload.sh        exit 0 = the gateway runs this bundle's configuration
+#                                  exit 1 = the gateway was not changed (2 = the script could not run)
+#                                  exit 3 = the gateway was changed but is not confirmed
 set -euo pipefail
 
 # Caddy's default admin address. It is inside the gateway container only (no port is published).
@@ -63,7 +69,9 @@ else:
 # ------------------------------------------------------------------ the gateway (stubbed in tests)
 gw_state()       { docker compose ps -a --format '{{.State}}' gateway 2>/dev/null | head -1 || true; }
 gw_exec()        { docker compose exec -T gateway "$@"; }
-gw_sees_config() { gw_exec test -f "$GW_IN" >/dev/null 2>&1; }
+# gw_sees_config — "yes" / "no": can the gateway see the Caddyfile? Nothing = docker exec failed.
+# shellcheck disable=SC2016  # expanded inside the container
+gw_sees_config() { gw_exec sh -c 'if [ -f "$1" ]; then echo yes; else echo no; fi' sh "$GW_IN" 2>/dev/null || true; }
 gw_render()      { gw_exec caddy adapt --config "$GW_IN" --adapter caddyfile; }
 gw_running()     { gw_exec wget -qO- "$GW_ADMIN_URL"; }
 gw_reload()      { gw_exec caddy reload --config "$GW_IN" --adapter caddyfile; }
@@ -97,14 +105,15 @@ gw_paths() {
   GW_IN="/etc/caddy/${GW_CADDYFILE#./}"
 }
 
-# gw_replace <why> — validate in a one-off container, then (re)create the gateway.
+# gw_replace <why> — only for a gateway that can't be reloaded: validate in a one-off container,
+# then (re)create it. From the recreate on, the gateway counts as changed (GW_TOUCHED).
 gw_replace() {
   gw_say "$1: validating ${GW_CADDYFILE}, then recreating the gateway…"
   if ! gw_validate > "$GW_TMP/validate.out" 2>&1; then
     gw_fail "${GW_CADDYFILE} does not pass caddy validate: $(gw_tail "$GW_TMP/validate.out")"
-    gw_fail "The gateway was left as it was. Fix the Caddyfile, then run ./bin/gateway-reload.sh"
     return 1
   fi
+  GW_TOUCHED=1
   if ! gw_recreate > "$GW_TMP/recreate.out" 2>&1; then
     gw_fail "docker compose could not recreate the gateway: $(gw_tail "$GW_TMP/recreate.out")"
     return 1
@@ -166,19 +175,25 @@ gw_check() {
 
 gateway_converge() {
   gw_paths || return 1
-  local state
+  local state sees
   state="$(gw_state)"
   if [ "$state" != running ]; then
+    GW_WAS="it is still not running (${state:-no container})"
     gw_replace "The gateway is not running (${state:-no container})" || return 1
     gw_check "started"; return
   fi
-  if ! gw_sees_config; then
-    gw_replace "The gateway was created before compose.yaml mounted the gateway folder, so it can't see ${GW_CADDYFILE}" || return 1
+  GW_WAS="it still serves its previous configuration"
+  sees="$(gw_sees_config)"
+  if [ "$sees" != yes ]; then
+    if [ "$sees" = no ]; then
+      gw_replace "The gateway was created before compose.yaml mounted the gateway folder, so it can't see ${GW_CADDYFILE}" || return 1
+    else
+      gw_replace "The gateway does not answer docker exec, so it can't be reloaded" || return 1
+    fi
     gw_check "recreated"; return
   fi
   if ! gw_hashes; then
     gw_fail "${GW_CADDYFILE} does not load: $(gw_tail "$GW_TMP/render.err")"
-    gw_fail "The gateway keeps serving its current configuration. Fix the Caddyfile, then run ./bin/gateway-reload.sh"
     return 1
   fi
   if [ -z "$GW_HAVE" ]; then
@@ -186,18 +201,42 @@ gateway_converge() {
     gw_check "recreated"; return
   fi
   if [ "$GW_HAVE" = "$GW_WANT" ]; then
+    GW_WAS="it already runs this bundle's configuration"
+    GW_ADVICE="See: docker compose logs --tail 50 gateway"
     gw_check "unchanged"; return
   fi
   gw_say "The gateway's configuration changed (running sha256 ${GW_HAVE:0:12}, ${GW_CADDYFILE} sha256 ${GW_WANT:0:12}): caddy reload…"
   if ! gw_reload > "$GW_TMP/reload.out" 2>&1; then
-    gw_replace "caddy reload refused it ($(gw_tail "$GW_TMP/reload.out"))" || return 1
-    gw_check "recreated"; return
+    # Caddy has rolled back to the configuration it was serving. Recreating would start a new
+    # container on the same Caddyfile, which fails the same way, and crash-loop a gateway that serves.
+    gw_fail "Caddy refused the reload and went back to the configuration it was serving: $(gw_tail "$GW_TMP/reload.out")"
+    return 1
   fi
+  GW_TOUCHED=1
   gw_check "reloaded"
 }
 
+# gateway_reload — gateway_converge, then on failure the closing "XX  Gateway …" lines: whether the
+# gateway was changed, and what to do. Returns 0 (runs this bundle's configuration), 1 (not
+# changed) or 3 (changed, not confirmed).
+gateway_reload() {
+  GW_TOUCHED=0; GW_WAS="it was not looked at"; GW_ADVICE=""
+  gateway_converge && return 0
+  if [ "$GW_TOUCHED" = 0 ]; then
+    gw_fail "Gateway not changed: ${GW_WAS}. ${GW_ADVICE:-Fix ${GW_CADDYFILE:-the Caddyfile}, then run ./bin/gateway-reload.sh}"
+    return 1
+  fi
+  gw_fail "Gateway changed but not confirmed: it may be down. See: docker compose logs --tail 50 gateway"
+  if git rev-parse -q --verify 'HEAD@{1}' >/dev/null 2>&1; then
+    gw_fail "Gateway: to go back to the Caddyfile the bundle had before its last update: git checkout HEAD@{1} -- ${GW_CADDYFILE} && ./bin/gateway-reload.sh (then git checkout -- ${GW_CADDYFILE} before the next deploy)"
+  else
+    gw_fail "Gateway: to go back, put the previous ${GW_CADDYFILE} in place, then run ./bin/gateway-reload.sh"
+  fi
+  return 3
+}
+
 # ------------------------------------------------------------------ entry point
-usage() { sed -n '2,22p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,28p' "${BASH_SOURCE[0]}"; }
 
 main() {
   case "${1:-}" in
@@ -216,7 +255,7 @@ main() {
   command -v python3 >/dev/null 2>&1 || { gw_fail "python3 is needed to compare the configurations"; return 2; }
   GW_TMP="$(mktemp -d)"
   trap 'rm -rf "$GW_TMP"' EXIT
-  gateway_converge
+  gateway_reload
 }
 
 # Run when executed; only define the functions when sourced (bin/tests/gateway-reload-test.sh).
