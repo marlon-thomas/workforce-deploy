@@ -394,5 +394,17 @@ contains "mounted read-only, as a folder" "$(grep '\./status' "$COMPOSE")" "- ./
 check "mounted in the api" "$(awk '/^  [a-z][a-z-]*:$/ { svc = $1 } /\.\/status:/ { print svc }' "$COMPOSE")" "api:"
 check "the page's setting reaches the api" "$(grep -cF 'WORKFORCE_SERVER_HEALTH_VISIBLE: ${WORKFORCE_SERVER_HEALTH_VISIBLE:-true}' "$COMPOSE")" 1
 
+# --- ADR-0039 review: alerts go by the sign-in route when it has its own settings, else SMTP_* as before.
+(
+  SMTP_HOST=relay.example.test; SMTP_PORT=587; SMTP_USERNAME=staff-relay; SMTP_FROM=workforce@app.example.test
+  unset SIGNIN_SMTP_HOST; use_signin_route
+  check "no sign-in route: the relay" "$SMTP_HOST:$SMTP_USERNAME" "relay.example.test:staff-relay"
+  SIGNIN_SMTP_HOST=codes.example.test; SIGNIN_SMTP_PORT=465; SIGNIN_SMTP_USERNAME=codes; use_signin_route
+  check "a sign-in route: its own host, port and account" "$SMTP_HOST:$SMTP_PORT:$SMTP_USERNAME" "codes.example.test:465:codes"
+  check "a sign-in route keeps the sender when it names none" "$SMTP_FROM" "workforce@app.example.test"
+  echo "$PASS $FAILN" > "$WORK/route.counts"
+)
+read -r PASS FAILN < "$WORK/route.counts"
+
 echo "healthwatch self-test: ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]

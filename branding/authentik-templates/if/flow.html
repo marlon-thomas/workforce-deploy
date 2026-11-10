@@ -1,0 +1,241 @@
+{% extends "if/flow.html" %}
+{% comment %}
+Workforce issue 290 (ADR-0039): authentik's sign-in page, with a "Send a new code" button under the code box.
+
+authentik's custom-template folder (/templates) comes first, so this file is the sign-in page; it extends authentik's own
+(Django finds the next template of the same name) and only adds the script below, so authentik's page is otherwise
+unchanged when authentik is updated.
+
+What the button does is what authentik's own page does when someone chooses "code by email": authentik sends a new code
+(the old one stops working). On the first sign-in, when the email method is being set up, it sends the same code again.
+The page holds people to a new code a minute, three in all, then says to ask their manager to check their email
+address. authentik itself has no limit on new codes, so this is the page's limit, not the server's: Workforce's server
+health check watches for unusually many sign-in code emails (doctor.sh, "sign-in code emails").
+
+No personal data: the script reads nothing but the page's own state and sends nothing but the request authentik's page
+would send. Words are plain text (textContent), never HTML.
+{% endcomment %}
+{% block scripts %}
+{{ block.super }}
+<script data-id="workforce-new-code">
+(function () {
+  "use strict";
+  var FIRST_WAIT = 30;          // seconds after the code page appears: the first code is still on its way
+  var WAIT = 60;                // seconds between new codes
+  var MOST = 3;                 // new codes; then ask the manager to check the email address
+  var CODE_LIFE = 10 * 60;      // seconds a code works for (the blueprint's token_expiry)
+  var FORGET = 30 * 60;         // seconds after which a fresh visit starts the count again
+
+  function deep(root, tag, depth) {
+    if (!root || depth > 8) return null;
+    var found = root.querySelector(tag);
+    if (found) return found;
+    var all = root.querySelectorAll("*");
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].shadowRoot) {
+        var f = deep(all[i].shadowRoot, tag, depth + 1);
+        if (f) return f;
+      }
+    }
+    return null;
+  }
+
+  // The code page now showing, if it's one that emails codes: authentik's code step with the email method chosen, or
+  // the first sign-in's email set-up once its code has gone.
+  function page() {
+    var executor = document.querySelector("ak-flow-executor");
+    if (!executor) return null;
+    var slug = executor.getAttribute("slug") || "";
+    var code = deep(document, "ak-stage-authenticator-validate-code", 0);
+    if (code) {
+      var device = code.deviceChallenge;
+      if (!device || String(device.deviceClass) !== "email") return null;
+      var host = deep(document, "ak-stage-authenticator-validate", 0);
+      var user = host && host.challenge ? host.challenge.pendingUser || "" : "";
+      return { kind: "code", el: code, user: user, device: device, slug: slug };
+    }
+    var setup = deep(document, "ak-stage-authenticator-email", 0);
+    if (setup && setup.challenge && !setup.challenge.emailRequired) {
+      return { kind: "setup", el: setup, user: setup.challenge.pendingUser || "", slug: slug };
+    }
+    return null;
+  }
+
+  // Per person signing in (a short hash of their sign-in name, not the name), so someone else in the same tab starts afresh.
+  function hash(s) {
+    var h = 2166136261;
+    for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    return h.toString(36);
+  }
+  function storeKey(p) { return "workforce-new-code:" + p.slug + ":" + p.kind + ":" + hash(String(p.user)); }
+  function load(p) {
+    try { return JSON.parse(window.sessionStorage.getItem(storeKey(p)) || "null"); } catch (e) { return null; }
+  }
+  function save(p, s) {
+    try { window.sessionStorage.setItem(storeKey(p), JSON.stringify(s)); } catch (e) { /* private window: the count is this page's */ }
+  }
+
+  function csrf() {
+    var m = document.cookie.match(/(?:^|;\s*)authentik_csrf=([^;]+)/);
+    return m ? decodeURIComponent(m[1]) : "";
+  }
+
+  // The request authentik's own page sends: choosing "code by email" again (a new code), or, while the email method is
+  // being set up, asking for its code without typing one (the same code again).
+  function ask(p) {
+    var url = "/api/v3/flows/executor/" + encodeURIComponent(p.slug) + "/?query=" + encodeURIComponent(window.location.search.substring(1));
+    var body = p.kind === "code"
+      ? { component: "ak-stage-authenticator-validate",
+          selected_challenge: { device_class: "email", device_uid: String(p.device.deviceUid), challenge: p.device.challenge || {}, last_used: null } }
+      : { component: "ak-stage-authenticator-email" };
+    return window.fetch(url, {
+      method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "Accept": "application/json", "X-authentik-CSRF": csrf() },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      if (!r.ok) throw new Error("status " + r.status);
+      return r.json();
+    }).then(function (j) {
+      var errors = (j && j.response_errors) || {};
+      if (errors.selected_challenge || errors.email || errors.code) throw new Error("refused");
+      return j;
+    });
+  }
+
+  function again() {
+    var next = new URLSearchParams(window.location.search).get("next") || "/";
+    if (!/^\/(?!\/)/.test(next)) next = "/";
+    return "/flows/-/cancel/?next=" + encodeURIComponent(next);
+  }
+
+  function block(p) {
+    var root = p.el.shadowRoot;
+    var form = root && root.querySelector("form");
+    if (!form) return null;
+    var b = form.querySelector(".wf-new-code");
+    if (b) return b;
+    b = document.createElement("div");
+    b.className = "wf-new-code";
+    b.style.marginTop = "1rem";
+    var help = document.createElement("p");
+    help.className = "wf-new-code__help";
+    help.textContent = "Didn’t get it? Codes can take a minute or two. Check your junk folder too.";
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "pf-c-button pf-m-secondary pf-m-block wf-new-code__button";
+    button.textContent = "Send a new code";
+    var link = document.createElement("a");
+    link.className = "pf-c-button pf-m-secondary pf-m-block wf-new-code__again";
+    link.textContent = "Start signing in again";
+    link.hidden = true;
+    var status = document.createElement("p");
+    status.className = "wf-new-code__status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    [help, status].forEach(function (el) { el.style.fontSize = "0.9rem"; el.style.margin = "0.5rem 0"; });
+    b.appendChild(help);
+    b.appendChild(button);
+    b.appendChild(link);
+    b.appendChild(status);
+    form.appendChild(b);
+    button.addEventListener("click", function () { press(button); });
+    return b;
+  }
+
+  var current = null;
+  var busy = false;
+  var said = "";
+  var trouble = "";
+
+  function seconds(ms) { return Math.max(0, Math.ceil(ms / 1000)); }
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+
+  function state(p) {
+    var now = Date.now();
+    var s = load(p);
+    if (!s || now - s.last > FORGET * 1000) {
+      s = { first: now, last: now, count: 0 };
+      save(p, s);
+    }
+    return s;
+  }
+
+  function show(p, b) {
+    var s = state(p);
+    var now = Date.now();
+    var button = b.querySelector(".wf-new-code__button");
+    var link = b.querySelector(".wf-new-code__again");
+    var status = b.querySelector(".wf-new-code__status");
+    var text;
+    if (p.kind === "setup" && now - s.first > (CODE_LIFE - 30) * 1000) {
+      // The set-up resends its first code, which stops working after 10 minutes: only a fresh start gives a new one.
+      button.hidden = true;
+      link.hidden = false;
+      link.href = again();
+      text = "That code has run out. Start signing in again and we’ll send you a new one.";
+    } else if (s.count >= MOST) {
+      button.hidden = true;
+      link.hidden = true;
+      text = "We’ve sent you " + plural(MOST, "new code", "new codes") + ". If none has arrived, ask your manager to check your email address on your staff record.";
+    } else {
+      button.hidden = false;
+      link.hidden = true;
+      var wait = (s.count === 0 ? s.first + FIRST_WAIT * 1000 : s.last + WAIT * 1000) - now;
+      button.disabled = busy || wait > 0;
+      var later = wait > 0 ? "You can ask for " + (s.count > 0 ? "another" : "a new code") + " in "
+                             + plural(seconds(wait), "second", "seconds") + "." : "";
+      if (trouble) {
+        text = trouble + (later ? " " + later : "");
+      } else if (s.count > 0) {
+        text = (p.kind === "code" ? "We’ve sent a new code (" + s.count + " of " + MOST + "). Use the newest one."
+                                  : "We’ve sent the code again (" + s.count + " of " + MOST + ").")
+               + (later ? " " + later : "");
+      } else {
+        text = later;
+      }
+    }
+    if (text !== said) {
+      status.textContent = text;
+      said = text;
+    }
+  }
+
+  function press(button) {
+    var p = current;
+    if (!p || busy) return;
+    var s = state(p);
+    busy = true;
+    button.disabled = true;
+    ask(p).then(function () {
+      trouble = "";
+      s.count += 1;
+      s.last = Date.now();
+      save(p, s);
+    }, function () {
+      // Not counted as a code sent, but it still waits a minute before the next try.
+      trouble = "We couldn’t send a new code just now. Try again in a minute, or start signing in again.";
+      s.last = Date.now();
+      if (s.count === 0) s.first = s.last - FIRST_WAIT * 1000 + WAIT * 1000;
+      save(p, s);
+    }).then(function () {
+      busy = false;
+      tick();
+    });
+  }
+
+  function tick() {
+    try {
+      var p = page();
+      current = p;
+      if (!p) return;
+      var b = block(p);
+      if (b && !busy) show(p, b);
+    } catch (e) {
+      // Never break authentik's own page: without the button, its own words are still there.
+    }
+  }
+
+  window.setInterval(tick, 500);
+})();
+</script>
+{% endblock %}

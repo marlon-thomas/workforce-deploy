@@ -36,6 +36,17 @@
 }
 
 {$AUTH_HOSTNAME} {
+	# Workforce ADR-0039 (security review): from outside, nobody removes or changes a sign-in code method through
+	# authentik's own pages or API (Workforce does that on the private network, after its own checks), and
+	# authentik's first-run page is never reachable.
+	@code_methods {
+		path /api/v3/authenticators/*
+		not method GET HEAD
+	}
+	respond @code_methods "Change how you get sign-in codes in Workforce: My record, then Signing in." 403
+	respond /setup* 404
+	respond /if/flow/initial-setup* 404
+	respond /api/v3/flows/executor/initial-setup* 404
 	reverse_proxy authentik-server:9000
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"

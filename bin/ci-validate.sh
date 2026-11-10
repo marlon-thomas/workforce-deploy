@@ -64,6 +64,19 @@ else
   echo "== shellcheck not installed — skipped (CI runners have it)"
 fi
 
+echo "== test-only things stay out of production"
+# shellcheck source=lib/prod-guards.sh
+. bin/lib/prod-guards.sh
+for f in environments/*.env; do
+  [ "$(basename "$f")" = test.env ] && continue
+  out="$(prod_guard_env_file "$f")" || bad "$out"
+done
+for f in gateway/Caddyfile*; do
+  [ "$f" = gateway/Caddyfile.localca ] && continue
+  out="$(prod_guard_caddyfile "$f")" || bad "$out"
+done
+[ "$RC" -ne 0 ] || echo "ok   no test inbox, mailpit or plain relay outside the TEST appliance"
+
 echo "== self-tests"
 for t in bin/tests/*-test.sh; do
   [ -e "$t" ] || continue

@@ -326,6 +326,12 @@ INV
   WFV_smtp_password="${SMTP_PASSWORD:-}" \
   WFV_smtp_starttls="${SMTP_STARTTLS:-false}" \
   WFV_smtp_from="${SMTP_FROM:-}" \
+  WFV_signin_smtp_host="${SIGNIN_SMTP_HOST:-}" \
+  WFV_signin_smtp_port="${SIGNIN_SMTP_PORT:-587}" \
+  WFV_signin_smtp_username="${SIGNIN_SMTP_USERNAME:-}" \
+  WFV_signin_smtp_password="${SIGNIN_SMTP_PASSWORD:-}" \
+  WFV_signin_smtp_starttls="${SIGNIN_SMTP_STARTTLS:-false}" \
+  WFV_signin_smtp_from="${SIGNIN_SMTP_FROM:-}" \
   WFV_compose_profiles="${COMPOSE_PROFILES:-}" \
   WFV_ops_alert_email="${OPS_ALERT_EMAIL}" \
   WFV_ops_alert_from="${OPS_ALERT_FROM:-}" \
@@ -677,6 +683,10 @@ if [ -f .env ]; then
       warn "Migrated the image registry path in .env (early placeholder)."
     fi
     [ "${RECOVERING}" -eq 0 ] || recovering_on_this_host
+    # The test inbox is for the TEST appliance only (bin/lib/prod-guards.sh), on a resume too.
+    # shellcheck source=lib/prod-guards.sh
+    . ./bin/lib/prod-guards.sh
+    prod_guard_start "${ENV_NAME:-prod}" "${TEST_INBOX:-}" "${TEST_INBOX_HOSTNAME:-}" "${COMPOSE_PROFILES:-}" || exit 1
     preflight_network
     preflight_and_pull
     # ADMIN_PASSWORD for the playbook: resume uses a fresh random value — the
@@ -892,6 +902,10 @@ case "${TLS_MODE:-http01}" in
       GATEWAY_CADDYFILE_DEFAULT="./gateway/Caddyfile.localca"
     fi ;;
 esac
+# The test inbox is for the TEST appliance only (bin/lib/prod-guards.sh): refuse before anything is written.
+# shellcheck source=lib/prod-guards.sh
+. ./bin/lib/prod-guards.sh
+prod_guard_start "${ENV_NAME:-prod}" "${TEST_INBOX:-}" "${TEST_INBOX_HOSTNAME:-}" "${COMPOSE_PROFILES:-}" || exit 1
 cat > .env <<ENV
 ENV_NAME=${ENV_NAME:-prod}
 APP_HOSTNAME=${APP_HOSTNAME}

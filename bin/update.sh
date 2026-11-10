@@ -21,6 +21,10 @@ cd "$(dirname "$0")/.."
 . ./.env
 # shellcheck source=lib/common.sh
 . ./bin/lib/common.sh
+# The test inbox is for the TEST appliance only (bin/lib/prod-guards.sh): refuse before anything changes.
+# shellcheck source=lib/prod-guards.sh
+. ./bin/lib/prod-guards.sh
+prod_guard_start "${ENV_NAME:-prod}" "${TEST_INBOX:-}" "${TEST_INBOX_HOSTNAME:-}" "${COMPOSE_PROFILES:-}" || exit 1
 use_docker_socket
 
 # The backup container runs the nightly backup and the health watch through this socket. An older
@@ -102,6 +106,7 @@ if [ -f inventories/local/hosts.yml ] && command -v ansible-playbook >/dev/null 
       -e "app_hostname=${APP_HOSTNAME}" -e "auth_hostname=${AUTH_HOSTNAME}" \
       -e "webmail_hostname=${WEBMAIL_HOSTNAME:-}" \
       -e "admin_recovery_email=${ADMIN_RECOVERY_EMAIL:-}" \
+      -e "smtp_host=${SMTP_HOST:-}" -e "signin_smtp_host=${SIGNIN_SMTP_HOST:-}" \
       >"backups/identity-converge.log" 2>&1 \
     || fail "Identity converge failed — update aborted (nothing else was changed). See backups/identity-converge.log"
 fi

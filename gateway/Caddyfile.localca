@@ -24,9 +24,39 @@
 
 {$AUTH_HOSTNAME} {
 	tls /etc/caddy/tls/tls.crt /etc/caddy/tls/tls.key
+	# Workforce ADR-0039 (security review): from outside, nobody removes or changes a sign-in code method through
+	# authentik's own pages or API (Workforce does that on the private network, after its own checks), and
+	# authentik's first-run page is never reachable.
+	@code_methods {
+		path /api/v3/authenticators/*
+		not method GET HEAD
+	}
+	respond @code_methods "Change how you get sign-in codes in Workforce: My record, then Signing in." 403
+	respond /setup* 404
+	respond /if/flow/initial-setup* 404
+	respond /api/v3/flows/executor/initial-setup* 404
 	reverse_proxy authentik-server:9000
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}
+
+# Test inbox (TEST appliance only, TEST_INBOX=on; bin/test-inbox.sh): mailpit's web UI, to read test sign-in codes
+# and emails. Only in this file, which only the test CA uses; bin/ci-validate.sh fails if a production Caddyfile
+# mentions it, and doctor.sh fails on any install that isn't ENV_NAME=test where it's set. Its own basic-auth
+# password, generated on the box and kept only in its .env. Unset hostname = a local-only name nobody reaches;
+# unset hash = the hash of a random value nobody knows.
+{$TEST_INBOX_HOSTNAME:testmail.localhost} {
+	tls /etc/caddy/tls/tls.crt /etc/caddy/tls/tls.key
+	basic_auth {
+		test {$TEST_INBOX_HASH:$2a$14$TWhW/b2RR8bNzEI.YGSqL.ddDAQiitLrI5hqSORBNKgtlQ0t.8uOq}
+	}
+	reverse_proxy mailpit:8025
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Robots-Tag "noindex, nofollow"
+		Referrer-Policy "no-referrer"
 		-Server
 	}
 }

@@ -54,3 +54,47 @@ body,
   --ak-c-flow-executor__locale-select--Color: #344054 !important;
   --ak-c-locale-select--Color: #344054 !important;
 }
+
+/* ADR-0039 (Workforce): the password page says not to reuse the email password, because sign-in codes go to
+   that email. authentik adopts this stylesheet into its pages' shadow roots, so both forms are given. */
+:host(ak-stage-password) form::after,
+ak-stage-password form::after {
+  content: "Please don’t use the same password for Workforce as for your email.";
+  display: block;
+  margin-top: 1rem;
+  font-size: 0.9rem;
+  color: #475467;
+}
+
+/* ADR-0039 review: the code page says what to do when the email doesn't come. Issue 290: the sign-in page's own
+   script (authentik-templates/if/flow.html) adds a "Send a new code" button with these words and a count; these
+   words stay only where the button isn't there (an authenticator app's code, or the script not running). */
+:host(ak-stage-authenticator-validate-code) form::after,
+ak-stage-authenticator-validate-code form::after {
+  content: "Didn’t get it? Check your junk folder, or send a new code. Still nothing after a few tries? Ask your manager to check your email address.";
+  display: block;
+  margin-top: 1rem;
+  font-size: 0.9rem;
+  color: #475467;
+}
+:host(ak-stage-authenticator-validate-code) form:has(.wf-new-code)::after,
+ak-stage-authenticator-validate-code form:has(.wf-new-code)::after {
+  content: none;
+  display: none;
+}
+.wf-new-code__help,
+.wf-new-code__status {
+  font-size: 0.9rem;
+  color: #475467;
+}
+.wf-new-code__status:empty {
+  display: none;
+}
+
+/* Workforce issue 299 (ADR-0039 §5): only Workforce adds or removes a sign-in code method. The gateway refuses any
+   change to them from outside (so the emergency administrator can't remove its own authenticator app here); the
+   delete button on authentik's own "MFA devices" page is hidden, so nobody is offered what would be refused. */
+:host(ak-user-settings-mfa) ak-forms-delete-bulk,
+ak-user-settings-mfa ak-forms-delete-bulk {
+  display: none !important;
+}

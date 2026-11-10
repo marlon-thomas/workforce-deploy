@@ -41,8 +41,17 @@ entries:
       description: Links this login to the staff record it was invited for
       # authentik's user-write stage treats "_" in an attribute key as a path separator, so the
       # invitation's `attributes.workforce_invite` is stored as attributes.workforce.invite.
+      # ADR-0039: workforce_email_code_set_up is when the account's email-code method was set up, which authentik
+      # does only after the person typed the code it sent. authentik's amr says "mfa" only when its code step
+      # checks a code against an existing method, so a first sign-in that set the method up would otherwise look
+      # like no code at all and be asked for a second one; Workforce counts this instead (SecondStep.proven).
       expression: |
-        return {"workforce_invite": (request.user.attributes.get("workforce") or {}).get("invite")}
+        from authentik.stages.authenticator_email.models import EmailDevice
+        device = EmailDevice.objects.filter(user=request.user, confirmed=True).order_by("-created").first()
+        return {
+            "workforce_invite": (request.user.attributes.get("workforce") or {}).get("invite"),
+            "workforce_email_code_set_up": int(device.created.timestamp()) if device else None,
+        }
   - attrs:
       name: Workforce
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
@@ -70,6 +79,8 @@ entries:
         - matching_mode: strict
           redirect_uri_type: logout
           url: https://{{ app_hostname }}/
+      # Workforce issue 299: never the offline-access scope, so no refresh token is ever issued and ending a person's
+      # sessions here ends every token they hold (bin/tests/blueprint-test.sh checks it).
       property_mappings:
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
@@ -205,8 +216,22 @@ entries:
   - model: authentik_flows.flowstagebinding
     identifiers: { target: !KeyOf wf-enrollment-flow, stage: !KeyOf wf-enrollment-write }
     attrs: { order: 30 }
+  # ADR-0039 review (finding 1): enrolment no longer signs the person in. It used to, with no code, so webmail and
+  # authentik opened without one. They go on to the ordinary sign-in, which asks for the password and a code (and
+  # sets up their email codes, proved by that first code). `state: absent` removes the old binding on update.
   - model: authentik_flows.flowstagebinding
     identifiers: { target: !KeyOf wf-enrollment-flow, stage: !KeyOf wf-enrollment-login }
+    state: absent
+  - model: authentik_stages_redirect.redirectstage
+    id: wf-to-sign-in
+    identifiers: { name: workforce-on-to-sign-in }
+    attrs:
+      name: workforce-on-to-sign-in
+      mode: static
+      target_static: https://{{ app_hostname }}/
+      keep_context: false
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-enrollment-flow, stage: !KeyOf wf-to-sign-in }
     attrs: { order: 40 }
 
   # ---------- ADR-0024: passwords — reset by link, never set by someone else ----------
@@ -258,8 +283,12 @@ entries:
   - model: authentik_flows.flowstagebinding
     identifiers: { target: !KeyOf wf-recovery-flow, stage: !KeyOf wf-password-write }
     attrs: { order: 20 }
+  # Finding 1 again: a new password doesn't sign anyone in either; the ordinary sign-in follows, with a code.
   - model: authentik_flows.flowstagebinding
     identifiers: { target: !KeyOf wf-recovery-flow, stage: !KeyOf wf-enrollment-login }
+    state: absent
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-recovery-flow, stage: !KeyOf wf-to-sign-in }
     attrs: { order: 30 }
   # Signed in, from the account menu: the same rule, then back to Workforce (?next=).
   - model: authentik_flows.flow
@@ -328,7 +357,406 @@ entries:
     identifiers: { name: default-user-settings }
     attrs:
       fields:
-        - !Find [authentik_stages_prompt.prompt, [name, default-user-settings-field-username]]
         - !Find [authentik_stages_prompt.prompt, [name, default-user-settings-field-name]]
         - !Find [authentik_stages_prompt.prompt, [name, default-user-settings-field-locale]]
 
+  # ---------- ADR-0039 (Workforce): two-step sign-in with codes ----------
+  # Everyone who signs in enters a code after their password: a 6-digit code sent to their personal email (10
+  # minutes, once), or one from an authenticator app if they switched to one in My Hub. Email goes through the
+  # installation's outgoing mail (compose.yaml, AUTHENTIK_EMAIL__*). Workforce sets each account's email to the
+  # personal email on the staff record and stamps attributes.workforce.codes with it; an account without that
+  # stamp is told to ask HR rather than sent a code to an address nobody checked. The ID token's amr then says a
+  # code was entered, and Workforce refuses a sign-in without it.
+  - model: authentik_stages_authenticator_email.authenticatoremailstage
+    id: wf-email-code
+    identifiers: { name: workforce-email-code }
+    attrs:
+      name: workforce-email-code
+      friendly_name: Code by email
+      use_global_settings: true
+      token_expiry: minutes=10
+      subject: Your Workforce sign-in code
+      # branding/authentik-templates/, mounted at authentik's custom-template folder (/templates).
+      template: workforce-sign-in-code.html
+  - model: authentik_stages_authenticator_totp.authenticatortotpstage
+    id: wf-authenticator-app
+    identifiers: { name: workforce-authenticator-app }
+    attrs:
+      name: workforce-authenticator-app
+      friendly_name: Authenticator app
+      digits: 6
+
+  # The code step of every sign-in. The default flow already binds this stage after the password; it used to
+  # let anyone with nothing set up straight through. Now someone with no code method yet gets the email one,
+  # proved by the first code (it goes to the account's email, which Workforce set), and nobody is excused
+  # because of a recent code elsewhere (last_auth_threshold 0): staying signed in is the session's job.
+  - model: authentik_stages_authenticator_validate.authenticatorvalidatestage
+    identifiers: { name: default-authentication-mfa-validation }
+    attrs:
+      name: default-authentication-mfa-validation
+      device_classes: [email, totp]
+      not_configured_action: configure
+      configuration_stages:
+        - !Find [authentik_stages_authenticator_email.authenticatoremailstage, [name, workforce-email-code]]
+      last_auth_threshold: seconds=0
+      webauthn_user_verification: preferred
+    state: present
+
+  # ADR-0039 §5 (owner): the emergency administrator account signs in with its password and no second step. At
+  # first-time setup there is no email yet, and the account that gets everyone back in when email or codes are
+  # broken mustn't depend on them. It is the account ADR-0026 names: exactly "admin", internal, not a superuser,
+  # not in "authentik Admins". The code step is skipped for it alone (decided when the step is reached, once the
+  # password has identified the account); the wrong-tries lock (order 26) still applies to it. Workforce audits
+  # every sign-in to it and emails the installation's contact and the registered managers and directors.
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-not-emergency
+    identifiers: { name: workforce-not-the-emergency-administrator }
+    attrs:
+      name: workforce-not-the-emergency-administrator
+      # ADR-0039 §5 (review finding 31): an authenticator app can be added to it, needing no email; once added it
+      # is required, so the code step is skipped only while it has none. Only the installation's own recovery step
+      # on the server removes it (and the account can't switch methods in Workforce).
+      expression: |
+        from authentik.stages.authenticator_totp.models import TOTPDevice
+        user = request.context.get("pending_user")
+        if user is None:
+            return True
+        emergency = (user.username == "admin" and getattr(user, "type", "") == "internal" and not user.is_superuser
+                     and not ak_is_group_member(user, name="authentik Admins"))
+        return not emergency or TOTPDevice.objects.filter(user=user, confirmed=True).exists()
+  - model: authentik_flows.flowstagebinding
+    id: wf-code-step-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !Find [authentik_stages_authenticator_validate.authenticatorvalidatestage, [name, default-authentication-mfa-validation]]
+    attrs:
+      order: 30
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+      # Review finding 7: authentik's default flow already binds its "optional" policy here, and with the default
+      # mode (any) that one alone passes, so the emergency administrator was still asked for a code. All of them.
+      policy_engine_mode: all
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-code-step-binding, policy: !KeyOf wf-not-emergency }
+    attrs: { order: 0, enabled: true }
+
+  # Second security review (finding 6): the lock is checked on every password sent, not once per sign-in (see
+  # wf-password-binding below), so a wrong password may be tried again on the same page, as authentik's default
+  # has it (5; an earlier fix set 1, which made people start again after one typo). authentik validates the whole
+  # stage on update, so its other fields are restated as its default blueprint has them.
+  - model: authentik_stages_password.passwordstage
+    identifiers: { name: default-authentication-password }
+    attrs:
+      name: default-authentication-password
+      backends:
+        - authentik.core.auth.InbuiltBackend
+        - authentik.sources.kerberos.auth.KerberosBackend
+        - authentik.sources.ldap.auth.LDAPBackend
+        - authentik.core.auth.TokenBackend
+      configure_flow: !Find [authentik_flows.flow, [slug, default-password-change]]
+      failed_attempts_before_cancel: 5
+    state: present
+
+  # A device stays signed in up to 30 days here; each organisation's own number of days (1 to 30, 7 unless
+  # changed) is kept by Workforce from the token's auth_time, which sends the person back for a code sooner.
+  - model: authentik_stages_user_login.userloginstage
+    identifiers: { name: default-authentication-login }
+    attrs:
+      name: default-authentication-login
+      session_duration: days=30
+    state: present
+
+  # No personal email given by Workforce yet: no code is sent anywhere, and the person is told to ask HR.
+  # Evaluated when the stage is reached (after the password), so it says nothing about an account to someone
+  # who doesn't know its password. akadmin, authentik's own superuser, has no stamp and so can't sign in here
+  # at all (it never signs in to Workforce; the deployment works through `ak` inside the container).
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-codes-not-ready
+    identifiers: { name: workforce-codes-not-ready }
+    attrs:
+      name: workforce-codes-not-ready
+      expression: |
+        user = request.context.get("pending_user")
+        if user is None:
+            return False
+        # The emergency administrator gets no codes (ADR-0039 §5), so it isn't asked for an address either.
+        if (user.username == "admin" and getattr(user, "type", "") == "internal" and not user.is_superuser
+                and not ak_is_group_member(user, name="authentik Admins")):
+            return False
+        wf = (user.attributes or {}).get("workforce") or {}
+        codes = str(wf.get("codes") or "").strip().lower()
+        return codes == "" or codes != str(user.email or "").strip().lower()
+  - model: authentik_stages_deny.denystage
+    id: wf-ask-hr
+    identifiers: { name: workforce-ask-hr }
+    attrs:
+      name: workforce-ask-hr
+      deny_message: >-
+        We can’t send you a sign-in code yet, because there’s no personal email on your staff record.
+        Please ask HR to add it, then try again.
+  - model: authentik_flows.flowstagebinding
+    id: wf-ask-hr-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-ask-hr
+    attrs:
+      order: 25
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-ask-hr-binding, policy: !KeyOf wf-codes-not-ready }
+    attrs: { order: 0, enabled: true }
+
+  # Wrong tries are limited: each wrong password or code lowers the account's score, and at five the next
+  # sign-in stops here for 15 minutes (AUTHENTIK_REPUTATION__EXPIRY in compose.yaml); after that a new code is
+  # sent. Each code also slows down after every wrong try, and lasts 10 minutes. By account, not by address: one
+  # office's shared connection mustn't lock everyone out.
+  - model: authentik_policies_reputation.reputationpolicy
+    id: wf-too-many-tries
+    identifiers: { name: workforce-too-many-tries }
+    attrs:
+      name: workforce-too-many-tries
+      check_ip: false
+      check_username: true
+      threshold: -5
+  - model: authentik_stages_deny.denystage
+    id: wf-too-many-tries-stage
+    identifiers: { name: workforce-too-many-tries }
+    attrs:
+      name: workforce-too-many-tries
+      deny_message: >-
+        That was wrong too many times. Wait 15 minutes, then sign in again, and we’ll send you a new code.
+  - model: authentik_flows.flowstagebinding
+    id: wf-too-many-tries-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-too-many-tries-stage
+    attrs:
+      # Review finding 6: before the password (20), after the account is identified (10). At 26 it came after the
+      # password, so guessing was never blocked and the lock told an attacker the password was right.
+      order: 15
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-too-many-tries-binding, policy: !KeyOf wf-too-many-tries }
+    attrs: { order: 0, enabled: true }
+
+  # Third review of finding 6: the lock at 15 is checked once, when a sign-in reaches it, so many sign-ins opened
+  # before the first wrong try each still took a password afterwards, and a right one went on (a different answer:
+  # the password was right). So the lock is also checked on every password sent: authentik re-checks a stage's
+  # policies on every request to it, and the password stage now runs only while the account isn't locked (the
+  # lock's policy, negated, and all of the binding's policies must pass). A locked account's password is never
+  # checked; the step after (21) then refuses, because no password was checked.
+  - model: authentik_flows.flowstagebinding
+    id: wf-password-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !Find [authentik_stages_password.passwordstage, [name, default-authentication-password]]
+    attrs:
+      order: 20
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+      policy_engine_mode: all
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-password-binding, policy: !KeyOf wf-too-many-tries }
+    attrs: { order: 5, enabled: true, negate: true }
+  # Nothing goes past the password step without a password checked in this sign-in (authentik's password stage
+  # records which backend accepted it). Decided by what happened, not by the score, so a lock that ends between
+  # two checks can't let anyone through; an error refuses too.
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-password-not-checked
+    identifiers: { name: workforce-password-not-checked }
+    attrs:
+      name: workforce-password-not-checked
+      expression: |
+        plan = request.context.get("flow_plan")
+        return plan is None or not plan.context.get("user_backend")
+  - model: authentik_stages_deny.denystage
+    id: wf-password-not-checked-stage
+    identifiers: { name: workforce-password-not-checked }
+    attrs:
+      name: workforce-password-not-checked
+      deny_message: >-
+        That was wrong too many times. Wait 15 minutes, then sign in again, and we’ll send you a new code.
+  - model: authentik_flows.flowstagebinding
+    id: wf-password-not-checked-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-password-not-checked-stage
+    attrs:
+      order: 21
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-password-not-checked-binding, policy: !KeyOf wf-password-not-checked }
+    attrs: { order: 0, enabled: true, failure_result: true }
+
+  # My Hub → "Use an authenticator app" opens this (signed in already): an email code first, so only the person
+  # who reads that email can add an app, then the app's QR code. Workforce then removes the email method when they
+  # press Finish, and puts it back if they switch back (both from My Hub).
+  - model: authentik_stages_authenticator_validate.authenticatorvalidatestage
+    id: wf-confirm-by-email
+    identifiers: { name: workforce-confirm-by-email }
+    attrs:
+      name: workforce-confirm-by-email
+      device_classes: [email]
+      not_configured_action: deny
+      last_auth_threshold: seconds=0
+      webauthn_user_verification: preferred
+  - model: authentik_flows.flow
+    id: wf-authenticator-app-flow
+    identifiers: { slug: workforce-authenticator-app }
+    attrs:
+      name: Workforce authenticator app
+      slug: workforce-authenticator-app
+      title: Use an authenticator app
+      designation: stage_configuration
+      authentication: require_authenticated
+      layout: stacked
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-authenticator-app-flow, stage: !KeyOf wf-confirm-by-email }
+    attrs: { order: 10 }
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-authenticator-app-flow, stage: !KeyOf wf-authenticator-app }
+    attrs: { order: 20 }
+
+  # ADR-0039 review: only the page above (an email code first) can add an authenticator app. authentik's own
+  # set-up pages (an app, recovery codes, a security key) would let any signed-in session add one with no code,
+  # so they refuse everyone, and the default app and recovery-code stages no longer offer them on authentik's
+  # account page. (authentik's default blueprints are re-applied only when their files change.)
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-nobody
+    identifiers: { name: workforce-nobody }
+    attrs:
+      name: workforce-nobody
+      expression: |
+        ak_message("Add an authenticator app from Workforce: My record, then Signing in.")
+        return False
+{% for slug in ['default-authenticator-totp-setup', 'default-authenticator-static-setup', 'default-authenticator-webauthn-setup'] %}
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, {{ slug }}]]
+      policy: !KeyOf wf-nobody
+    attrs: { order: 0, enabled: true }
+{% endfor %}
+  - model: authentik_stages_authenticator_totp.authenticatortotpstage
+    identifiers: { name: default-authenticator-totp-setup }
+    attrs:
+      name: default-authenticator-totp-setup
+      friendly_name: TOTP Device
+      digits: 6
+      configure_flow: null
+    state: present
+  - model: authentik_stages_authenticator_static.authenticatorstaticstage
+    identifiers: { name: default-authenticator-static-setup }
+    attrs:
+      name: default-authenticator-static-setup
+      friendly_name: Static tokens
+      token_count: 6
+      configure_flow: null
+    state: present
+
+
+  # ADR-0039 §5 (review finding 31): the emergency administrator's own "add an authenticator app" page. No email
+  # code first (it has none): signed in already, with its password. Only that account may open it.
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-only-emergency
+    identifiers: { name: workforce-only-the-emergency-administrator }
+    attrs:
+      name: workforce-only-the-emergency-administrator
+      expression: |
+        user = request.user
+        return (user.username == "admin" and getattr(user, "type", "") == "internal" and not user.is_superuser
+                and not ak_is_group_member(user, name="authentik Admins"))
+  - model: authentik_flows.flow
+    id: wf-emergency-app-flow
+    identifiers: { slug: workforce-emergency-authenticator-app }
+    attrs:
+      name: Workforce emergency administrator authenticator app
+      slug: workforce-emergency-authenticator-app
+      title: Add an authenticator app
+      designation: stage_configuration
+      authentication: require_authenticated
+      layout: stacked
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-emergency-app-flow, policy: !KeyOf wf-only-emergency }
+    attrs: { order: 0, enabled: true }
+  - model: authentik_flows.flowstagebinding
+    identifiers: { target: !KeyOf wf-emergency-app-flow, stage: !KeyOf wf-authenticator-app }
+    attrs: { order: 10 }
+
+  # Review finding 6: wrong codes lock too. The same check again just before the code step (its own deny stage:
+  # a stage is bound to a flow once).
+  - model: authentik_stages_deny.denystage
+    id: wf-too-many-tries-codes
+    identifiers: { name: workforce-too-many-tries-codes }
+    attrs:
+      name: workforce-too-many-tries-codes
+      deny_message: >-
+        That was wrong too many times. Wait 15 minutes, then sign in again, and we’ll send you a new code.
+  - model: authentik_flows.flowstagebinding
+    id: wf-too-many-tries-codes-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-too-many-tries-codes
+    attrs:
+      order: 29
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-too-many-tries-codes-binding, policy: !KeyOf wf-too-many-tries }
+    attrs: { order: 0, enabled: true }
+
+  # Third review of finding 6: wrong codes count too (authentik lowers the score for each one), but the code step
+  # asks again in place, so the lock at 29 isn't seen again. It is checked once more after the code: after too
+  # many wrong tries, even a right code doesn't sign anyone in. (Not a lock on the code step itself: a skipped code
+  # step would sign in without a code.)
+  - model: authentik_stages_deny.denystage
+    id: wf-too-many-tries-after-code
+    identifiers: { name: workforce-too-many-tries-after-code }
+    attrs:
+      name: workforce-too-many-tries-after-code
+      deny_message: >-
+        That was wrong too many times. Wait 15 minutes, then sign in again, and we’ll send you a new code.
+  - model: authentik_flows.flowstagebinding
+    id: wf-too-many-tries-after-code-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-too-many-tries-after-code
+    attrs:
+      order: 31
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-too-many-tries-after-code-binding, policy: !KeyOf wf-too-many-tries }
+    attrs: { order: 0, enabled: true }
+
+  # Second security review (finding 1): authentik's first-run page (initial-setup) sets akadmin's password with no
+  # code. The flow itself is closed, as authentik closes it after its own setup: only a superuser may run it, and
+  # every policy bound to it must pass. (A flow needs ANY of its policies by default, and authentik's own
+  # default-oobe-password-usable passes on a fresh install, so a refusing policy alone did nothing: third review.)
+  # Name, title and designation are restated as authentik's first-run blueprint has them, so this works whichever
+  # of the two runs first. The gateway doesn't route the page and sign-in-hardening.py sets authentik's Setup flag.
+  - model: authentik_flows.flow
+    id: wf-first-run-flow
+    identifiers: { slug: initial-setup }
+    attrs:
+      name: default-oobe-setup
+      title: Welcome to authentik!
+      designation: stage_configuration
+      denied_action: message_continue
+      authentication: require_superuser
+      policy_engine_mode: all
+    state: present
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-no-first-run
+    identifiers: { name: workforce-no-first-run-page }
+    attrs:
+      name: workforce-no-first-run-page
+      expression: |
+        return False
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf wf-first-run-flow
+      policy: !KeyOf wf-no-first-run
+    attrs: { order: 0, enabled: true }

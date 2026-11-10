@@ -211,6 +211,19 @@ build_message() { # build_message <from> <subject> <bodyfile> <rcpt>... -> RFC 5
 crlf() { awk '{ sub(/\r$/, ""); printf "%s\r\n", $0 }'; }
 
 # ------------------------------------------------------------------ sending (curl over SMTP)
+# Workforce ADR-0039 review: alerts go by the sign-in route (SIGNIN_SMTP_*), the same one authentik's sign-in
+# codes use, so they don't depend on the relay staff mail shares with notifications. Unset = SMTP_*, as before.
+use_signin_route() {
+  if [ -n "${SIGNIN_SMTP_HOST:-}" ]; then
+    SMTP_HOST="$SIGNIN_SMTP_HOST"
+    SMTP_PORT="${SIGNIN_SMTP_PORT:-587}"
+    SMTP_USERNAME="${SIGNIN_SMTP_USERNAME:-}"
+    SMTP_PASSWORD="${SIGNIN_SMTP_PASSWORD:-}"
+    SMTP_STARTTLS="${SIGNIN_SMTP_STARTTLS:-false}"
+    SMTP_FROM="${SIGNIN_SMTP_FROM:-${SMTP_FROM:-}}"
+  fi
+}
+
 # send_mail <message file> <envelope from> <rcpt>... — straight to SMTP_HOST:SMTP_PORT.
 # Port 465 = implicit TLS; SMTP_STARTTLS=true = STARTTLS required; SMTP_USERNAME set = AUTH, with
 # the credentials in a 0600 curl config file in a private temp dir (never on curl's command line,
@@ -522,6 +535,7 @@ main() {
   if [ ! -f .env ]; then echo "No .env here — run ./bin/install.sh first." >&2; return 2; fi
   # shellcheck disable=SC1091
   . ./.env
+  use_signin_route
   HW_INVESTIGATE="cd $(pwd) && ./bin/doctor.sh"
 
   # On the host, hand the run to the backup container: the schedule runs there, and only there

@@ -19,6 +19,23 @@
   ansible.builtin.set_fact:
     recovery_email: "{{ admin_recovery_email | default('', true) | trim | lower }}"
 
+# ADR-0039 (Workforce): everyone signs in with a code sent by email, except the emergency administrator, which
+# signs in with its password alone (§5). Said loudly rather than failing the update.
+- name: Two-step sign-in can send codes (SIGNIN_SMTP_HOST or SMTP_HOST)
+  when: (signin_smtp_host | default('', true) | trim | length == 0) and (smtp_host | default('', true) | trim | length == 0)
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: SIGNIN_SMTP_HOST and SMTP_HOST are empty, so the sign-in server can't email sign-in codes and
+      nobody can finish signing in. Set the outgoing mail settings in .env, then run ./bin/update.sh again.
+
+- name: Sign-in codes have their own route (SIGNIN_SMTP_HOST)
+  when: (signin_smtp_host | default('', true) | trim | length == 0) and (smtp_host | default('', true) | trim | length > 0)
+  ansible.builtin.debug:
+    msg: >-
+      NOTE: sign-in codes and server alerts share the outgoing relay (SMTP_HOST) with notifications and staff
+      mail. Set SIGNIN_SMTP_* in .env to a separate relay account to keep sign-in working if that relay is
+      blocked or abused.
+
 - name: Recovery address — checked before anything changes
   when: recovery_email | length > 0
   block:
