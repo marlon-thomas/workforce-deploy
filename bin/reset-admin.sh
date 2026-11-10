@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-[ -f .env ] || { echo "No deploy/.env — run install.sh first."; exit 1; }
+[ -f .env ] || { echo "No .env here. Run ./bin/install.sh first."; exit 1; }
 # shellcheck disable=SC1091
 . ./.env
 

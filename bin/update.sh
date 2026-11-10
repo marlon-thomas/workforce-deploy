@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # update.sh — upgrade to a new pinned version (deployment-spec §B3).
 #
+#   0. the new version's signature            — refused before anything changes (Workforce issue 422)
 #   1. full backup (fail-closed)              — the archive restore.sh can use
-#   2. pull the new images                    — old version keeps serving
+#   2. pull the new image by its signed digest — old version keeps serving
 #   3. stop api + worker                      — no writes from here on
 #   4. pre-update DB dump                     — the exact rollback point
 #   5. pin the new version, run migrate EXPLICITLY (never implicitly via
@@ -16,11 +17,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-[ -f .env ] || { echo "No deploy/.env — run install.sh first."; exit 1; }
+[ -f .env ] || { echo "No .env here. Run ./bin/install.sh first."; exit 1; }
 # shellcheck disable=SC1091
 . ./.env
 # shellcheck source=lib/common.sh
 . ./bin/lib/common.sh
+# shellcheck source=lib/signatures.sh
+. ./bin/lib/signatures.sh
 # The test inbox is for the TEST appliance only (bin/lib/prod-guards.sh): refuse before anything changes.
 # shellcheck source=lib/prod-guards.sh
 . ./bin/lib/prod-guards.sh
@@ -59,6 +62,15 @@ fi
 say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mXX\033[0m %s\n' "$*"; exit 1; }
 PREV="$APP_VERSION"
+
+# The image is trusted for its signature, never its tag (bin/lib/signatures.sh): the tag is resolved to a
+# digest once, the release key must have signed exactly that digest, and only that digest is pulled and
+# run. Checked first, so an image that doesn't verify is refused before anything changes.
+say "Checking that $TARGET is signed with the Workforce release key…"
+TARGET_REF="$(verified_image "${API_IMAGE}" "$TARGET")" \
+  || fail "$TARGET is refused: the reason is just above. Nothing was changed."
+TARGET_DIGEST="${TARGET_REF##*@}"
+echo "     signed: ${TARGET_REF}"
 
 # Secrets added by later releases, created when absent BEFORE anything else: compose refuses to
 # start any service (including a rollback) while a secret file it references is missing.
@@ -114,9 +126,11 @@ fi
 secret_modes   # again: the converge may (re)write secret files; the app must still read them
 mkdir -p actions/requests actions/results   # older installs; bin/server-actions.sh sets their modes
 
-say "Fetching version $TARGET (the current version keeps running meanwhile)…"
-APP_VERSION="$TARGET" docker compose pull api worker migrate \
+say "Fetching version $TARGET by its signed digest (the current version keeps running meanwhile)…"
+docker pull -q "$TARGET_REF" >/dev/null \
   || fail "Could not fetch $TARGET — update aborted (nothing was changed)."
+WRONG_VERSION="$(release_version_problem "$TARGET_REF" "$TARGET")"
+[ -z "$WRONG_VERSION" ] || fail "$WRONG_VERSION Update aborted (nothing was changed)."
 
 say "Stopping the application for the upgrade…"
 docker compose stop api worker
@@ -153,6 +167,8 @@ rollback() {
 say "Pinning version $TARGET…"
 cp -p .env .env.pre-update
 sed -i.bak "s|^APP_VERSION=.*|APP_VERSION=$TARGET|" .env
+# compose.yaml runs ${API_IMAGE}:${APP_VERSION}@${APP_DIGEST}: the digest checked above, whatever the tag names now.
+pin_app_digest "$TARGET_DIGEST" || rollback "Could not write APP_DIGEST into .env"
 
 say "Running the database migration…"
 docker compose run --rm migrate || rollback "The database migration did not complete"

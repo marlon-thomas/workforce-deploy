@@ -16,6 +16,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."   # bundle root
 # shellcheck source=lib/common.sh
 . ./bin/lib/common.sh     # docker_socket / use_docker_socket (one discovery path)
+# shellcheck source=lib/signatures.sh
+. ./bin/lib/signatures.sh # a Workforce image is used only once its signature checks out (Workforce issue 422)
 
 SMOKE=0
 SYSTEM_DOCKER=0
@@ -121,11 +123,19 @@ preflight_network() {
 
 preflight_and_pull() {
   # The application image, with retries and honest diagnosis. Needs .env.
-  say "Fetching the application image (retries automatically on network resets)…"
+  # Trusted for its signature, never its tag (bin/lib/signatures.sh): the tag is resolved to a digest
+  # once, the release key must have signed exactly that digest, and only the digest is pulled and run.
+  say "Checking that ${APP_VERSION} is signed with the Workforce release key…"
+  APP_REF="$(verified_image "${API_IMAGE}" "${APP_VERSION}")" \
+    || fail "${APP_VERSION} is refused: the reason is just above. No Workforce image was pulled or started.
+     If the registry refused the login, the stored GitHub token has expired or lacks read:packages:
+     docker login ghcr.io -u <github-user>   (fresh read:packages token), then re-run me."
+  echo "     signed: ${APP_REF}"
+  say "Fetching the application image by that digest (retries automatically on network resets)…"
   PULL_ERR=""
   ATTEMPT=1
   while true; do
-    PULL_ERR="$(docker pull "${API_IMAGE}:${APP_VERSION}" 2>&1 >/dev/null | tail -2)"
+    PULL_ERR="$(docker pull "${APP_REF}" 2>&1 >/dev/null | tail -2)"
     if [ -z "$PULL_ERR" ]; then break; fi
     if [ "$ATTEMPT" -ge 4 ]; then break; fi
     warn "Pull attempt $ATTEMPT failed — waiting 15s and resuming (cached layers are kept)…"
@@ -135,7 +145,7 @@ preflight_and_pull() {
 
   if [ -n "$PULL_ERR" ]; then
     echo "     last error: $PULL_ERR"
-    if docker manifest inspect "${API_IMAGE}:${APP_VERSION}" >/dev/null 2>&1; then
+    if docker manifest inspect "${APP_REF}" >/dev/null 2>&1; then
       case "$PULL_ERR" in
         *"connection reset"*|*timeout*|*EOF*)
           warn "Credentials are fine — the network path to the registry resets
@@ -151,15 +161,21 @@ preflight_and_pull() {
      then re-run me."
           ;;
         *)
-          fail "Could not pull ${API_IMAGE}:${APP_VERSION} — see the last error above."
+          fail "Could not pull ${APP_REF} — see the last error above."
           ;;
       esac
     else
-      fail "The image ${API_IMAGE}:${APP_VERSION} does not exist (or the token cannot
+      fail "The image ${APP_REF} can't be fetched (or the token cannot
      see it). If the token is fresh and scoped read:packages, check the image name
      in .env."
     fi
   fi
+  WRONG_VERSION="$(release_version_problem "${APP_REF}" "${APP_VERSION}")"
+  [ -z "$WRONG_VERSION" ] || fail "$WRONG_VERSION No Workforce image was started."
+  # compose.yaml runs ${API_IMAGE}:${APP_VERSION}@${APP_DIGEST}: these bytes, whatever the tag names later.
+  # Into .env now, and passed to env.j2 below so the playbook writes the same.
+  APP_DIGEST="${APP_REF##*@}"
+  pin_app_digest "${APP_DIGEST}" || fail "Could not write APP_DIGEST into .env."
 }
 
 run_ansible_site() {
@@ -325,6 +341,7 @@ INV
   WFV_ak_admin_password="${ADMIN_PASSWORD}" \
   WFV_acme_email="${ACME_EMAIL}" \
   WFV_app_version="${APP_VERSION:-0.2.9}" \
+  WFV_app_digest="${APP_DIGEST:-}" \
   WFV_gateway_image="${GW_IMAGE}" \
   WFV_gateway_caddyfile="${GW_CADDYFILE}" \
   WFV_duckdns_api_token="${DUCKDNS_API_TOKEN:-}" \
@@ -590,9 +607,6 @@ PROF
   # Content = the api image's own default cacerts (identical to what the JVM
   # would use anyway; exists so the mount is a real file).
   if [ -d secrets/api-truststore.jks ]; then rm -rf secrets/api-truststore.jks; fi
-  # Root phase: API_IMAGE/APP_VERSION are not defined yet — use the
-  # literal published reference (same image the .env will pin).
-  SUITE_IMAGE="ghcr.io/marlon-thomas/workforce-suite:${APP_VERSION:-0.2.9}"
   # Socket via the shared helper: rootless (just set up above) or, under
   # --system-docker, /var/run/docker.sock — the old hard-coded runtime-dir
   # path pointed at a daemon that does not exist in system-docker mode.
@@ -600,9 +614,27 @@ PROF
   DSU="sudo -u $SERVICE_USER env HOME=/home/$SERVICE_USER \
     XDG_RUNTIME_DIR=/run/user/$(id -u $SERVICE_USER) \
     DOCKER_HOST=unix://${SU_SOCK}"
+  # Root phase: API_IMAGE/APP_VERSION are not loaded yet — use the literal
+  # published repository and the version the service phase will pin (.env on a
+  # resume, else the environment file, else the installer's default). Like every
+  # Workforce image, used only by the digest the release key signed (Workforce
+  # issue 422), checked and pulled as the service user, whose login it needs.
+  ROOT_APP_VERSION="${APP_VERSION:-}"
+  if [ -z "$ROOT_APP_VERSION" ] && [ -f .env ]; then
+    ROOT_APP_VERSION="$(sed -n 's/^APP_VERSION=//p' .env | tail -1)"
+  fi
+  if [ -z "$ROOT_APP_VERSION" ] && [ -n "${ENV_NAME_ARG}" ] && [ -f "environments/${ENV_NAME_ARG}.env" ]; then
+    ROOT_APP_VERSION="$(sed -n 's/^APP_VERSION=//p' "environments/${ENV_NAME_ARG}.env" | tail -1)"
+  fi
+  ROOT_APP_VERSION="${ROOT_APP_VERSION:-0.2.9}"
+  SUITE_IMAGE=""
+  if [ ! -f secrets/api-truststore.jks ] || [ -s secrets/tls/ca.crt ]; then
+    SUITE_IMAGE="$($DSU bash ./bin/verify-image.sh "${ROOT_APP_VERSION}" ghcr.io/marlon-thomas/workforce-suite)" \
+      || fail "${ROOT_APP_VERSION} is refused: the reason is just above. No Workforce image was used.
+     Resume after fixing: ${RESUME_CMD}"
+  fi
   if [ ! -f secrets/api-truststore.jks ]; then
     echo "Creating the JVM truststore (secrets/api-truststore.jks)…"
-    $DSU docker pull "${SUITE_IMAGE}" >/dev/null 2>&1 || true
     CID=$($DSU docker create --entrypoint sh "${SUITE_IMAGE}" 2>/dev/null || true)
     if [ -n "${CID}" ]; then
       $DSU docker cp "${CID}:/opt/java/openjdk/lib/security/cacerts" \

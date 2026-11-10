@@ -79,7 +79,7 @@ rule
 
 # --- configuration present?
 if [ ! -f .env ]; then
-  row "configuration" fail "deploy/.env missing — installer has not run here"
+  row "configuration" fail ".env missing — the installer has not run here (./bin/install.sh)"
   finish
 fi
 # shellcheck disable=SC1091
@@ -159,6 +159,13 @@ else
     else
       row "running version" warn "api still booting (sign-in OK, discovery ${DISC}) — re-run me in a minute"
     fi
+fi
+# Workforce issue 422: the suite image runs by the digest the release key signed (APP_DIGEST). An install
+# from before signatures were checked runs it by its tag; the next ./bin/update.sh <version> checks it.
+if [[ "${APP_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  row "release signature" ok "runs the signed digest ${APP_DIGEST:7:12}…"
+else
+  row "release signature" warn "runs ${APP_VERSION} by its tag, unchecked (installed before signatures were checked): ./bin/update.sh <next version> checks the next one and runs it by its signed digest"
 fi
 
 # --- DNS + TLS

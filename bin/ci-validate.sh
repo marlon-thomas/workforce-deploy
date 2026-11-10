@@ -12,7 +12,9 @@
 #      into .env by env.j2, and every value env.j2 writes is passed in by
 #      install.sh (Workforce issue 376)
 #   5. shellcheck -S error, when shellcheck is installed
-#   6. the hermetic shell self-tests in bin/tests/ (no Docker, no network)
+#   6. the release key: cosign.pub, once committed, is one public key, and no private key is
+#      tracked anywhere (Workforce issues 353 and 422)
+#   7. the hermetic shell self-tests in bin/tests/ (no Docker, no network)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -78,6 +80,22 @@ ENV
   else
     bad "docreader isolation or api tmpfs/init"
   fi
+  # Workforce issue 422: with APP_DIGEST in .env (install.sh and update.sh write it once the release key's
+  # signature checks out), every service of the suite image runs that digest.
+  { cat "$TMP/ci.env"; echo "APP_DIGEST=sha256:$(printf '%064d' 0 | tr 0 a)"; } > "$TMP/ci-digest.env"
+  if docker compose --env-file "$TMP/ci-digest.env" -f compose.yaml --profile '*' config --format json > "$TMP/digest.json" \
+     && python3 -I - "$TMP/digest.json" <<'PY'; then echo "ok   the suite image runs by APP_DIGEST"; else bad "the suite image doesn't run by APP_DIGEST"; fi
+import json
+import sys
+
+want = "ghcr.io/ci/placeholder:0.0.0@sha256:" + "a" * 64
+services = json.load(open(sys.argv[1], encoding="utf-8"))["services"]
+suite = {name: s.get("image") for name, s in services.items() if str(s.get("image", "")).startswith("ghcr.io/ci/placeholder")}
+wrong = {name: image for name, image in suite.items() if image != want}
+for name, image in sorted(wrong.items()):
+    print(f"FAIL {name} runs {image}, not {want}")
+sys.exit(1 if wrong or not suite else 0)
+PY
 else
   bad "docker compose is not available — the compose check cannot be skipped"
 fi
@@ -121,6 +139,22 @@ if command -v shellcheck >/dev/null 2>&1; then
   shellcheck -S error -x bin/*.sh bin/lib/*.sh bin/tests/*.sh || bad "shellcheck"
 else
   echo "== shellcheck not installed — skipped (CI runners have it)"
+fi
+
+echo "== the release key"
+# install.sh and update.sh use a Workforce image only by the digest the key behind cosign.pub signed
+# (bin/lib/signatures.sh). Until the owner makes the key (Workforce issue 353) there is no cosign.pub,
+# and the scripts refuse every image; that is expected here, not a failure.
+if [ -e cosign.pub ]; then
+  # shellcheck source=lib/signatures.sh
+  KEY_PROBLEM="$(. bin/lib/signatures.sh && release_key_problem)"
+  if [ -n "$KEY_PROBLEM" ]; then bad "cosign.pub: $KEY_PROBLEM"; else echo "ok   cosign.pub is one public key"; fi
+else
+  echo "ok   no cosign.pub yet (Workforce issue 353): every Workforce image is refused until it is committed"
+fi
+if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  PRIVATE_KEYS="$(git grep -lE -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----' -- . 2>/dev/null | grep -v '^bin/ci-validate.sh$' || true)"
+  if [ -n "$PRIVATE_KEYS" ]; then bad "a private key is tracked: $PRIVATE_KEYS"; else echo "ok   no private key tracked"; fi
 fi
 
 echo "== test-only things stay out of production"

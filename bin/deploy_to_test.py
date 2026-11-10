@@ -22,6 +22,10 @@ Incus is the ONLY supported test platform. The devbox is a VPS without
           (deploylib.converge — the SAME code deploy_to_prod.py runs; only the
           transport differs: `incus exec … sudo -u workforce_app_sa -H bash -lc`)
 
+In STEPS 4 and 5 the guest's install.sh / update.sh use the Workforce image only by the digest
+the release key signed (cosign.pub, bin/lib/signatures.sh; Workforce issue 422) and refuse one
+that doesn't verify. STEP 0 stops first when this bundle has no cosign.pub.
+
 Usage (on the devbox, from a clone of this repo):
   python3 bin/deploy_to_test.py                 # full journey (idempotent)
   python3 bin/deploy_to_test.py --check-only    # STEP 0 only
@@ -267,6 +271,17 @@ def step0(attempts=0, check_only=False):
     if OS != "Linux":
         fail("the TEST appliance runs in Incus on the devbox — run this script "
              "there (it is Linux-only).")
+
+    # Workforce issue 422: the guest's install.sh / update.sh use an image only by the digest the
+    # release key signed, checked against the bundle's cosign.pub. Without the key every deploy would
+    # be refused there, so say so before anything is touched.
+    key_problem = deploylib.release_key_problem(os.path.join(HERE, ".."))
+    if key_problem and check_only:
+        MISSING.append(key_problem)
+    elif key_problem:
+        fail(key_problem)
+    else:
+        ok("cosign.pub present: the guest checks each image's signature before using it")
 
     if not have("incus"):
         MISSING.append("incus CLI — the devbox runs Incus (zabbly repo); this "

@@ -151,6 +151,12 @@ def step0(inv, target, ref):
     if not target:
         fail("environments/prod.env has no APP_VERSION — pin a version first")
     ok(f"prod pin: {target}")
+    # Workforce issue 422: the box uses an image only by the digest the release key signed, checked
+    # against the bundle's cosign.pub, and refuses every image without it. Stop here first.
+    key_problem = deploylib.release_key_problem(ROOT)
+    if key_problem:
+        fail(key_problem)
+    ok("cosign.pub present: the box checks the image's signature before using it")
     if not ref:
         fail("environments/prod.env has no DEPLOY_REF — production installs only from a "
              "release tag of this repo (RUNBOOK.md, 'Cutting a production release')")

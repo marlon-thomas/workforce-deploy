@@ -190,8 +190,11 @@ services:
     logging: *default-logging
 
   # One-shot database migrations; the API does NOT run Flyway (§10.2).
+  # The suite image (migrate, api, docreader, worker) runs by APP_DIGEST, the digest the release key signed,
+  # which install.sh and update.sh write into .env once they've checked it (bin/lib/signatures.sh, Workforce
+  # issue 422). With a digest, Docker ignores the tag: it is there for people reading `docker ps`.
   migrate:
-    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
+    image: ${API_IMAGE:? API_IMAGE is required in .env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}${APP_DIGEST:+@}${APP_DIGEST:-}
     restart: "no"
     # Starts as root only for the image's entrypoint, which copies the secrets for the app user and then becomes that
     # user (999) with setpriv before java starts: the JVM holds no capability. The five that takes, and no more (each
@@ -478,7 +481,7 @@ services:
     # Pulled by default (deployment-spec §B1: orgs run published images, pinned by
     # APP_VERSION). Building from source is a dev override:
     #   docker compose -f deploy/compose.yaml build api worker
-    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
+    image: ${API_IMAGE:? API_IMAGE is required in .env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}${APP_DIGEST:+@}${APP_DIGEST:-}
     restart: unless-stopped
     read_only: true
     # A size, so what is written to /tmp can't take the whole memory limit (Workforce issue 333). /tmp holds uploads
@@ -712,7 +715,7 @@ services:
   # gets nothing: no network, no secrets, no other volumes, a read-only file system and its own memory, processor and
   # process limits.
   docreader:
-    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
+    image: ${API_IMAGE:? API_IMAGE is required in .env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}${APP_DIGEST:+@}${APP_DIGEST:-}
     restart: unless-stopped
     network_mode: none
     read_only: true
@@ -770,7 +773,7 @@ services:
       start_period: 20s
 
   worker:
-    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
+    image: ${API_IMAGE:? API_IMAGE is required in .env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}${APP_DIGEST:+@}${APP_DIGEST:-}
     restart: unless-stopped
     read_only: true
     # A size, as on the api: the copied secrets, Tomcat's work folder and the JVM's own files (it takes no uploads).

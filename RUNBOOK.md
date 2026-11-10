@@ -67,24 +67,10 @@ The installer bootstraps the whole machine by itself:
 That's the whole deployment. The remaining manual steps are DNS (step 2) and the
 cloud firewall (step 1) — layers outside the machine the installer cannot touch.
 
-## 5. Log in to the image registry (one-time)
+### The six questions
 
-The images are private while licensing is in development. Create a **classic PAT with
-`read:packages`** on GitHub (Settings → Developer settings), then:
-
-```bash
-docker login ghcr.io -u marlon-thomas -p <YOUR_TOKEN>
-```
-
-## 5b. Get the code and run the wizard
-
-```bash
-git clone https://github.com/marlon-thomas/workforce_suite.git
-cd workforce_suite/deploy
-./bin/install.sh
-```
-
-The wizard asks **six questions**:
+You need no separate `docker login`: the installer asks for the token itself (item 3 above) and
+logs the service user in. The questions:
 
 1. Your organisation's **domain** → `your-domain.co.uk` — the installer derives
    `workforce.<domain>` (staff) and `auth.<domain>` (sign-in), shows both, and
@@ -105,15 +91,34 @@ The wizard asks **six questions**:
    optionally an outside uptime check's ping URL (§7c). When both a relay and an alert address
    are set, the installer sends a test alert at the end.
 
-Then it opens the firewall, generates all secrets, pulls the published images
-(`ghcr.io/marlon-thomas/workforce-suite:0.2.0` — the registry login from step 5
-authorises the pull), starts the 13-service stack,
-connects the sign-in server, and finishes with a green/red health table.
+Then it opens the firewall, generates all secrets, checks that the release is signed with the
+Workforce release key and pulls the application image by that signed digest (see "Release
+signatures" below; the token from item 3 authorises the pull), starts the stack, connects the
+sign-in server, and finishes with a green/red health table.
+
+### Release signatures
+
+A registry tag can be moved by anyone who can push to the package, so the installer and
+`./bin/update.sh` never trust one. For the version asked for they resolve the tag to a digest,
+check with `cosign verify --key cosign.pub --insecure-ignore-tlog=true` that the release key signed
+exactly that digest, pull that digest, and check that the image says it is that version. `.env`
+then names the digest (`APP_DIGEST`), and that is what runs. An image that doesn't verify is
+refused, and nothing is changed. `./bin/verify-image.sh <version>` makes the same check by hand.
+
+- `cosign.pub`, at the top of this bundle, is the release key's public half: a committed copy of
+  the one in the Workforce source repository, carried here by a reviewed change. It is never
+  downloaded while installing or updating. **Until the release key exists there is no
+  `cosign.pub`, and every Workforce image is refused** ("No release key yet").
+- cosign runs from its official image, pinned by digest (`bin/lib/signatures.sh`); nothing is
+  installed on the server. It talks to the image registry only: no transparency log or other
+  public service.
+- `./bin/doctor.sh` warns ("release signature") on a server installed before this check, which
+  still runs its version by its tag. The next `./bin/update.sh <version>` checks it.
 
 ## 6. First sign-in
 
 - App: `https://workforce.<your-domain>` → the onboarding wizard runs
-- Sign-in server: `https://auth.<your-domain>` (user `admin`, the password from step 5)
+- Sign-in server: `https://auth.<your-domain>` (user `admin`, the password from question 3 above)
 - `admin` is the **emergency administrator** (setup and recovery only — no staff record, no
   mailbox). Once the organisation exists, set up your own account in Setup → Administrator
   accounts and work from that. Give the emergency account a recovery email outside this server:

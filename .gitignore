@@ -25,3 +25,7 @@ inventories/local/
 
 # Rendered by the identity converge (holds the OIDC client secret).
 blueprints/workforce-app.yaml
+
+# Signing keys never belong here: only the release key's public half, cosign.pub, is committed
+# (Workforce issues 353 and 422). The private half stays in the source repository's release environment.
+*.key

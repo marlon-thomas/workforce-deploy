@@ -51,6 +51,28 @@ GUARDED_PULL = (
 REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
+def release_key_problem(root):
+    """Why this bundle can't check a Workforce image's signature, in words; None when it can.
+
+    The box's own install.sh and update.sh check every image against the bundle's cosign.pub and
+    refuse one that doesn't verify (bin/lib/signatures.sh, Workforce issue 422), whatever this says.
+    This is the same test of the key file, made here first, so a deploy that can only be refused
+    stops before it touches anything."""
+    path = os.path.join(root, "cosign.pub")
+    if not os.path.exists(path):
+        return ("no release key yet: this bundle has no cosign.pub, so the box would refuse every "
+                "Workforce image. See Workforce issue 353.")
+    try:
+        with open(path, encoding="ascii") as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError):
+        return "cosign.pub can't be read, so the box would refuse every Workforce image"
+    if ("PRIVATE" in text or text.count("-----BEGIN PUBLIC KEY-----") != 1
+            or text.count("-----END PUBLIC KEY-----") != 1):
+        return "cosign.pub is not one public key, so the box would refuse every Workforce image"
+    return None
+
+
 def bundle_update(ref=None):
     """Shell that updates the box's bundle checkout: with no ref, GUARDED_PULL (the test
     loop follows main); with a release tag, the same guard around a fetch + detached
