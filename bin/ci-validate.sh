@@ -102,8 +102,12 @@ written = set(re.findall(r"(?m)^([A-Z_][A-Z0-9_]*)=", env_j2))
 inputs = set(re.findall(r"\{\{\s*([a-z_][a-z0-9_]*)", env_j2))
 passed = set(re.findall(r"\bWFV_([a-z0-9_]+)=", install))
 
+# Written into .env by a script of their own, not by env.j2: bin/test-inbox.sh sets these on the TEST
+# appliance only, and deploy_to_test.py runs it on every deploy (prod-guards keep them out of production).
+outside_env_j2 = {"TEST_INBOX_HOSTNAME", "TEST_INBOX_HASH"}
+
 failed = False
-for name in sorted(read - written):
+for name in sorted(read - written - outside_env_j2):
     print(f"FAIL compose.yaml reads ${{{name}}}, which env.j2 never writes into .env")
     failed = True
 for name in sorted(inputs - passed):

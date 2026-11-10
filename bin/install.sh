@@ -355,6 +355,7 @@ INV
   WFV_ai_allowed_providers="${AI_ALLOWED_PROVIDERS:-}" \
   WFV_ai_trusted_endpoints="${AI_TRUSTED_ENDPOINTS:-}" \
   WFV_care_available="${WORKFORCE_CARE_AVAILABLE:-}" \
+  WFV_hosted="${WORKFORCE_HOSTED:-false}" \
   WFV_server_health_visible="${WORKFORCE_SERVER_HEALTH_VISIBLE:-true}" \
   WFV_server_actions_visible="${WORKFORCE_SERVER_ACTIONS:-true}" \
   WFV_server_actions="${SERVER_ACTIONS:-on}" \
