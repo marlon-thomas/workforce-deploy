@@ -455,7 +455,15 @@ Not yet scheduled — run it at least monthly (nightly once automated).
 
 - ~~Rootless Docker~~ — **implemented**: the daemon runs as the `workforce_app_sa` user by default (no root-equivalent daemon). `--system-docker` reverts for hosts without userns.
 - The installer creates a user-level deployment; nothing it installs runs as root
-  (containers run as `app`/`authentik`/`postgres` users with read-only root filesystems)
+- Least privilege per service (Workforce issue 53; `compose.yaml` says why beside each): every service has its own
+  unprivileged user, a read-only root file system with sized tmpfs folders, every capability dropped and only the
+  ones it can't start without added back, `no-new-privileges`, only the networks it talks on (Gotenberg on an
+  internal network, ClamAV on its own), and memory and process limits. Started as root: the api, worker and migrate
+  (their entrypoint becomes the app user before java starts), backup (it holds the docker socket) and the
+  `volume-owners` one-shot. Not read-only: init, backup and webmail. `bin/check-hardening.py` fails CI if any of
+  this is lost, and on an image not pinned by digest; `bin/digest-check.py` checks every pin daily.
+- Seccomp and AppArmor: the TEST appliance's rootless Docker (inside an unprivileged Incus container) applies
+  neither, so a problem either would cause can't show there (Workforce issue 414).
 - Off-site backups: provide an S3/rsync target at install time, and keep the private key off the server
 - License enforcement arrives with deployment-spec backlog #5
 

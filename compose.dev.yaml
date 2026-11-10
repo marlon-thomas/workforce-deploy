@@ -21,6 +21,8 @@ services:
 
   gotenberg:
     ports: ["3100:3000"]
+    # Its own network is internal, and Docker publishes no port from one: data as well, for this port.
+    networks: [data]
 
   authentik-postgres:
     ports: ["5433:5432"]

@@ -16,10 +16,62 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "3"
 
+# Least privilege (Workforce ADR-0032 §5, issue 53), the same for every service unless its own comment says why not:
+# a user of its own, never root; a read-only root file system, with sized tmpfs folders for what it must write; every
+# Linux capability dropped, and only those a service can't start without added back, each with its reason;
+# no-new-privileges, so nothing in it can gain more (no setuid program, no file capability); only the networks it talks
+# on; memory and process limits. bin/check-hardening.py (run by bin/ci-validate.sh) fails on a service that loses any
+# of this, and on an image not pinned by digest. Each was started like this on the test appliance's rootless Docker.
 services:
+  # One-shot: gives the volumes of the services that run as a user of their own to that user. Docker creates a new
+  # volume as root, and older releases (or a restore) wrote some as root; an unprivileged service can't fix that
+  # itself. It runs before them at every start, and changes only what isn't right yet.
+  volume-owners:
+    image: alpine:3.20.10@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+    restart: "no"
+    network_mode: none
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    # CHOWN to give a file its owner; DAC_READ_SEARCH to look into the folders a service keeps to itself (caddy's are
+    # 0700). Root here is the service account on the host under rootless Docker.
+    cap_add: [CHOWN, DAC_READ_SEARCH]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - caddy_data:/v/caddy_data
+      - caddy_config:/v/caddy_config
+      - minio_data:/v/minio_data
+      # Made here even without COMPOSE_PROFILES=mail or staffmail: empty, and unused until then.
+      - mailpit_data:/v/mailpit_data
+      - webmail_data:/v/webmail_data
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        own() { find "/v/$$1" \( ! -user "$$2" -o ! -group "$$2" \) -exec chown -h "$$2:$$2" {} +; }
+        own caddy_data 10100
+        own caddy_config 10100
+        own mailpit_data 10101
+        own minio_data 10102
+        own webmail_data 33
+    deploy:
+      resources:
+        limits: { memory: 64m, pids: 16 }
+    logging: *default-logging
+
   gateway:
     image: ${GATEWAY_IMAGE:-caddy:2.8.4@sha256:226d1f059b75399fe19182893c7184591c07b97afc8dfcf44eeb80c9a77a530f}
     restart: unless-stopped
+    user: "10100:10100"
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    cap_drop: [ALL]
+    # Never held: stock caddy's binary carries this file capability, and Linux refuses to start a program whose file
+    # capability the container can't grant ("operation not permitted"). Ports 80 and 443 open without it (Docker lets
+    # any user open low ports inside a container), and no-new-privileges keeps caddy from gaining it.
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
     ports:
       - "80:80"
       - "443:443"
@@ -44,9 +96,14 @@ services:
       # HTTP-01/DNS-01 and simply unused there; install.sh always creates it so
       # this read-only bind never trips Docker's "create missing dir as root".
       - ./secrets/tls:/etc/caddy/tls:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      # nocopy: Docker would otherwise copy the image's root-owned folders into a new, empty volume and hand the volume
+      # back to root, undoing volume-owners.
+      - { type: volume, source: caddy_data, target: /data, volume: { nocopy: true } }
+      - { type: volume, source: caddy_config, target: /config, volume: { nocopy: true } }
     networks: [front, back]
+    deploy:
+      resources:
+        limits: { memory: 256m, pids: 256 }
     logging: *default-logging
     stop_grace_period: 30s
     healthcheck:
@@ -55,6 +112,8 @@ services:
       timeout: 5s
       retries: 3
     depends_on:
+      volume-owners:
+        condition: service_completed_successfully
       api:
         # STARTED, not healthy: api needs the gateway (and sign-in server) reachable
         # for its OIDC discovery fetch, so the gateway must come up first and serve
@@ -71,10 +130,20 @@ services:
   init:
     image: ghcr.io/marlon-thomas/minio-mc@sha256:00e5a146ff62f3c967ea45ca9de389c73f555c72eaba8711936d25cb6a80edb3  # tag: RELEASE.2024-11-17T19-35-25Z — rebuilt from pinned source (ADR-0015). Digest-only refs, verified against registry by build digest-check
     restart: "no"
+    user: "10103:10103"
+    # Not read-only: backups and restores stage the whole evidence bucket in this container's /tmp
+    # (bin/lib/common.sh evidence_export and evidence_import), which is disk here; a tmpfs would hold it in memory.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     networks: [data]
     environment:
       TZ: Europe/London
       MINIO_BUCKET: ${MINIO_BUCKET:-workforce-evidence}
+      # mc keeps its settings in a home folder, which this user hasn't got.
+      MC_CONFIG_DIR: /tmp/.mc
+    deploy:
+      resources:
+        limits: { memory: 512m, pids: 64 }
     entrypoint:
       - /bin/sh
       - -c
@@ -94,6 +163,22 @@ services:
   migrate:
     image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
     restart: "no"
+    # Starts as root only for the image's entrypoint, which copies the secrets for the app user and then becomes that
+    # user (999) with setpriv before java starts: the JVM holds no capability. The five that takes, and no more (each
+    # found missing on the test appliance): CHOWN, FOWNER and DAC_READ_SEARCH to hand the copies to the app user and
+    # still reach them in its folder, SETUID and SETGID to become it. Once every box runs an image whose entrypoint
+    # also starts as the app user (Workforce issue 53), this becomes user "999:999" with none.
+    user: "0:0"
+    read_only: true
+    # /app/data: the same Spring context boots here as in the api, and its branding service makes its folder at start.
+    # A throw-away one: migrate keeps nothing.
+    tmpfs: ["/tmp:size=64m", "/app/data:size=16m,uid=999,gid=999,mode=0755"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_READ_SEARCH, FOWNER, SETUID, SETGID]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 1g, pids: 256 }
     networks: [data]
     environment:
       TZ: Europe/London
@@ -143,6 +228,13 @@ services:
   discovery-gate:
     image: curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b
     restart: "no"
+    user: "100:101"   # the image's curl_user
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 64m, pids: 32 }
     networks: [back]
     entrypoint: >
       sh -c 'for i in $$(seq 1 90); do
@@ -171,7 +263,19 @@ services:
       MP_MAX_MESSAGES: "5000"
       MP_DATABASE: /data/mailpit.db
     volumes:
-      - mailpit_data:/data
+      # nocopy, as on the gateway: volume-owners gives it to this user.
+      - { type: volume, source: mailpit_data, target: /data, volume: { nocopy: true } }
+    user: "10101:10101"
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 256m, pids: 64 }
+    depends_on:
+      volume-owners:
+        condition: service_completed_successfully
 
   # ---------- Staff email (COMPOSE_PROFILES=staffmail; mail-calendar-spec §11, ADR-0022) ----------
   # Stalwart (AGPL-3.0, unmodified) holds the mailboxes; Workforce configures it through its
@@ -185,6 +289,14 @@ services:
     image: postgres:16.4@sha256:e62fbf9d3e2b49816a32c400ed2dba83e3b361e6833e624024309c35d334b412
     restart: "no"
     profiles: ["staffmail"]
+    user: "999:999"   # the image's postgres user: a client only here
+    read_only: true
+    tmpfs: ["/tmp:size=8m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 64m, pids: 32 }
     networks: [data]
     environment:
       TZ: Europe/London
@@ -215,9 +327,20 @@ services:
   mail:
     image: stalwartlabs/stalwart@sha256:b9da4df8b4efc06bc926dd6e990bdeb0ad7b9261a7c3893d74b0461a00bb389b  # tag: v1.0.1
     restart: unless-stopped
-    # Secrets are bind mounts readable only by the container's root (compose ignores `mode` outside
-    # Swarm); under the rootless daemon that root is the unprivileged service user on the host.
-    user: "0:0"
+    # The image's own user. It was root while the secret files were readable by root alone; secret_modes
+    # (bin/lib/common.sh) has made them readable to the containers' users since 1 November 2026.
+    user: "2000:2000"
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    cap_drop: [ALL]
+    # Never held, as on the gateway: the image's binary carries this file capability, and Linux won't start it
+    # ("operation not permitted") where the container can't grant it. Ports 25, 465 and 993 open without it (Docker lets
+    # any user open low ports inside a container), and no-new-privileges keeps stalwart from gaining it.
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 512m, pids: 256 }
     profiles: ["staffmail"]
     networks: [data]
     ports:
@@ -258,6 +381,16 @@ services:
     image: roundcube/roundcubemail@sha256:a6ef4cff166b5e2056238bb400ca84210bd796c83d859495ab67e60101ff2c55  # tag: 1.7.5-apache
     restart: unless-stopped
     profiles: ["staffmail"]
+    # Apache runs as www-data from the start, not as root that then switches to it: port 80 opens without a capability
+    # (Docker lets any user open low ports inside a container), and the image's web root is www-data's.
+    # Not read-only: at every start the image copies Roundcube into its web root and writes its configuration there,
+    # and our plugin goes in beside it (the entrypoint below).
+    user: "33:33"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 512m, pids: 256 }
     networks: [back, data]
     environment:
       TZ: Europe/London
@@ -272,24 +405,19 @@ services:
       # subscriptions_option (bundled) lists shared mailboxes' folders without subscribing;
       # workforce_identities (ours, webmail/plugins) offers their addresses in the From menu.
       ROUNDCUBEMAIL_PLUGINS: archive,zipdownload,markasjunk,subscriptions_option,workforce_identities
-      ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE: 25M
-    # Its entrypoint (root) reads the OAuth client secret natively; the session key is read again
-    # by Apache's user at every request, which can't open a secret file under the rootless daemon,
-    # so it is handed over as the environment variable the image also supports.
-    # Our plugin goes into the image's Roundcube source, which the image copies into a new
-    # container's web root (and into an existing one on restart, here). Mounting it straight into
-    # the web root makes the image find a non-empty web root and stall each new container.
+      # The 25 MB attachment size is webmail/php/uploads.ini (mounted below): the image writes its own setting for it
+      # only as root.
+    # Its entrypoint reads the OAuth client secret natively; the session key is handed over as the
+    # environment variable the image also supports.
+    # Our plugin goes into the web root after the image has filled it, by the image's own post-setup
+    # hook (webmail/entrypoint-tasks). Mounting it straight into the web root makes the image find a
+    # non-empty web root and stall each new container; mounted into the image's source, the image's
+    # copy leaves it out; and the source is root's, which www-data can't copy into.
     entrypoint:
       - /bin/sh
       - -c
       - |
         export ROUNDCUBEMAIL_DES_KEY="$$(cat /run/secrets/webmail_des_key)"
-        for root in /usr/src/roundcubemail /var/www/html; do
-          if [ -d "$$root/plugins" ]; then
-            rm -rf "$$root/plugins/workforce_identities"
-            cp -R /opt/workforce/plugins/workforce_identities "$$root/plugins/"
-          fi
-        done
         exec /docker-entrypoint.sh apache2-foreground
     secrets:
       - source: webmail_oidc_secret
@@ -301,14 +429,19 @@ services:
       - source: mail_lookup_key
         mode: 0444
     volumes:
-      - webmail_data:/var/roundcube/db
+      # nocopy, as on the gateway: volume-owners gives it to www-data.
+      - { type: volume, source: webmail_data, target: /var/roundcube/db, volume: { nocopy: true } }
       - ./webmail:/var/roundcube/config:ro
       - ./webmail/plugins/workforce_identities:/opt/workforce/plugins/workforce_identities:ro
+      - ./webmail/entrypoint-tasks:/entrypoint-tasks:ro
+      - ./webmail/php/uploads.ini:/usr/local/etc/php/conf.d/zz-workforce-uploads.ini:ro
     logging: *default-logging
     stop_grace_period: 20s
     depends_on:
       mail:
         condition: service_started
+      volume-owners:
+        condition: service_completed_successfully
 
   api:
     # Pulled by default (deployment-spec §B1: orgs run published images, pinned by
@@ -337,7 +470,7 @@ services:
       # write access to .env or secrets/. The api only, as with the status folder.
       - ./actions/requests:/run/workforce-actions/requests
       - ./actions/results:/run/workforce-actions/results:ro
-    networks: [back, data]
+    networks: [back, data, render, scan]   # render: gotenberg; scan: clamav (each on a network of its own)
     environment:
       TZ: Europe/London
       SPRING_PROFILES_ACTIVE: prod
@@ -471,9 +604,15 @@ services:
       - source: push_vapid_private
         target: workforce.push.private-key
         mode: 0444
+    # As migrate: root only for the entrypoint, which copies the secrets for the app user and becomes it (999) before
+    # java starts, with the same five capabilities, for the same reasons; the JVM holds none.
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_READ_SEARCH, FOWNER, SETUID, SETGID]
+    security_opt: ["no-new-privileges:true"]
     deploy:
       resources:
-        limits: { memory: 1g }
+        limits: { memory: 1g, pids: 1024 }
         reservations: { memory: 512m }
     logging: *default-logging
     stop_grace_period: 45s
@@ -507,12 +646,13 @@ services:
     image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
     restart: unless-stopped
     read_only: true
-    tmpfs: [/tmp]
+    # A size, as on the api: the copied secrets, Tomcat's work folder and the JVM's own files (it takes no uploads).
+    tmpfs: ["/tmp:size=128m"]
     volumes:
       # Same image as api: branding init writes its data dir on startup
       - app_data:/app/data
       - ./secrets/api-truststore.jks:/app/api-truststore.jks:ro
-    networks: [data]
+    networks: [data, render, scan]   # as the api
     # Same immutable image, different command (spec §10.1). Keeps the management
     # endpoint for health checks; gateway never routes to it.
     environment:
@@ -602,9 +742,14 @@ services:
       - source: push_vapid_private
         target: workforce.push.private-key
         mode: 0444
+    # As the api (same image and entrypoint): root only until java starts as the app user, which holds no capability.
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_READ_SEARCH, FOWNER, SETUID, SETGID]
+    security_opt: ["no-new-privileges:true"]
     deploy:
       resources:
-        limits: { memory: 768m }
+        limits: { memory: 768m, pids: 512 }
         reservations: { memory: 256m }
     logging: *default-logging
     stop_grace_period: 45s
@@ -623,6 +768,16 @@ services:
   postgres:
     image: postgres:16.4@sha256:e62fbf9d3e2b49816a32c400ed2dba83e3b361e6833e624024309c35d334b412
     restart: unless-stopped
+    # The image's postgres user from the start, which already owns the data (the image's entrypoint gave it to them):
+    # the entrypoint then skips its root-only steps. `docker compose exec postgres` (backups) runs as it too.
+    user: "999:999"
+    read_only: true
+    tmpfs: ["/var/run/postgresql:size=1m", "/tmp:size=64m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 1g, pids: 256 }
     networks: [data]
     environment:
       TZ: Europe/London
@@ -643,7 +798,17 @@ services:
   object-storage:
     image: ghcr.io/marlon-thomas/minio@sha256:00bce77b92af96d96f4ca79002904c7a35e338a0b6fd098dc0d47a312c8e125e  # tag: RELEASE.2024-10-13T13-34-11Z — rebuilt from source (ADR-0015). Digest-only, verified against registry by build digest-check
     restart: unless-stopped
-    command: server /data --console-address ":9001"
+    # Its certificate folder is in a home this user hasn't got (MinIO serves plain HTTP on the private network, so the
+    # folder stays empty): /tmp instead of the read-only root.
+    command: server /data --console-address ":9001" --certs-dir /tmp/certs
+    user: "10102:10102"
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 512m, pids: 256 }
     networks: [data]
     environment:
       TZ: Europe/London
@@ -651,7 +816,11 @@ services:
       MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_secret
     secrets: [minio_access, minio_secret]
     volumes:
-      - minio_data:/data
+      # nocopy, as on the gateway: volume-owners gives it to this user (the evidence was root's before issue 53).
+      - { type: volume, source: minio_data, target: /data, volume: { nocopy: true } }
+    depends_on:
+      volume-owners:
+        condition: service_completed_successfully
     logging: *default-logging
     stop_grace_period: 30s
     healthcheck:
@@ -663,7 +832,26 @@ services:
   clamav:
     image: clamav/clamav:1.4.6@sha256:cbc30de94b6e9b33ac14136ff45306cee02a1f9ae522394a3cc5b9215d1affe9  # rebuilt upstream every day with that day's signatures; freshclam keeps clamav_data current
     restart: unless-stopped
-    networks: [data]
+    # The image's clamav user from the start (it already owns clamav_data; the image's start script, run as root,
+    # only gave clamd and freshclam to that user). Its start script needs /run/clamav and /run/lock to write in.
+    user: "100:101"
+    read_only: true
+    # /tmp holds what clamd unpacks from an upload while it scans it. /var/log/clamav: clamd and freshclam also log to
+    # files there (a megabyte each at most, the image's settings), as well as to the container's log.
+    tmpfs:
+      - /run/clamav:size=1m,uid=100,gid=101,mode=0750
+      - /run/lock:size=1m,uid=100,gid=101,mode=0750
+      - /var/log/clamav:size=16m,uid=100,gid=101,mode=0750
+      - /tmp:size=256m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        # About 1 GB of signatures in memory, and twice that for a moment while freshclam's new ones load.
+        limits: { memory: 3g, pids: 128 }
+    # Reached by the api and worker only, on a network of its own: what it unpacks from uploads can't reach the
+    # databases or object storage. Not internal: freshclam fetches new signatures from the internet.
+    networks: [scan]
     environment:
       TZ: Europe/London
     volumes:
@@ -680,7 +868,19 @@ services:
   gotenberg:
     image: gotenberg/gotenberg:8.15.3@sha256:cec2b75259ea1828bc473521b83c1d4e4a6c45209c56bd6bb0f98f79c071e70d
     restart: unless-stopped
-    networks: [data]
+    user: "1001:1001"   # the image's gotenberg user
+    read_only: true
+    # Chromium's and LibreOffice's profiles and caches (the home folder), and each conversion's files (/tmp).
+    tmpfs: ["/tmp:size=512m", "/home/gotenberg:size=64m,uid=1001,gid=1001"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # Reached by the api and worker only, on an internal network: Chromium, rendering a page the app made, can't reach
+    # any other service or the internet (the app sends each page whole, with nothing to fetch).
+    networks: [render]
+    deploy:
+      resources:
+        limits: { memory: 1g, cpus: "1.0", pids: 512 }
+        reservations: { memory: 256m }
     logging: *default-logging
     stop_grace_period: 30s
     healthcheck:
@@ -692,6 +892,19 @@ services:
   backup:
     image: alpine:3.20.10@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
     restart: unless-stopped
+    # Root: the docker socket belongs to the container's root, which under rootless Docker is the service account on the
+    # host, and whoever holds the socket can do anything the daemon can (ADR-0032 §5's accepted risk). Not read-only:
+    # it installs its tools with apk at every start (apk needs no capability; a prebuilt image is Workforce
+    # issue 412). The four it keeps, each found missing on the test appliance: SETGID for crond to start each
+    # job as root; CHOWN, DAC_OVERRIDE and FOWNER for bin/server-actions.sh to keep the app's mailbox (requests/ is
+    # the app user's, 0700: the helper hands it to that user, and reads and moves the requests left in it).
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 512m, pids: 256 }
     networks: [data, back]
     volumes:
       # Mounted at the bundle's real host path (it always lives there — the
@@ -746,6 +959,14 @@ services:
       data: {}
     command: server
     shm_size: 512mb   # as in upstream's compose file
+    user: "1000:1000"   # the image's own user
+    read_only: true
+    tmpfs: ["/tmp:size=128m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 1536m, pids: 256 }
     environment:
       TZ: Europe/London
       AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
@@ -788,6 +1009,14 @@ services:
     networks: [data]
     command: worker
     shm_size: 512mb
+    user: "1000:1000"   # the image's own user
+    read_only: true
+    tmpfs: ["/tmp:size=128m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 1g, pids: 256 }
     environment:
       TZ: Europe/London
       AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
@@ -817,6 +1046,14 @@ services:
   authentik-postgres:
     image: postgres:16.4@sha256:e62fbf9d3e2b49816a32c400ed2dba83e3b361e6833e624024309c35d334b412
     restart: unless-stopped
+    user: "999:999"   # as postgres
+    read_only: true
+    tmpfs: ["/var/run/postgresql:size=1m", "/tmp:size=64m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 768m, pids: 256 }
     networks: [data]
     environment:
       TZ: Europe/London
@@ -897,3 +1134,8 @@ networks:
   front:
   back:
   data:
+  # Gotenberg and the two services that ask it for PDFs (Workforce issue 53). Internal: no way out to the internet.
+  render:
+    internal: true
+  # ClamAV and the two services that ask it to scan. Not internal: freshclam fetches signatures.
+  scan:

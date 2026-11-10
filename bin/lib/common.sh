@@ -134,6 +134,12 @@ secret_modes() {
   # Folders inside need their execute bit: secrets/tls was found at 0600, which the service account
   # can't enter, so a backup run on the host couldn't read it, and a recovery would carry that over.
   find secrets -mindepth 1 -type d ! -name '.recover*' -exec chmod 700 {} +
+  # The gateway's certificates (TLS_MODE=certs): caddy runs as a user of its own (Workforce issue 53), so the folder it
+  # mounts must let it in. The secrets folder above stays closed to every other account on the host.
+  if [ -d secrets/tls ]; then
+    chmod 755 secrets/tls
+    find secrets/tls -maxdepth 1 -type f -exec chmod 644 {} +
+  fi
   # backup_ssh_key is for ssh in the backup container, which refuses a key anyone else could read.
   find secrets -maxdepth 1 -type f ! -name initial-admin-password ! -name backup_ssh_key ! -name '.recover*' -exec chmod 644 {} +
   [ -e secrets/initial-admin-password ] && chmod 400 secrets/initial-admin-password
