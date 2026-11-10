@@ -10,8 +10,8 @@
     group: "{{ service_user }}"
     mode: "0600"
   no_log: true   # carries SMTP_PASSWORD / DUCKDNS_API_TOKEN (--diff would print them)
-  # bin/recover.sh: the .env that came back holds settings this template has never heard of (staff
-  # email, the AI service, feedback), and rendering it here would lose them.
+  # bin/recover.sh puts back the .env that came with the copy, as it was. Any other run renders it
+  # from what .env already says (install.sh passes it all in), so a setting made there is kept.
   when: not (keep_env | default(false) | bool)
 
 - name: api JVM truststore — local test-CA file in certs mode (deterministic,

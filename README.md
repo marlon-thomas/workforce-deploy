@@ -264,9 +264,13 @@ Before this, a registered manager or director could set them in the app. What th
 The assistant is off until an AI service is set up, in either place:
 
 - **For every organisation on this server**: set `AI_PROVIDER` (`ANTHROPIC`, `OPENAI_COMPATIBLE`
-  or `AZURE_OPENAI`), `AI_MODEL` and, if needed, `AI_ENDPOINT` in `environments/<env>.env`, put the
-  key in `secrets/ai_api_key` (never committed), and re-run the deployer. `AI_LOCKED=true`
-  stops organisations choosing their own; `AI_ALLOWED_PROVIDERS` limits which kinds they may choose.
+  or `AZURE_OPENAI`), `AI_MODEL` and, if needed, `AI_ENDPOINT` and `AI_REGION`, and put the key in
+  `secrets/ai_api_key` (never committed). `AI_LOCKED=true` stops organisations choosing their own;
+  `AI_ALLOWED_PROVIDERS` limits which kinds they may choose. A new install takes them from
+  `environments/<env>.env`, and the installer writes them into `.env`. On a server that is already
+  installed, change the lines in `.env` and run `docker compose up -d api`: `update.sh` never
+  rewrites `.env`, and the installer, run again, keeps what `.env` says. (`AI_TRUSTED_ENDPOINTS`,
+  below, works the same way.)
 - **By an organisation itself**: its registered manager or a director enters a provider, model and
   key in Setup → AI assistant. Keys are encrypted with `secrets/ai_credential_key`, which the
   installer and every update create if absent. Backups on the server itself hold the database but
@@ -285,7 +289,8 @@ with the organisation; a redacted copy (names, NHS/NI numbers, phone numbers and
 details removed — screenshots never) is filed as a GitHub issue for Care Angels Software when:
 
 - `FEEDBACK_GITHUB_REPO`, `FEEDBACK_GITHUB_APP_ID` and `FEEDBACK_GITHUB_INSTALLATION_ID` are set in
-  `.env` (ansible: `feedback_github_repo`, `feedback_github_app_id`, `feedback_github_installation_id`),
+  `.env`, or in `environments/<env>.env` before a new install (the installer, run again, keeps what
+  `.env` says),
 - the GitHub App's private key (`.pem`) is in `secrets/feedback_github_key` (never
   committed; the installer and every update create it empty), and
 - the organisation leaves "Send reports to Care Angels Software" on (Setup → Feedback).

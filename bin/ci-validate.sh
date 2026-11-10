@@ -8,8 +8,11 @@
 #      placeholder env file — catches YAML/interpolation breakage at PR time,
 #      not at an appliance's next converge; and bin/check-docreader.py on the
 #      resolved file (the docreader's isolation, the api's /tmp size and init)
-#   4. shellcheck -S error, when shellcheck is installed
-#   5. the hermetic shell self-tests in bin/tests/ (no Docker, no network)
+#   4. settings reach the app: every variable compose.yaml reads is written
+#      into .env by env.j2, and every value env.j2 writes is passed in by
+#      install.sh (Workforce issue 376)
+#   5. shellcheck -S error, when shellcheck is installed
+#   6. the hermetic shell self-tests in bin/tests/ (no Docker, no network)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -64,6 +67,36 @@ ENV
 else
   bad "docker compose is not available — the compose check cannot be skipped"
 fi
+
+echo "== settings reach the app"
+# compose.yaml reads its settings from .env. The installer renders .env from env.j2, with the values
+# install.sh hands Ansible as WFV_*: from environments/<env>.env on a first install, and from .env
+# itself when it runs again. A setting missing from either step arrives empty, and a value set in
+# .env is lost the next time the installer runs (Workforce issues 376 and 387: the AI, staff email
+# and feedback settings). bin/tests/env-rerun-test.sh checks the second run itself.
+if python3 -I - <<'PY'; then echo "ok   compose.yaml <- env.j2 <- install.sh"; else bad "settings wiring (see above)"; fi
+import re
+import sys
+
+compose = open("compose.yaml", encoding="utf-8").read()
+env_j2 = open("ansible/roles/workforce/templates/env.j2", encoding="utf-8").read()
+install = open("bin/install.sh", encoding="utf-8").read()
+
+# ${VAR...} is read from .env; $${VAR} is the container's own shell, not compose's.
+read = set(re.findall(r"(?<!\$)\$\{([A-Z_][A-Z0-9_]*)", compose))
+written = set(re.findall(r"(?m)^([A-Z_][A-Z0-9_]*)=", env_j2))
+inputs = set(re.findall(r"\{\{\s*([a-z_][a-z0-9_]*)", env_j2))
+passed = set(re.findall(r"\bWFV_([a-z0-9_]+)=", install))
+
+failed = False
+for name in sorted(read - written):
+    print(f"FAIL compose.yaml reads ${{{name}}}, which env.j2 never writes into .env")
+    failed = True
+for name in sorted(inputs - passed):
+    print(f"FAIL env.j2 writes {{{{ {name} }}}}, which install.sh never passes in (no WFV_{name})")
+    failed = True
+sys.exit(1 if failed else 0)
+PY
 
 if command -v shellcheck >/dev/null 2>&1; then
   echo "== shellcheck -S error"

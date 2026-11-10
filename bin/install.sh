@@ -309,6 +309,9 @@ INV
   ANSIBLE_SOCK="$(docker_socket || echo "/run/user/$(id -u)/docker.sock")"
   # Server alert addresses (bin/healthwatch.sh): a list with spaces would break .env when sourced.
   OPS_ALERT_EMAIL="${OPS_ALERT_EMAIL:-}"; OPS_ALERT_EMAIL="${OPS_ALERT_EMAIL// /}"
+  # Every setting env.j2 writes into .env comes in here, from environments/<env>.env on a first
+  # install and from .env itself when the installer runs again. One that doesn't is written as its
+  # default, and a value set in .env is lost (Workforce issue 376). bin/ci-validate.sh checks it.
   WFV_app_hostname="${APP_HOSTNAME}" \
   WFV_auth_hostname="${AUTH_HOSTNAME}" \
   WFV_env_name="${ENV_NAME:-prod}" \
@@ -339,6 +342,13 @@ INV
   WFV_ai_test_services="${AI_TEST_SERVICES:-false}" \
   WFV_brand_product_name="${BRAND_PRODUCT_NAME:-Workforce}" \
   WFV_brand_logo_file="${BRAND_LOGO_FILE:-logo.png}" \
+  WFV_ai_provider="${AI_PROVIDER:-}" \
+  WFV_ai_endpoint="${AI_ENDPOINT:-}" \
+  WFV_ai_model="${AI_MODEL:-}" \
+  WFV_ai_region="${AI_REGION:-}" \
+  WFV_ai_locked="${AI_LOCKED:-false}" \
+  WFV_ai_allowed_providers="${AI_ALLOWED_PROVIDERS:-}" \
+  WFV_ai_trusted_endpoints="${AI_TRUSTED_ENDPOINTS:-}" \
   WFV_care_available="${WORKFORCE_CARE_AVAILABLE:-}" \
   WFV_server_health_visible="${WORKFORCE_SERVER_HEALTH_VISIBLE:-true}" \
   WFV_server_actions_visible="${WORKFORCE_SERVER_ACTIONS:-true}" \
@@ -346,6 +356,21 @@ INV
   WFV_server_actions_plain_relay="${SERVER_ACTIONS_PLAIN_RELAY:-}" \
   WFV_admin_recovery_email="${ADMIN_RECOVERY_EMAIL:-}" \
   WFV_webmail_hostname="${WEBMAIL_HOSTNAME:-}" \
+  WFV_webmail_url="${WEBMAIL_URL:-}" \
+  WFV_mail_hostname="${MAIL_HOSTNAME:-}" \
+  WFV_mail_server_url="${MAIL_SERVER_URL:-}" \
+  WFV_mail_tls_verify="${MAIL_TLS_VERIFY:-}" \
+  WFV_mail_sign_in_allow_invalid_certs="${MAIL_SIGN_IN_ALLOW_INVALID_CERTS:-}" \
+  WFV_mail_relay_host="${MAIL_RELAY_HOST:-}" \
+  WFV_mail_relay_port="${MAIL_RELAY_PORT:-}" \
+  WFV_mail_relay_user="${MAIL_RELAY_USER:-}" \
+  WFV_mail_relay_implicit_tls="${MAIL_RELAY_IMPLICIT_TLS:-}" \
+  WFV_mail_relay_spf_include="${MAIL_RELAY_SPF_INCLUDE:-}" \
+  WFV_feedback_installation="${FEEDBACK_INSTALLATION:-}" \
+  WFV_feedback_github_repo="${FEEDBACK_GITHUB_REPO:-}" \
+  WFV_feedback_github_app_id="${FEEDBACK_GITHUB_APP_ID:-}" \
+  WFV_feedback_github_installation_id="${FEEDBACK_GITHUB_INSTALLATION_ID:-}" \
+  WFV_feedback_engineer_login="${FEEDBACK_ENGINEER_LOGIN:-}" \
   WFV_keep_env="$([ "${RECOVERING}" -eq 1 ] && echo true || echo false)" \
   WFV_backup_target="${BACKUP_TARGET:-}" \
   WFV_backup_encrypt_recipient="${BACKUP_ENCRYPT_RECIPIENT:-}" \
