@@ -4,7 +4,7 @@
 #   database.dump   application DB   (pg_dump -Fc)
 #   authentik.dump  sign-in DB       (users, MFA, OIDC provider + client secret)
 #   evidence.tar    the whole evidence bucket (MinIO)
-#   branding/       admin-uploaded branding assets (best effort)
+#   branding/       the phone icons organisations upload (best effort)
 #   MANIFEST        versions + sha256 of each part
 # Every part except branding is mandatory: a missing part FAILS the backup —
 # an archive that silently lacks evidence is worse than no archive.

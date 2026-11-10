@@ -356,10 +356,13 @@ services:
     # Reaps child processes (a PDF worker, on a test server without the docreader: Workforce ADR-0042).
     init: true
     volumes:
-      # Writable home for admin-uploaded branding assets (evidence lives in MinIO)
+      # Writable home for the phone icons organisations upload (evidence lives in MinIO)
       - app_data:/app/data
       # The docreader's socket (Workforce ADR-0042): the only way to it. A tmpfs folder only this user can open (0700).
       - pdf_socket:/run/pdf
+      # The installation's logo (BRAND_LOGO_FILE, Workforce issue 332), read-only. A directory, not
+      # the file, so a replaced logo is seen at the next restart.
+      - ./branding:/run/workforce-branding:ro
       # Staging-TLS mode: truststore built by install.sh when production certs are
       # unavailable. Absent in normal operation (compose tolerates a missing file
       # only if declared with the file existing — install.sh always creates it).
@@ -392,6 +395,13 @@ services:
       WORKFORCE_EVIDENCE_CLAMAV_PORT: "3310"
       WORKFORCE_REPORTS_GOTENBERG_URL: http://gotenberg:3000
       BRAND_DATA_DIR: /app/data/branding
+      # The app's name and logo for every organisation on this server (Workforce issue 332): set
+      # here by whoever runs the server, never in the app. BRAND_LOGO_FILE names a PNG or JPG in this
+      # bundle's branding/ folder (2 MB and 4096 pixels a side at most; SVG and WebP are refused).
+      # No such file = Workforce's own mark. Each organisation keeps its own name, colours and phone
+      # icon in Setup.
+      BRAND_PRODUCT_NAME: ${BRAND_PRODUCT_NAME:-Workforce}
+      BRAND_LOGO_PATH: /run/workforce-branding/${BRAND_LOGO_FILE:-logo.png}
       WORKFORCE_TLS_TRUSTSTORE: /app/api-truststore.jks
       WORKFORCE_OIDC_SIGNING_KEY_PEM: /run/oidc/signing-pub.pem
       # Untrusted PDFs are read by the docreader, never in the api (Workforce ADR-0042). Without it the api reads
@@ -424,11 +434,16 @@ services:
       # Left empty, the app follows AI_TEST_SERVICES, so it's off wherever that's off. Don't default
       # it to false here: that would turn it off on the test appliance too.
       WORKFORCE_CARE_AVAILABLE: ${WORKFORCE_CARE_AVAILABLE:-}
-      # Setup -> Server health. Keep it on for a server that runs one organisation; the hosted
-      # platform sets it to false, because a tenant must not see server details.
+      # The hosted platform: true hides Server health and the jobs below, whatever they say (Workforce
+      # issue 341), because a tenant must not see server details. Each organisation has its own database
+      # there (Workforce ADR-0008), so the app can't tell by itself. environments/hosted.env sets it;
+      # false for a server an organisation runs for itself.
+      WORKFORCE_HOSTED: ${WORKFORCE_HOSTED:-false}
+      # Setup -> Server health. Hidden on the hosted platform (above), and on a server whose database holds
+      # more than one organisation, whatever this says (Workforce issue 341). false hides it here too.
       WORKFORCE_SERVER_HEALTH_VISIBLE: ${WORKFORCE_SERVER_HEALTH_VISIBLE:-true}
       # Routine jobs from Setup (backups, staff email, the relay, alerts). Off whenever the above is
-      # off, and the hosted platform sets it off. SERVER_ACTIONS=off in .env stops the helper itself,
+      # off or hidden, and the hosted platform sets it off. SERVER_ACTIONS=off in .env stops the helper itself,
       # for an operator who doesn't want to rely on the app's word.
       WORKFORCE_SERVER_ACTIONS: ${WORKFORCE_SERVER_ACTIONS:-true}
       # Reports from inside the app (feedback-spec.md): filed as GitHub issues by the installation's
@@ -623,6 +638,8 @@ services:
     volumes:
       # Same image as api: branding init writes its data dir on startup
       - app_data:/app/data
+      # The installation's logo, for the PDFs the worker makes (as on api)
+      - ./branding:/run/workforce-branding:ro
       - ./secrets/api-truststore.jks:/app/api-truststore.jks:ro
     networks: [data]
     # Same immutable image, different command (spec §10.1). Keeps the management
@@ -653,6 +670,9 @@ services:
       WORKFORCE_EVIDENCE_CLAMAV_PORT: "3310"
       WORKFORCE_REPORTS_GOTENBERG_URL: http://gotenberg:3000
       BRAND_DATA_DIR: /app/data/branding
+      # As on api (Workforce issue 332).
+      BRAND_PRODUCT_NAME: ${BRAND_PRODUCT_NAME:-Workforce}
+      BRAND_LOGO_PATH: /run/workforce-branding/${BRAND_LOGO_FILE:-logo.png}
       WORKFORCE_TLS_TRUSTSTORE: /app/api-truststore.jks
       # Reports from inside the app (feedback-spec.md): filed as GitHub issues by the installation's
       # GitHub App when FEEDBACK_GITHUB_APP_ID/INSTALLATION_ID are set and secrets/feedback_github_key
@@ -804,6 +824,12 @@ services:
     image: gotenberg/gotenberg:8.15
     restart: unless-stopped
     networks: [data]
+    # Headless Chromium renders every PDF: capped so one page that makes it work hard (a 2 KB SVG
+    # once held it past 120 s, Workforce issue 332) slows PDFs down instead of the whole server.
+    deploy:
+      resources:
+        limits: { memory: 1g, cpus: "1.0", pids: 512 }
+        reservations: { memory: 256m }
     logging: *default-logging
     stop_grace_period: 30s
     healthcheck:

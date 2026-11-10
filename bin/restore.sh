@@ -219,7 +219,7 @@ fi
 if [ -d "$TMP/branding" ]; then
   echo "Restoring branding…"
   docker compose cp "$TMP/branding/." api:/app/data/branding \
-    || echo "  (branding not restored — re-upload it in the admin settings)"
+    || echo "  (phone icons not restored — organisations can choose them again in Setup -> Appearance)"
 fi
 sleep 15
 ./bin/doctor.sh --gate || { echo "Restore finished but the health check is RED — copy the output above to support."; exit 1; }

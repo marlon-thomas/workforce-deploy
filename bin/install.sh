@@ -337,6 +337,8 @@ INV
   WFV_ops_alert_from="${OPS_ALERT_FROM:-}" \
   WFV_ops_heartbeat_url="${OPS_HEARTBEAT_URL:-}" \
   WFV_ai_test_services="${AI_TEST_SERVICES:-false}" \
+  WFV_brand_product_name="${BRAND_PRODUCT_NAME:-Workforce}" \
+  WFV_brand_logo_file="${BRAND_LOGO_FILE:-logo.png}" \
   WFV_care_available="${WORKFORCE_CARE_AVAILABLE:-}" \
   WFV_server_health_visible="${WORKFORCE_SERVER_HEALTH_VISIBLE:-true}" \
   WFV_server_actions_visible="${WORKFORCE_SERVER_ACTIONS:-true}" \
