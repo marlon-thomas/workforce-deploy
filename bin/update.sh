@@ -84,6 +84,7 @@ ensure_secrets() {
 }
 ensure_secrets
 secret_modes   # existing installs: secrets created 0600 were unreadable to the app (common.sh)
+pin_gateway_image   # a .env from before Workforce issue 53 names the stock gateway by its tag alone (common.sh)
 
 say "Backing up before touching anything…"
 ./bin/backup.sh --tag pre-update || fail "Backup failed — update aborted (nothing was changed)."

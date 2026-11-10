@@ -134,6 +134,12 @@ secret_modes() {
   # Folders inside need their execute bit: secrets/tls was found at 0600, which the service account
   # can't enter, so a backup run on the host couldn't read it, and a recovery would carry that over.
   find secrets -mindepth 1 -type d ! -name '.recover*' -exec chmod 700 {} +
+  # The gateway's certificates (TLS_MODE=certs): caddy runs as a user of its own (Workforce issue 53), so the folder it
+  # mounts must let it in. The secrets folder above stays closed to every other account on the host.
+  if [ -d secrets/tls ]; then
+    chmod 755 secrets/tls
+    find secrets/tls -maxdepth 1 -type f -exec chmod 644 {} +
+  fi
   # backup_ssh_key is for ssh in the backup container, which refuses a key anyone else could read.
   find secrets -maxdepth 1 -type f ! -name initial-admin-password ! -name backup_ssh_key ! -name '.recover*' -exec chmod 644 {} +
   [ -e secrets/initial-admin-password ] && chmod 400 secrets/initial-admin-password
@@ -275,13 +281,29 @@ alert_address_problems() {
   done
 }
 
+# ------------------------------------------------------------------ the stock gateway image
+# GATEWAY_IMAGE in .env wins over compose.yaml's default, so the pin has to be in .env as well (Workforce issue 53):
+# install.sh writes this one, and pin_gateway_image repins a .env written before it (update.sh). It is the same as
+# the default in compose.yaml and ansible/roles/workforce/templates/env.j2; bin/check-hardening.py checks that.
+GATEWAY_STOCK_IMAGE="caddy:2.8.4@sha256:226d1f059b75399fe19182893c7184591c07b97afc8dfcf44eeb80c9a77a530f"
+
+# pin_gateway_image — a .env that names stock caddy by its tag alone (installs before issue 53: caddy:2.8.4) gets
+# the pinned image. Anything else is left as it is: an image already pinned, or the DNS-01 gateway build.
+pin_gateway_image() {
+  [ -f .env ] || return 0
+  if grep -qE '^GATEWAY_IMAGE=(docker\.io/(library/)?)?caddy:[^@]*$' .env; then
+    sed -i "s|^GATEWAY_IMAGE=.*|GATEWAY_IMAGE=${GATEWAY_STOCK_IMAGE}|" .env
+    echo "Pinned the gateway image in .env by its digest: ${GATEWAY_STOCK_IMAGE%%@*}"
+  fi
+}
+
 # ------------------------------------------------------------------ off-site encryption (age)
 # Off-site copies are encrypted with age before they leave the server (RUNBOOK, "Off-site backup
 # targets"). This server holds only the public recipient, BACKUP_ENCRYPT_RECIPIENT in .env; the
 # private key lives off it, so neither the server nor someone who takes it over can read those copies.
 # The backup container has age. A host needs nothing installed: without age it runs in a throw-away
-# container of the same image.
-AGE_IMAGE="alpine:3.20"
+# container of the same image (compose.yaml's backup service, pinned by digest).
+AGE_IMAGE="alpine:3.20.10@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
 
 age_here() { command -v "${AGE_BIN:-age}" >/dev/null 2>&1; }
 

@@ -49,6 +49,20 @@ OIDC_ISSUER=https://auth.ci.invalid/application/o/workforce/
 API_IMAGE=ghcr.io/ci/placeholder
 APP_VERSION=0.0.0
 ENV
+  # Workforce issue 53: every image pinned by digest, and each service's least privilege, as compose resolves them
+  # with every profile on (bin/check-hardening.py says which service, and why).
+  resolved=()
+  for overlay in "" compose.smoke.yaml compose.dev.yaml; do
+    out="$TMP/resolved${overlay:+-$overlay}.json"
+    if docker compose --env-file "$TMP/ci.env" -f compose.yaml ${overlay:+-f "$overlay"} --profile '*' config --format json > "$out" 2>/dev/null; then
+      resolved+=("$out")
+    fi
+  done
+  if [ "${#resolved[@]}" -gt 0 ] && python3 -I bin/check-hardening.py "${resolved[@]}"; then
+    echo "ok   images pinned by digest, least privilege per service"
+  else
+    bad "image pins or least privilege (bin/check-hardening.py, above)"
+  fi
   for overlay in "" compose.smoke.yaml compose.dev.yaml; do
     label="compose.yaml${overlay:+ + $overlay}"
     if docker compose --env-file "$TMP/ci.env" -f compose.yaml ${overlay:+-f "$overlay"} config -q; then
