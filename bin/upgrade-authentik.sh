@@ -91,7 +91,7 @@ override() {
     if older "$v" 2025.10; then
       cat <<'EOF'
   ak-redis:
-    image: redis:7.4-alpine
+    image: redis:7.4.12-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7
     restart: unless-stopped
     networks: [data]
     command: --save "" --appendonly no

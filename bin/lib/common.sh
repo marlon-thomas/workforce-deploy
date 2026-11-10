@@ -275,13 +275,29 @@ alert_address_problems() {
   done
 }
 
+# ------------------------------------------------------------------ the stock gateway image
+# GATEWAY_IMAGE in .env wins over compose.yaml's default, so the pin has to be in .env as well (Workforce issue 53):
+# install.sh writes this one, and pin_gateway_image repins a .env written before it (update.sh). It is the same as
+# the default in compose.yaml and ansible/roles/workforce/templates/env.j2; bin/check-hardening.py checks that.
+GATEWAY_STOCK_IMAGE="caddy:2.8.4@sha256:226d1f059b75399fe19182893c7184591c07b97afc8dfcf44eeb80c9a77a530f"
+
+# pin_gateway_image — a .env that names stock caddy by its tag alone (installs before issue 53: caddy:2.8.4) gets
+# the pinned image. Anything else is left as it is: an image already pinned, or the DNS-01 gateway build.
+pin_gateway_image() {
+  [ -f .env ] || return 0
+  if grep -qE '^GATEWAY_IMAGE=(docker\.io/(library/)?)?caddy:[^@]*$' .env; then
+    sed -i "s|^GATEWAY_IMAGE=.*|GATEWAY_IMAGE=${GATEWAY_STOCK_IMAGE}|" .env
+    echo "Pinned the gateway image in .env by its digest: ${GATEWAY_STOCK_IMAGE%%@*}"
+  fi
+}
+
 # ------------------------------------------------------------------ off-site encryption (age)
 # Off-site copies are encrypted with age before they leave the server (RUNBOOK, "Off-site backup
 # targets"). This server holds only the public recipient, BACKUP_ENCRYPT_RECIPIENT in .env; the
 # private key lives off it, so neither the server nor someone who takes it over can read those copies.
 # The backup container has age. A host needs nothing installed: without age it runs in a throw-away
-# container of the same image.
-AGE_IMAGE="alpine:3.20"
+# container of the same image (compose.yaml's backup service, pinned by digest).
+AGE_IMAGE="alpine:3.20.10@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
 
 age_here() { command -v "${AGE_BIN:-age}" >/dev/null 2>&1; }
 

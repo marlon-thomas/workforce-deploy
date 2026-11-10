@@ -18,7 +18,7 @@ x-logging: &default-logging
 
 services:
   gateway:
-    image: ${GATEWAY_IMAGE:-caddy:2.8.4}
+    image: ${GATEWAY_IMAGE:-caddy:2.8.4@sha256:226d1f059b75399fe19182893c7184591c07b97afc8dfcf44eeb80c9a77a530f}
     restart: unless-stopped
     ports:
       - "80:80"
@@ -141,7 +141,7 @@ services:
   # registration — every token exchange then fails with /login?error.
   # Checked on the docker network directly: no gateway/tailnet dependency.
   discovery-gate:
-    image: curlimages/curl:8.10.1
+    image: curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b
     restart: "no"
     networks: [back]
     entrypoint: >
@@ -161,7 +161,7 @@ services:
   # Local catch-all mail server for appliances without a real relay (COMPOSE_PROFILES=mail).
   # Loopback UI only: http://127.0.0.1:8025 on the box. Never a public service.
   mailpit:
-    image: axllent/mailpit:v1.31.1
+    image: axllent/mailpit:v1.31.1@sha256:98b916bd3c8d61f7633a52d3ea2f58d00620cb01ca57ab59edde68c347a95365
     restart: unless-stopped
     profiles: ["mail"]
     networks: [data]
@@ -182,7 +182,7 @@ services:
   # One-shot: the mail server's own role and database on the suite's PostgreSQL, so mail is in
   # the nightly backup. Idempotent; the password is the mail_db_password secret.
   mail-db-init:
-    image: postgres:16.4
+    image: postgres:16.4@sha256:e62fbf9d3e2b49816a32c400ed2dba83e3b361e6833e624024309c35d334b412
     restart: "no"
     profiles: ["staffmail"]
     networks: [data]
@@ -621,7 +621,7 @@ services:
         condition: service_completed_successfully
 
   postgres:
-    image: postgres:16.4
+    image: postgres:16.4@sha256:e62fbf9d3e2b49816a32c400ed2dba83e3b361e6833e624024309c35d334b412
     restart: unless-stopped
     networks: [data]
     environment:
@@ -661,7 +661,7 @@ services:
       retries: 3
 
   clamav:
-    image: clamav/clamav:1.4
+    image: clamav/clamav:1.4.6@sha256:cbc30de94b6e9b33ac14136ff45306cee02a1f9ae522394a3cc5b9215d1affe9  # rebuilt upstream every day with that day's signatures; freshclam keeps clamav_data current
     restart: unless-stopped
     networks: [data]
     environment:
@@ -678,7 +678,7 @@ services:
       start_period: 300s
 
   gotenberg:
-    image: gotenberg/gotenberg:8.15
+    image: gotenberg/gotenberg:8.15.3@sha256:cec2b75259ea1828bc473521b83c1d4e4a6c45209c56bd6bb0f98f79c071e70d
     restart: unless-stopped
     networks: [data]
     logging: *default-logging
@@ -690,7 +690,7 @@ services:
       retries: 3
 
   backup:
-    image: alpine:3.20
+    image: alpine:3.20.10@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
     restart: unless-stopped
     networks: [data, back]
     volumes:
@@ -734,7 +734,7 @@ services:
     logging: *default-logging
 
   authentik-server:
-    image: ghcr.io/goauthentik/server:2026.8.5
+    image: ghcr.io/goauthentik/server:2026.8.5@sha256:602227a86455d6772e3d16b7d852713c4f864f40df5df894abd1285bb53979a5
     restart: unless-stopped
     networks:
       # Alias pinned to the BACK network only: containers on both networks
@@ -783,7 +783,7 @@ services:
         condition: service_healthy
 
   authentik-worker:
-    image: ghcr.io/goauthentik/server:2026.8.5
+    image: ghcr.io/goauthentik/server:2026.8.5@sha256:602227a86455d6772e3d16b7d852713c4f864f40df5df894abd1285bb53979a5
     restart: unless-stopped
     networks: [data]
     command: worker
@@ -815,7 +815,7 @@ services:
         condition: service_healthy
 
   authentik-postgres:
-    image: postgres:16.4
+    image: postgres:16.4@sha256:e62fbf9d3e2b49816a32c400ed2dba83e3b361e6833e624024309c35d334b412
     restart: unless-stopped
     networks: [data]
     environment:

@@ -291,9 +291,14 @@ INV
     if [ "${TLS_MODE:-http01}" = "dns01" ] && [ "${SMOKE:-0}" = "0" ]; then
       GW_IMAGE="ghcr.io/marlon-thomas/workforce-deploy-gateway:latest"
     else
-      GW_IMAGE="caddy:2.8.4"
+      GW_IMAGE="$GATEWAY_STOCK_IMAGE"
     fi
   fi
+  # A .env from before Workforce issue 53 names stock caddy by its tag alone: run again, the installer pins it.
+  case "$GW_IMAGE" in
+    *@sha256:*) ;;
+    caddy:*|docker.io/caddy:*|docker.io/library/caddy:*) GW_IMAGE="$GATEWAY_STOCK_IMAGE" ;;
+  esac
   # Ansible's default callback prints every poll of an `until` wait as an alarming
   # "FAILED - RETRYING:" line — for the OIDC/blueprint health waits these are routine
   # progress, not failures. Collapse them to one calm [wait] line per task (then every
@@ -877,7 +882,7 @@ secret_modes
 mkdir -p actions/requests actions/results
 
 say "Writing configuration…"
-GATEWAY_IMAGE_DEFAULT="caddy:2.8.4"
+GATEWAY_IMAGE_DEFAULT="$GATEWAY_STOCK_IMAGE"
 GATEWAY_CADDYFILE_DEFAULT="./gateway/Caddyfile"
 case "${TLS_MODE:-http01}" in
   dns01)
@@ -888,7 +893,7 @@ case "${TLS_MODE:-http01}" in
   certs)
     if [ "${SMOKE}" -eq 0 ]; then
       # Local-CA TLS needs no ACME DNS plugin — the stock image is enough.
-      GATEWAY_IMAGE_DEFAULT="caddy:2.8.4"
+      GATEWAY_IMAGE_DEFAULT="$GATEWAY_STOCK_IMAGE"
       GATEWAY_CADDYFILE_DEFAULT="./gateway/Caddyfile.localca"
     fi ;;
 esac
