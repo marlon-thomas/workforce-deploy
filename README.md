@@ -223,10 +223,12 @@ set up but down no longer shows as done. The watch writes `status/health.json`; 
 mounts that folder read-only and has no other view of the server: no Docker socket and no way to
 write anything here. If the watch stops, the page says so.
 
-**On a server with more than one organisation, such as the hosted platform, the app hides the page
-and the jobs from Setup by itself** (Workforce issue 341), because a tenant must not see server
-details: there is no setting to remember, and adding a second organisation hides them at once. Setup
-status then says only what is configured. `WORKFORCE_SERVER_HEALTH_VISIBLE=false` (default `true`)
+**On the hosted platform, `WORKFORCE_HOSTED=true` hides the page and the jobs from Setup**
+(Workforce issue 341), because a tenant must not see server details. It's set by the hosted profile,
+`environments/hosted.env`: each organisation has its own database there (Workforce ADR-0008), so the
+app can't tell by itself. **Where one database holds more than one organisation, the app hides them by
+itself**, and adding a second organisation hides them at once. Setup status then says only what is
+configured. `WORKFORCE_SERVER_HEALTH_VISIBLE=false` (default `true`)
 hides the page on a server with one organisation too. See RUNBOOK.md §7b for the file's format and
 what is masked.
 

@@ -392,9 +392,13 @@ services:
       # Left empty, the app follows AI_TEST_SERVICES, so it's off wherever that's off. Don't default
       # it to false here: that would turn it off on the test appliance too.
       WORKFORCE_CARE_AVAILABLE: ${WORKFORCE_CARE_AVAILABLE:-}
-      # Setup -> Server health. The app hides it, and the jobs below, on any server with more than one
-      # organisation, whatever this says (Workforce issue 341), because a tenant must not see server
-      # details: nothing to remember on the hosted platform. false hides it on a one-organisation server.
+      # The hosted platform: true hides Server health and the jobs below, whatever they say (Workforce
+      # issue 341), because a tenant must not see server details. Each organisation has its own database
+      # there (Workforce ADR-0008), so the app can't tell by itself. environments/hosted.env sets it;
+      # false for a server an organisation runs for itself.
+      WORKFORCE_HOSTED: ${WORKFORCE_HOSTED:-false}
+      # Setup -> Server health. Hidden on the hosted platform (above), and on a server whose database holds
+      # more than one organisation, whatever this says (Workforce issue 341). false hides it here too.
       WORKFORCE_SERVER_HEALTH_VISIBLE: ${WORKFORCE_SERVER_HEALTH_VISIBLE:-true}
       # Routine jobs from Setup (backups, staff email, the relay, alerts). Off whenever the above is
       # off or hidden, and the hosted platform sets it off. SERVER_ACTIONS=off in .env stops the helper itself,
