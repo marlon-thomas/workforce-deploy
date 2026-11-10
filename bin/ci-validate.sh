@@ -64,7 +64,8 @@ echo "== settings reach the app"
 # compose.yaml reads its settings from .env. The installer renders .env from env.j2, with the values
 # install.sh hands Ansible as WFV_*: from environments/<env>.env on a first install, and from .env
 # itself when it runs again. A setting missing from either step arrives empty, and a value set in
-# .env is lost the next time the installer runs (Workforce issue 376: the AI settings).
+# .env is lost the next time the installer runs (Workforce issues 376 and 387: the AI, staff email
+# and feedback settings). bin/tests/env-rerun-test.sh checks the second run itself.
 if python3 -I - <<'PY'; then echo "ok   compose.yaml <- env.j2 <- install.sh"; else bad "settings wiring (see above)"; fi
 import re
 import sys
@@ -79,30 +80,12 @@ written = set(re.findall(r"(?m)^([A-Z_][A-Z0-9_]*)=", env_j2))
 inputs = set(re.findall(r"\{\{\s*([a-z_][a-z0-9_]*)", env_j2))
 passed = set(re.findall(r"\bWFV_([a-z0-9_]+)=", install))
 
-# Known gaps, written into .env by other tools or by hand, and lost when the installer runs again:
-# Workforce issue 387. Remove each one here when it is wired through.
-NOT_WRITTEN_YET = {
-    "MAIL_HOSTNAME", "MAIL_SERVER_URL", "MAIL_TLS_VERIFY", "MAIL_SIGN_IN_ALLOW_INVALID_CERTS",
-    "MAIL_RELAY_HOST", "MAIL_RELAY_PORT", "MAIL_RELAY_USER", "MAIL_RELAY_IMPLICIT_TLS",
-    "MAIL_RELAY_SPF_INCLUDE", "WEBMAIL_HOSTNAME", "WEBMAIL_URL",
-}
-NOT_PASSED_YET = {
-    "feedback_installation", "feedback_github_repo", "feedback_github_app_id",
-    "feedback_github_installation_id", "feedback_engineer_login",
-}
-
 failed = False
-for name in sorted(read - written - NOT_WRITTEN_YET):
+for name in sorted(read - written):
     print(f"FAIL compose.yaml reads ${{{name}}}, which env.j2 never writes into .env")
     failed = True
-for name in sorted(inputs - passed - NOT_PASSED_YET):
+for name in sorted(inputs - passed):
     print(f"FAIL env.j2 writes {{{{ {name} }}}}, which install.sh never passes in (no WFV_{name})")
-    failed = True
-for name in sorted(NOT_WRITTEN_YET & written):
-    print(f"FAIL {name} is written by env.j2 now: take it out of NOT_WRITTEN_YET")
-    failed = True
-for name in sorted(NOT_PASSED_YET & passed):
-    print(f"FAIL WFV_{name} is passed now: take it out of NOT_PASSED_YET")
     failed = True
 sys.exit(1 if failed else 0)
 PY

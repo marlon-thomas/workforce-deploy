@@ -257,7 +257,8 @@ with the organisation; a redacted copy (names, NHS/NI numbers, phone numbers and
 details removed — screenshots never) is filed as a GitHub issue for Care Angels Software when:
 
 - `FEEDBACK_GITHUB_REPO`, `FEEDBACK_GITHUB_APP_ID` and `FEEDBACK_GITHUB_INSTALLATION_ID` are set in
-  `.env` (ansible: `feedback_github_repo`, `feedback_github_app_id`, `feedback_github_installation_id`),
+  `.env`, or in `environments/<env>.env` before a new install (the installer, run again, keeps what
+  `.env` says),
 - the GitHub App's private key (`.pem`) is in `secrets/feedback_github_key` (never
   committed; the installer and every update create it empty), and
 - the organisation leaves "Send reports to Care Angels Software" on (Setup → Feedback).
