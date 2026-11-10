@@ -232,9 +232,13 @@ configured. See RUNBOOK.md §7b for the file's format and what is masked.
 The assistant is off until an AI service is set up, in either place:
 
 - **For every organisation on this server**: set `AI_PROVIDER` (`ANTHROPIC`, `OPENAI_COMPATIBLE`
-  or `AZURE_OPENAI`), `AI_MODEL` and, if needed, `AI_ENDPOINT` in `environments/<env>.env`, put the
-  key in `secrets/ai_api_key` (never committed), and re-run the deployer. `AI_LOCKED=true`
-  stops organisations choosing their own; `AI_ALLOWED_PROVIDERS` limits which kinds they may choose.
+  or `AZURE_OPENAI`), `AI_MODEL` and, if needed, `AI_ENDPOINT` and `AI_REGION`, and put the key in
+  `secrets/ai_api_key` (never committed). `AI_LOCKED=true` stops organisations choosing their own;
+  `AI_ALLOWED_PROVIDERS` limits which kinds they may choose. A new install takes them from
+  `environments/<env>.env`, and the installer writes them into `.env`. On a server that is already
+  installed, change the lines in `.env` and run `docker compose up -d api`: `update.sh` never
+  rewrites `.env`, and the installer, run again, keeps what `.env` says. (`AI_TRUSTED_ENDPOINTS`,
+  below, works the same way.)
 - **By an organisation itself**: its registered manager or a director enters a provider, model and
   key in Setup → AI assistant. Keys are encrypted with `secrets/ai_credential_key`, which the
   installer and every update create if absent. Backups on the server itself hold the database but

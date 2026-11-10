@@ -309,6 +309,9 @@ INV
   ANSIBLE_SOCK="$(docker_socket || echo "/run/user/$(id -u)/docker.sock")"
   # Server alert addresses (bin/healthwatch.sh): a list with spaces would break .env when sourced.
   OPS_ALERT_EMAIL="${OPS_ALERT_EMAIL:-}"; OPS_ALERT_EMAIL="${OPS_ALERT_EMAIL// /}"
+  # Every setting env.j2 writes into .env comes in here, from environments/<env>.env on a first
+  # install and from .env itself when the installer runs again. One that doesn't is written as its
+  # default, and a value set in .env is lost (Workforce issue 376). bin/ci-validate.sh checks it.
   WFV_app_hostname="${APP_HOSTNAME}" \
   WFV_auth_hostname="${AUTH_HOSTNAME}" \
   WFV_env_name="${ENV_NAME:-prod}" \
@@ -331,6 +334,13 @@ INV
   WFV_ops_alert_from="${OPS_ALERT_FROM:-}" \
   WFV_ops_heartbeat_url="${OPS_HEARTBEAT_URL:-}" \
   WFV_ai_test_services="${AI_TEST_SERVICES:-false}" \
+  WFV_ai_provider="${AI_PROVIDER:-}" \
+  WFV_ai_endpoint="${AI_ENDPOINT:-}" \
+  WFV_ai_model="${AI_MODEL:-}" \
+  WFV_ai_region="${AI_REGION:-}" \
+  WFV_ai_locked="${AI_LOCKED:-false}" \
+  WFV_ai_allowed_providers="${AI_ALLOWED_PROVIDERS:-}" \
+  WFV_ai_trusted_endpoints="${AI_TRUSTED_ENDPOINTS:-}" \
   WFV_care_available="${WORKFORCE_CARE_AVAILABLE:-}" \
   WFV_server_health_visible="${WORKFORCE_SERVER_HEALTH_VISIBLE:-true}" \
   WFV_server_actions_visible="${WORKFORCE_SERVER_ACTIONS:-true}" \
