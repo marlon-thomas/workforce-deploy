@@ -348,10 +348,18 @@ services:
     image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
     restart: unless-stopped
     read_only: true
-    tmpfs: [/tmp]
+    # A size, so what is written to /tmp can't take the whole memory limit (Workforce issue 333). /tmp holds uploads
+    # while they arrive (multipart parts go to disk: 12 MB a request at most), Tomcat's work folder and the secrets the
+    # entrypoint copies; the inspection pack and every export are built in memory. 256m is about twenty full uploads
+    # at once.
+    tmpfs: ["/tmp:size=256m"]
+    # Reaps child processes (a PDF worker, on a test server without the docreader: Workforce ADR-0042).
+    init: true
     volumes:
       # Writable home for admin-uploaded branding assets (evidence lives in MinIO)
       - app_data:/app/data
+      # The docreader's socket (Workforce ADR-0042): the only way to it. A tmpfs folder only this user can open (0700).
+      - pdf_socket:/run/pdf
       # Staging-TLS mode: truststore built by install.sh when production certs are
       # unavailable. Absent in normal operation (compose tolerates a missing file
       # only if declared with the file existing — install.sh always creates it).
@@ -386,6 +394,9 @@ services:
       BRAND_DATA_DIR: /app/data/branding
       WORKFORCE_TLS_TRUSTSTORE: /app/api-truststore.jks
       WORKFORCE_OIDC_SIGNING_KEY_PEM: /run/oidc/signing-pub.pem
+      # Untrusted PDFs are read by the docreader, never in the api (Workforce ADR-0042). Without it the api reads
+      # them in a worker inside its own container on a test server only, and refuses to start in production.
+      WORKFORCE_DOCREADER_SOCKET: /run/pdf/docreader.sock
       # Outbound email (#6): empty SMTP_HOST keeps the ledger in log-only mode.
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -533,9 +544,76 @@ services:
         # pending (404). Without this gate the api caches a broken client
         # registration for its whole lifetime.
         condition: service_completed_successfully
+      docreader:
+        # Started first, not waited for: the api reaches it for each PDF, and says "busy" while it isn't there.
+        condition: service_started
     # No dependency on the gateway: api retries its OIDC discovery fetch until
     # authentik is up; the gateway in turn waits for api (started) and authentik
     # (healthy) so the whole graph resolves without a cycle.
+
+  # Untrusted PDFs are read here, never in the api (Workforce ADR-0042, issue 330): certificates, policies, HR templates
+  # and signed copies. The same signed image as the api, with a different start command: a supervisor that never parses
+  # anything keeps one warmed-up, single-use worker ready and kills each at its deadline (10 s for a certificate, 30 s
+  # for the rest) or when the api hangs up. An escape from the native code a PDF can reach (colour profiles, JPEG, zlib)
+  # gets nothing: no network, no secrets, no other volumes, a read-only file system and its own memory, processor and
+  # process limits.
+  docreader:
+    image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    # Only the socket's folder, shared with the api. No secrets, no data, no other volume.
+    volumes:
+      - pdf_socket:/run/pdf
+    # Every capability dropped but switching user and stopping a process: concurrent jobs (which may be different
+    # organisations' documents) run as different users (10001, 10002) with no capabilities at all, so one can never see
+    # another, nor the supervisor; and the supervisor can still kill a worker of another user at its deadline. It
+    # starts as root only for setpriv, which at once becomes the app user (999, the socket folder's owner) keeping just
+    # those three capabilities; no-new-privileges means nothing can gain more. Measured in the image on 9 November
+    # 2026: workers as 10001 and 10002 with none, a 3-second deadline kept, and uid 1000 can't see the socket. Before a
+    # place's user is used again, every process of that user is killed and waited for, and the next worker removes what
+    # that user left in /tmp and /dev/shm before it reads anything: the next job may be another organisation's.
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, KILL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    entrypoint:
+      - /usr/bin/setpriv
+      - --reuid=999
+      - --regid=999
+      - --clear-groups
+      - --inh-caps=+setuid,+setgid,+kill
+      - --ambient-caps=+setuid,+setgid,+kill
+      - --
+      - /opt/java/openjdk/bin/java
+      - -Xmx32m
+      - -XX:+UseSerialGC
+      - -XX:TieredStopAtLevel=1
+      - -XX:-UsePerfData
+      - -XX:+ExitOnOutOfMemoryError
+      - -Djava.io.tmpdir=/tmp
+      - -cp
+      - /app/pdf-worker/pdf-worker.jar
+      - com.careangelssupport.workforce.shared.pdf.worker.Supervisor
+    command: ["--socket", "/run/pdf/docreader.sock", "--jar", "/app/pdf-worker/pdf-worker.jar", "--uids", "10001,10002"]
+    environment:
+      TZ: Europe/London
+    deploy:
+      resources:
+        # The supervisor (about 40 MB), one warm worker (about 70 MB) and two at work (up to about 250 MB each, native
+        # colour code included). A worker makes itself the first to go when memory runs out; the api is untouched.
+        limits: { memory: 512m, cpus: "1.0", pids: 128 }
+    logging: *default-logging
+    stop_grace_period: 10s
+    healthcheck:
+      # The socket is there (looked at as the app user: the folder is its alone).
+      test: ["CMD", "/usr/bin/setpriv", "--reuid=999", "--regid=999", "--clear-groups", "/usr/bin/test", "-S", "/run/pdf/docreader.sock"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   worker:
     image: ${API_IMAGE:? API_IMAGE is required in deploy/.env - the published image, e.g. ghcr.io/marlon-thomas/workforce-suite}:${APP_VERSION:-latest}
@@ -554,6 +632,9 @@ services:
       SPRING_PROFILES_ACTIVE: prod
       SPRING_FLYWAY_ENABLED: "false"
       WORKFORCE_SCHEDULER_ENABLED: "true"
+      # It never reads a PDF (Workforce ADR-0042): without this it would refuse to start, as the api does without the
+      # docreader. It has no way to the docreader either.
+      WORKFORCE_PDF_READER: none
       # Outbound email (#6): empty SMTP_HOST keeps the ledger in log-only mode.
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -947,6 +1028,14 @@ volumes:
   ak_pg_data:
   mailpit_data:
   webmail_data:
+  # The docreader's socket (Workforce ADR-0042): in memory, and a folder only the app user (999) can open, shared by
+  # the api and the docreader and nothing else.
+  pdf_socket:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "uid=999,gid=999,mode=0700,size=1m"
 
 networks:
   front:
