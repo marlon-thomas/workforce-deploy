@@ -537,7 +537,9 @@ services:
     # another, nor the supervisor; and the supervisor can still kill a worker of another user at its deadline. It
     # starts as root only for setpriv, which at once becomes the app user (999, the socket folder's owner) keeping just
     # those three capabilities; no-new-privileges means nothing can gain more. Measured in the image on 9 November
-    # 2026: workers as 10001 and 10002 with none, a 3-second deadline kept, and uid 1000 can't see the socket.
+    # 2026: workers as 10001 and 10002 with none, a 3-second deadline kept, and uid 1000 can't see the socket. Before a
+    # place's user is used again, every process of that user is killed and waited for, and the next worker removes what
+    # that user left in /tmp and /dev/shm before it reads anything: the next job may be another organisation's.
     user: "0:0"
     cap_drop: [ALL]
     cap_add: [SETUID, SETGID, KILL]
@@ -596,6 +598,9 @@ services:
       SPRING_PROFILES_ACTIVE: prod
       SPRING_FLYWAY_ENABLED: "false"
       WORKFORCE_SCHEDULER_ENABLED: "true"
+      # It never reads a PDF (Workforce ADR-0042): without this it would refuse to start, as the api does without the
+      # docreader. It has no way to the docreader either.
+      WORKFORCE_PDF_READER: none
       # Outbound email (#6): empty SMTP_HOST keeps the ledger in log-only mode.
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}

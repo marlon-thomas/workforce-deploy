@@ -69,6 +69,12 @@ def main(path):
          "api: /tmp must be a tmpfs with a size (issue 333)")
     need(api.get("init") is True, "api: init must be true (issue 333)")
 
+    # The scheduler's worker serves web traffic too, so it must say it reads no PDFs, or it won't start.
+    worker = services.get("worker")
+    if worker is not None:
+        need(str((worker.get("environment") or {}).get("WORKFORCE_PDF_READER", "")) == "none",
+             "worker: WORKFORCE_PDF_READER must be none (it never reads a PDF, and has no docreader)")
+
     # Nothing else shares the socket.
     for name, s in services.items():
         if name in ("api", "docreader"):
