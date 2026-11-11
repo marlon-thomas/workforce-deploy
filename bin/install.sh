@@ -2,9 +2,11 @@
 # install.sh — Workforce, B-mode appliance installer
 # (deployment-spec §B2: "paste one line, answer six questions").
 #
-# Run as root on a fresh VPS:   ./bin/install.sh
-# Local/no-TLS test run:        ./bin/install.sh --smoke
-# Classic system docker:        ./bin/install.sh --system-docker
+# Run as root on a fresh VPS:   ./bin/install.sh --env prod             (the release in environments/prod.env)
+# The hosted platform:          ./bin/install.sh --env prod --hosted
+# A particular release:         ./bin/install.sh --version <release>
+# Local/no-TLS test run:        add --smoke
+# Classic system docker:        add --system-docker
 #
 # This script is the INTERACTIVE front door only:
 #   root phase  : service user, bundle relocation, Docker, registry login
@@ -26,6 +28,8 @@ RECOVERING=0
 # reads on a truly fresh service-phase run — the fresh install must work too).
 SERVICE_USER="${SERVICE_USER:-workforce_app_sa}"
 ENV_NAME_ARG=""
+VERSION_ARG=""
+HOSTED=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --smoke) SMOKE=1; shift ;;
@@ -36,6 +40,13 @@ while [ $# -gt 0 ]; do
     --env)
       if [ $# -lt 2 ]; then echo "--env needs a value (test|prod)"; exit 1; fi
       ENV_NAME_ARG="$2"; shift 2 ;;
+    # The release to install, when no environment file names one (and how the root phase tells the
+    # service user's phase the version it settled on).
+    --version)
+      if [ $# -lt 2 ]; then echo "--version needs a release, e.g. --version 0.2.130"; exit 1; fi
+      VERSION_ARG="$2"; shift 2 ;;
+    # The hosted platform: environments/hosted.env on top of environments/prod.env (needs --env prod).
+    --hosted) HOSTED=1; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
   # No trailing shift here: each branch consumes exactly what it needs. A
@@ -45,8 +56,53 @@ while [ $# -gt 0 ]; do
 done
 [ -n "${ENV_NAME_ARG}" ] && { [ "${ENV_NAME_ARG}" = "test" ] || [ "${ENV_NAME_ARG}" = "prod" ] \
   || { echo "Unknown environment: ${ENV_NAME_ARG} (test|prod)"; exit 1; }; }
+if [ "${HOSTED}" -eq 1 ] && [ "${ENV_NAME_ARG}" != "prod" ]; then
+  echo "--hosted goes on top of the production settings: ./bin/install.sh --env prod --hosted"; exit 1
+fi
+
+# ---------------------------------------------------------------- the version, settled once
+# Workforce issue 422: an image is used only by the digest the release key signed, so the installer must
+# know which release before it touches one, and both phases must mean the same one. Settled here, from:
+#   1. .env, on a server already installed: that's the version it runs (./bin/update.sh changes it);
+#   2. --version <release>, or APP_VERSION=<release> in the environment;
+#   3. APP_VERSION in environments/<env>.env (--env test|prod).
+# Nothing else: with no version named the installer stops here, before anything changes. The root phase
+# hands the result to the service user's phase as --version, so the two can't differ.
+env_file_version() {   # FILE — the APP_VERSION it sets, if any
+  [ -f "$1" ] || return 0
+  sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}APP_VERSION=//p' "$1" | tail -1 | tr -d "\"' \r"
+}
+INSTALLED_ENV=".env"
+if [ ! -f .env ] && [ "$(id -u)" -eq 0 ] && [ -f "${WORKFORCE_TARGET:-/opt/workforce-deploy}/.env" ]; then
+  INSTALLED_ENV="${WORKFORCE_TARGET:-/opt/workforce-deploy}/.env"   # a root re-run from the original clone
+fi
+INSTALLED_VERSION="$(env_file_version "$INSTALLED_ENV")"
+ASKED_VERSION="${VERSION_ARG:-${APP_VERSION:-}}"
+if [ -n "$INSTALLED_VERSION" ]; then
+  if [ -n "$ASKED_VERSION" ] && [ "$ASKED_VERSION" != "$INSTALLED_VERSION" ]; then
+    echo "This server is already installed with ${INSTALLED_VERSION} (.env), not ${ASKED_VERSION}."
+    echo "Change versions with ./bin/update.sh ${ASKED_VERSION}; the installer only resumes or repairs the version installed."
+    exit 1
+  fi
+  INSTALL_VERSION="$INSTALLED_VERSION"
+elif [ -n "$ASKED_VERSION" ]; then
+  INSTALL_VERSION="$ASKED_VERSION"
+elif [ -n "${ENV_NAME_ARG}" ] && [ -n "$(env_file_version "environments/${ENV_NAME_ARG}.env")" ]; then
+  INSTALL_VERSION="$(env_file_version "environments/${ENV_NAME_ARG}.env")"
+else
+  echo "Which release should this install? None is named."
+  echo "  An organisation's own server:  ./bin/install.sh --env prod            (the release in environments/prod.env)"
+  echo "  The hosted platform:           ./bin/install.sh --env prod --hosted"
+  echo "  A particular release:          ./bin/install.sh --version <release>   (e.g. 0.2.130; the release notes name the latest)"
+  exit 1
+fi
+p="$(release_ref_problem ghcr.io/marlon-thomas/workforce-suite "$INSTALL_VERSION")"
+[ -z "$p" ] || { echo "$p"; exit 1; }
+
 # What to type to resume after a failure (printed by every failure path).
 RESUME_CMD="./bin/install.sh${ENV_NAME_ARG:+ --env ${ENV_NAME_ARG}}"
+[ "${HOSTED}" -eq 1 ] && RESUME_CMD="${RESUME_CMD} --hosted"
+[ -n "${VERSION_ARG}" ] && RESUME_CMD="${RESUME_CMD} --version ${INSTALL_VERSION}"
 [ "${SMOKE}" -eq 1 ] && RESUME_CMD="${RESUME_CMD} --smoke"
 [ "${RECOVERING}" -eq 1 ] && RESUME_CMD="./bin/recover.sh (as root, the same command as before)"
 
@@ -305,13 +361,16 @@ INV
   GW_IMAGE="${GATEWAY_IMAGE:-}"
   if [ -z "$GW_IMAGE" ]; then
     if [ "${TLS_MODE:-http01}" = "dns01" ] && [ "${SMOKE:-0}" = "0" ]; then
-      GW_IMAGE="ghcr.io/marlon-thomas/workforce-deploy-gateway:latest"
+      GW_IMAGE="$GATEWAY_DNS01_IMAGE"
     else
       GW_IMAGE="$GATEWAY_STOCK_IMAGE"
     fi
   fi
   # A .env from before Workforce issue 53 names stock caddy by its tag alone: run again, the installer pins it.
+  # The DNS-01 build is ours and moves with each build, so it always runs this bundle's pin (common.sh).
   case "$GW_IMAGE" in
+    ghcr.io/marlon-thomas/workforce-deploy-gateway|ghcr.io/marlon-thomas/workforce-deploy-gateway[:@]*)
+      GW_IMAGE="$GATEWAY_DNS01_IMAGE" ;;
     *@sha256:*) ;;
     caddy:*|docker.io/caddy:*|docker.io/library/caddy:*) GW_IMAGE="$GATEWAY_STOCK_IMAGE" ;;
   esac
@@ -340,7 +399,7 @@ INV
   WFV_github_token="${GITHUB_TOKEN}" \
   WFV_ak_admin_password="${ADMIN_PASSWORD}" \
   WFV_acme_email="${ACME_EMAIL}" \
-  WFV_app_version="${APP_VERSION:-0.2.9}" \
+  WFV_app_version="${APP_VERSION}" \
   WFV_app_digest="${APP_DIGEST:-}" \
   WFV_gateway_image="${GW_IMAGE}" \
   WFV_gateway_caddyfile="${GW_CADDYFILE}" \
@@ -614,23 +673,15 @@ PROF
   DSU="sudo -u $SERVICE_USER env HOME=/home/$SERVICE_USER \
     XDG_RUNTIME_DIR=/run/user/$(id -u $SERVICE_USER) \
     DOCKER_HOST=unix://${SU_SOCK}"
-  # Root phase: API_IMAGE/APP_VERSION are not loaded yet — use the literal
-  # published repository and the version the service phase will pin (.env on a
-  # resume, else the environment file, else the installer's default). Like every
-  # Workforce image, used only by the digest the release key signed (Workforce
-  # issue 422), checked and pulled as the service user, whose login it needs.
-  ROOT_APP_VERSION="${APP_VERSION:-}"
-  if [ -z "$ROOT_APP_VERSION" ] && [ -f .env ]; then
-    ROOT_APP_VERSION="$(sed -n 's/^APP_VERSION=//p' .env | tail -1)"
-  fi
-  if [ -z "$ROOT_APP_VERSION" ] && [ -n "${ENV_NAME_ARG}" ] && [ -f "environments/${ENV_NAME_ARG}.env" ]; then
-    ROOT_APP_VERSION="$(sed -n 's/^APP_VERSION=//p' "environments/${ENV_NAME_ARG}.env" | tail -1)"
-  fi
-  ROOT_APP_VERSION="${ROOT_APP_VERSION:-0.2.9}"
+  # Root phase: API_IMAGE is not loaded yet — use the literal published
+  # repository, and the version settled at the start (INSTALL_VERSION, the one the
+  # service phase pins). Like every Workforce image, used only by the digest the
+  # release key signed (Workforce issue 422), checked and pulled as the service
+  # user, whose login it needs.
   SUITE_IMAGE=""
   if [ ! -f secrets/api-truststore.jks ] || [ -s secrets/tls/ca.crt ]; then
-    SUITE_IMAGE="$($DSU bash ./bin/verify-image.sh "${ROOT_APP_VERSION}" ghcr.io/marlon-thomas/workforce-suite)" \
-      || fail "${ROOT_APP_VERSION} is refused: the reason is just above. No Workforce image was used.
+    SUITE_IMAGE="$($DSU bash ./bin/verify-image.sh "${INSTALL_VERSION}" ghcr.io/marlon-thomas/workforce-suite)" \
+      || fail "${INSTALL_VERSION} is refused: the reason is just above. No Workforce image was used.
      Resume after fixing: ${RESUME_CMD}"
   fi
   if [ ! -f secrets/api-truststore.jks ]; then
@@ -686,6 +737,9 @@ PROF
   # loses the env-file prefill (domain, subdomains, TLS mode) entirely.
   FLAGS=""
   [ -n "${ENV_NAME_ARG}" ] && FLAGS="--env ${ENV_NAME_ARG}"
+  [ "${HOSTED}" -eq 1 ] && FLAGS="${FLAGS} --hosted"
+  # The version settled at the start (checked there: plain characters only), so both phases install the same one.
+  FLAGS="${FLAGS} --version ${INSTALL_VERSION}"
   [ "${SMOKE}" -eq 1 ] && FLAGS="${FLAGS} --smoke"
   [ "${SYSTEM_DOCKER}" -eq 1 ] && FLAGS="${FLAGS} --system-docker"
   [ "${RECOVERING}" -eq 1 ] && FLAGS="${FLAGS} --recovering"
@@ -735,6 +789,14 @@ if [ -n "${ENV_NAME_ARG}" ] && [ -f "environments/${ENV_NAME_ARG}.env" ]; then
   # shellcheck disable=SC1090  # chosen at run time
   . "environments/${ENV_NAME_ARG}.env"
 fi
+# The hosted platform's few differences, on top of prod.env (Workforce ADR-0008, issue 341).
+if [ "${HOSTED}" -eq 1 ]; then
+  say "Loading the hosted platform's settings (environments/hosted.env)"
+  # shellcheck source=../environments/hosted.env
+  . environments/hosted.env
+fi
+# The version settled at the start, whatever the files just read say (they can only agree or be older).
+APP_VERSION="${INSTALL_VERSION}"
 
 if [ -f .env ]; then
     warn "This deployment is already configured (.env exists) — resuming…"
@@ -742,6 +804,7 @@ if [ -f .env ]; then
     SERVICE_USER="${SERVICE_USER:-workforce_app_sa}"
     # shellcheck disable=SC1091
     . ./.env
+    APP_VERSION="${INSTALL_VERSION}"   # .env's own, settled at the start
     if [ "${API_IMAGE}" = "ghcr.io/careangels/workforce-suite" ]; then
       sed -i 's|^API_IMAGE=.*|API_IMAGE=ghcr.io/marlon-thomas/workforce-suite|' .env
       API_IMAGE="ghcr.io/marlon-thomas/workforce-suite"
@@ -957,7 +1020,7 @@ GATEWAY_CADDYFILE_DEFAULT="./gateway/Caddyfile"
 case "${TLS_MODE:-http01}" in
   dns01)
     if [ "${SMOKE}" -eq 0 ]; then
-      GATEWAY_IMAGE_DEFAULT="ghcr.io/marlon-thomas/workforce-deploy-gateway:latest"
+      GATEWAY_IMAGE_DEFAULT="$GATEWAY_DNS01_IMAGE"
       GATEWAY_CADDYFILE_DEFAULT="./gateway/Caddyfile.duckdns"
     fi ;;
   certs)
@@ -991,7 +1054,7 @@ AK_DB_USER=authentik
 OIDC_ISSUER=https://${AUTH_HOSTNAME}/application/o/workforce/
 
 API_IMAGE=ghcr.io/marlon-thomas/workforce-suite
-APP_VERSION=${APP_VERSION:-0.2.9}
+APP_VERSION=${APP_VERSION}
 
 # ADR-0026: the emergency administrator's recovery email, OUTSIDE this server.
 ADMIN_RECOVERY_EMAIL=${ADMIN_RECOVERY_EMAIL:-}

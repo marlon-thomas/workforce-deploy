@@ -147,6 +147,12 @@ echo 'ADMIN_RECOVERY_EMAIL=you@your-own-provider.example' >> .env   # an address
 
 To change it later, edit the line in `.env` and run `./bin/update.sh <version>` again (the
 running version is fine).
+
+Re-running the same version works only on a server whose version was checked against the
+release key (`APP_DIGEST` in `.env`; doctor's "release signature" row is OK). A server
+installed before releases were signed is refused its own version: update it to the first
+signed release (`./bin/update.sh <release>`, which converges identity too), and from then
+on the same-version command above works (RUNBOOK, "Release signatures").
 Signing in with the username `admin` keeps working; the email is what changes.
 
 ## Versioning

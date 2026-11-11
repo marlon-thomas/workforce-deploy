@@ -79,7 +79,7 @@ rule
 
 # --- configuration present?
 if [ ! -f .env ]; then
-  row "configuration" fail ".env missing — the installer has not run here (./bin/install.sh)"
+  row "configuration" fail ".env missing — the installer has not run here (./bin/install.sh --env prod)"
   finish
 fi
 # shellcheck disable=SC1091
@@ -121,7 +121,7 @@ fi
 # In the backup container, one clear failure rather than every service "not running" (a wrong
 # DOCKER_SOCK means nightly backups and these checks cannot run at all).
 if [ "$IN_STACK" -eq 1 ] && ! docker version >/dev/null 2>&1; then
-  row "docker access" fail "the backup container can't reach Docker (DOCKER_SOCK=${DOCKER_SOCK:-unset}) — nightly backups and health checks can't run; ./bin/update.sh <running version> corrects it"
+  row "docker access" fail "the backup container can't reach Docker (DOCKER_SOCK=${DOCKER_SOCK:-unset}) — nightly backups and health checks can't run; $(same_version_fix) corrects it"
   finish
 fi
 for svc in gateway api worker postgres object-storage clamav authentik-server; do
@@ -135,7 +135,7 @@ if [ "$state" = "running" ]; then
   # Running isn't enough: it drives compose through the mounted socket. (docker may still be
   # installing on a first boot, which is not a fault.)
   if [ "$IN_STACK" -eq 0 ] && ! docker compose exec -T backup sh -c 'command -v docker >/dev/null || exit 0; docker version >/dev/null' >/dev/null 2>&1; then
-    oprow "service backup" fail "running but can't reach Docker (DOCKER_SOCK=${DOCKER_SOCK:-unset}) — nightly backups and alerts don't run; ./bin/update.sh <running version> corrects it"
+    oprow "service backup" fail "running but can't reach Docker (DOCKER_SOCK=${DOCKER_SOCK:-unset}) — nightly backups and alerts don't run; $(same_version_fix) corrects it"
   else
     oprow "service backup" ok "running (nightly backup + health watch)"
   fi
@@ -160,12 +160,14 @@ else
       row "running version" warn "api still booting (sign-in OK, discovery ${DISC}) — re-run me in a minute"
     fi
 fi
-# Workforce issue 422: the suite image runs by the digest the release key signed (APP_DIGEST). An install
-# from before signatures were checked runs it by its tag; the next ./bin/update.sh <version> checks it.
+# Workforce issue 422: the suite image runs by APP_DIGEST, which install.sh / update.sh wrote after checking
+# the release key's signature on it. This row doesn't check the signature again (that needs the registry, and
+# the doctor runs every few seconds during an update); it says what the server is pinned to. An install from
+# before releases were signed runs its version by tag and must update to a signed release.
 if [[ "${APP_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-  row "release signature" ok "runs the signed digest ${APP_DIGEST:7:12}…"
+  row "release signature" ok "pinned to digest ${APP_DIGEST:7:12}… (checked against the release key when installed or updated)"
 else
-  row "release signature" warn "runs ${APP_VERSION} by its tag, unchecked (installed before signatures were checked): ./bin/update.sh <next version> checks the next one and runs it by its signed digest"
+  row "release signature" warn "runs ${APP_VERSION} by its tag, unchecked: installed before releases were signed. Update to the first signed release (./bin/update.sh <release>); until then re-running the installer, ./bin/update.sh ${APP_VERSION} and recovery onto another server are refused"
 fi
 
 # --- DNS + TLS

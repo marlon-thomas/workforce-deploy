@@ -26,7 +26,7 @@
       echo | openssl s_client -connect {{ auth_hostname }}:443 -servername {{ auth_hostname }} 2>/dev/null \
         | openssl x509 -outform DER > /tmp/auth-cert.der
     fi
-    docker run --rm -v /opt/workforce-deploy/secrets:/out eclipse-temurin:25-jre \
+    docker run --rm -v /opt/workforce-deploy/secrets:/out eclipse-temurin:25-jre@sha256:ecdc0adb37bde1a281c4d245a3cd535004b1fc8322d560f5b09463b248c81df0 \
       keytool -importcert -noprompt -alias careangels-gateway \
       -file /out/auth-cert.der -keystore /out/api-truststore.jks -storepass changeit
     chmod 644 /opt/workforce-deploy/secrets/api-truststore.jks

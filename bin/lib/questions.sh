@@ -178,7 +178,7 @@ ask_recovery_email() {
     ans="${ans// /}"
     if [ -z "$ans" ]; then
       ADMIN_RECOVERY_EMAIL=""
-      warn "No recovery email. To add one later, set ADMIN_RECOVERY_EMAIL in .env, then ./bin/update.sh <running version>."
+      warn "No recovery email. To add one later, set ADMIN_RECOVERY_EMAIL in .env, then ./bin/update.sh <running version> (on a server installed before releases were signed, update to a signed release first: its own version is refused)."
       return 0
     fi
     case "$ans" in

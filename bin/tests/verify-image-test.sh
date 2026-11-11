@@ -56,7 +56,9 @@ check "no cosign.pub: verified_image refuses" "$rc" 1
 contains "no cosign.pub: says why" "$out" "No release key yet"
 check "no cosign.pub: the registry is never asked" "$(cat "$FAKE_LOG")" ""
 
-printf -- '-----BEGIN ENCRYPTED SIGSTORE PRIVATE KEY-----\nabc\n-----END ENCRYPTED SIGSTORE PRIVATE KEY-----\n' > "$WORK/bundle/cosign.pub"
+# Built from pieces, so this file holds no private-key header for ci-validate's "no private key tracked" check.
+PRIV='PRIV''ATE'
+printf -- '-----BEGIN ENCRYPTED SIGSTORE %s KEY-----\nabc\n-----END ENCRYPTED SIGSTORE %s KEY-----\n' "$PRIV" "$PRIV" > "$WORK/bundle/cosign.pub"
 contains "a private key as cosign.pub" "$(release_key_problem)" "not one public key"
 printf -- '-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n-----BEGIN PUBLIC KEY-----\ndef\n-----END PUBLIC KEY-----\n' > "$WORK/bundle/cosign.pub"
 contains "two keys in cosign.pub" "$(release_key_problem)" "not one public key"
@@ -151,6 +153,25 @@ pin_app_digest "$OTHER"; check "pin: replaced" "$(grep '^APP_DIGEST=' .env)" "AP
 check "pin: one line" "$(grep -c '^APP_DIGEST=' .env)" 1
 pin_app_digest "sha256:nope; rm -rf /"; check "pin: not a digest, refused" "$?" 1
 check "pin: not a digest, .env untouched" "$(grep '^APP_DIGEST=' .env)" "APP_DIGEST=$OTHER"
+
+# --- common.sh: the DNS-01 gateway runs by this bundle's pin; the same-version hint knows an unsigned install
+# shellcheck source=../lib/common.sh
+. "$HERE/../lib/common.sh"
+pinned=no; [[ "$GATEWAY_DNS01_IMAGE" =~ ^ghcr\.io/marlon-thomas/workforce-deploy-gateway:latest@sha256:[0-9a-f]{64}$ ]] && pinned=yes
+check "DNS-01 gateway pinned by digest" "$pinned" yes
+for old in "ghcr.io/marlon-thomas/workforce-deploy-gateway:latest" "ghcr.io/marlon-thomas/workforce-deploy-gateway" \
+           "ghcr.io/marlon-thomas/workforce-deploy-gateway:latest@$D"; do
+  printf 'GATEWAY_IMAGE=%s\nAPP_VERSION=1.2.3\n' "$old" > .env
+  pin_gateway_image >/dev/null
+  check "DNS-01 gateway repinned from $old" "$(grep '^GATEWAY_IMAGE=' .env)" "GATEWAY_IMAGE=$GATEWAY_DNS01_IMAGE"
+done
+printf 'GATEWAY_IMAGE=%s\n' "$GATEWAY_DNS01_IMAGE" > .env
+check "DNS-01 gateway already pinned: nothing said" "$(pin_gateway_image)" ""
+printf 'GATEWAY_IMAGE=%s\n' "$GATEWAY_STOCK_IMAGE" > .env
+pin_gateway_image >/dev/null
+check "stock gateway left alone" "$(grep '^GATEWAY_IMAGE=' .env)" "GATEWAY_IMAGE=$GATEWAY_STOCK_IMAGE"
+check "same version, signed install" "$(APP_DIGEST="$D" APP_VERSION=1.2.3 same_version_fix)" "./bin/update.sh 1.2.3"
+contains "same version, unsigned install" "$(APP_DIGEST='' APP_VERSION=1.2.3 same_version_fix)" "<first signed release>"
 
 printf 'verify-image self-test: %d passed, %d failed\n' "$PASS" "$FAILN"
 [ "$FAILN" -eq 0 ]

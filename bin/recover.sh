@@ -100,7 +100,7 @@ DAMAGED_WORDS="This copy is damaged or incomplete: something in it is missing or
 
 NO_CONFIG_WORDS="This copy holds the data, but not the server's settings and secrets: it was made before they
    were added to off-site copies. This script can't use it, and nothing was changed. Do this instead:
-     ./bin/install.sh                                    (answer its questions as for a new server)
+     ./bin/install.sh --env prod                         (answer its questions as for a new server)
      ./bin/restore.sh --identity - <this copy>           (it repairs signing in, and says what to do)
    RUNBOOK, \"Recovering onto a new server\", says what a restore like that can't bring back."
 

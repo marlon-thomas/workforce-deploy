@@ -48,11 +48,24 @@ Open the provider's **console** (black window in the browser) — you are root t
 ```bash
 git clone https://github.com/marlon-thomas/workforce-deploy.git
 cd workforce-deploy
-./bin/install.sh
+./bin/install.sh --env prod
 ```
 
 (The deployment bundle is a small **public** repository — no GitHub account needed to
 clone it. Only the container-image pull later requires the token.)
+
+The installer has to know which release to install, and it stops before changing anything
+when nothing names one:
+
+| Installing | Run |
+|---|---|
+| An organisation's own server | `./bin/install.sh --env prod` (the release `environments/prod.env` names in `APP_VERSION`) |
+| The hosted platform | `./bin/install.sh --env prod --hosted` (prod.env, with `environments/hosted.env`'s few differences on top) |
+| A particular release | add `--version <release>`, e.g. `--version 0.2.130`; the release notes name the latest |
+| The TEST appliance | nothing by hand: `python3 bin/deploy_to_test.py` runs `./bin/install.sh --env test` |
+
+On a server already installed, the installer keeps the version in `.env` and refuses another one:
+change versions with `./bin/update.sh <release>`.
 
 The installer bootstraps the whole machine by itself:
 
@@ -112,8 +125,23 @@ refused, and nothing is changed. `./bin/verify-image.sh <version>` makes the sam
 - cosign runs from its official image, pinned by digest (`bin/lib/signatures.sh`); nothing is
   installed on the server. It talks to the image registry only: no transparency log or other
   public service.
-- `./bin/doctor.sh` warns ("release signature") on a server installed before this check, which
-  still runs its version by its tag. The next `./bin/update.sh <version>` checks it.
+- The DNS-01 gateway (`TLS_MODE=dns01`), which Workforce builds, runs by the digest pinned in
+  `bin/lib/common.sh` (`GATEWAY_DNS01_IMAGE`), never by its `latest` tag. `./bin/update.sh` moves
+  `.env` to the bundle's pin.
+
+**A server installed before releases were signed** (0.2.129 and earlier) runs its version by
+its tag, and `./bin/doctor.sh` warns ("release signature"). That version was never signed, so
+until the server moves to a signed release, everything that would use it again is refused:
+re-running `./bin/install.sh`, `./bin/update.sh <running version>` (the usual way to re-apply a
+setting changed in `.env`), and `./bin/recover.sh` onto another server. Update it first:
+
+```bash
+./bin/update.sh <first signed release>     # checks the signature, then runs that digest
+```
+
+From then on the same-version commands work again. Take a fresh backup after that update: a
+backup made on an unsigned version can't be recovered onto a new server, which would have to
+install that same unsigned version.
 
 ## 6. First sign-in
 
@@ -123,7 +151,8 @@ refused, and nothing is changed. `./bin/verify-image.sh <version>` makes the sam
   mailbox). Once the organisation exists, set up your own account in Setup → Administrator
   accounts and work from that. Give the emergency account a recovery email outside this server:
   `ADMIN_RECOVERY_EMAIL` in `.env`, then `./bin/update.sh <running version>` (README → "The
-  emergency administrator and its recovery email").
+  emergency administrator and its recovery email"). On a server installed before releases
+  were signed, update to a signed release first ("Release signatures" above).
 
 ## 6a. Jobs from the app
 
@@ -685,7 +714,7 @@ Exit 0 = yes, 3 = it's an older copy with data only, 6 = the wrong key, 1 = it's
 Copies made before this was added hold only the data, and `recover.sh` says so and stops. Backups from a server's own
 `backups/` folder never hold them. Those can still be restored, with more work and more lost:
 
-    ./bin/install.sh                                  # answer the questions as for a new server, with the same names
+    ./bin/install.sh --env prod                       # answer the questions as for a new server, with the same names
     ./bin/restore.sh --identity - <name>.tar.gz.age   # or ./bin/restore.sh <name>.tar.gz, for a plain one
 
 `restore.sh` makes signing in work again by itself: it takes the sign-in key from the restored database, and restarts the

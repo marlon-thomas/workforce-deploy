@@ -52,9 +52,10 @@ CAPS = {
 }
 SOCKET_ALLOWED = {"backup"}
 
-# Our own images, which move with each release rather than by a pin here: the suite (APP_VERSION) and the DNS-01
-# gateway build (TLS_MODE=dns01). ADR-0032's signed release manifest is what pins their digests.
-OWN_MOVING = ("ghcr.io/marlon-thomas/workforce-suite", "ghcr.io/marlon-thomas/workforce-deploy-gateway")
+# Our own image that moves with each release rather than by a pin here: the suite (APP_VERSION), which runs by the
+# digest the release key signed (APP_DIGEST, bin/lib/signatures.sh). The DNS-01 gateway build is pinned by digest
+# like any other image (GATEWAY_DNS01_IMAGE in bin/lib/common.sh).
+OWN_MOVING = ("ghcr.io/marlon-thomas/workforce-suite",)
 
 PINNED = re.compile(r"@sha256:[0-9a-f]{64}$")
 IMAGE_SHAPE = re.compile(r"^[a-z0-9][a-z0-9._/:@-]*$")

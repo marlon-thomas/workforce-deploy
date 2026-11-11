@@ -287,13 +287,40 @@ alert_address_problems() {
 # the default in compose.yaml and ansible/roles/workforce/templates/env.j2; bin/check-hardening.py checks that.
 GATEWAY_STOCK_IMAGE="caddy:2.8.4@sha256:226d1f059b75399fe19182893c7184591c07b97afc8dfcf44eeb80c9a77a530f"
 
+# ------------------------------------------------------------------ re-running the same version
+# same_version_fix — what to run to re-apply the settings with the version this server runs. Workforce issue 422:
+# install.sh and update.sh use only an image the release key signed, so a server installed before releases were
+# signed (no APP_DIGEST in .env) is refused its own version, and must first update to a signed release.
+same_version_fix() {
+  if [[ "${APP_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "./bin/update.sh ${APP_VERSION:-<running version>}"
+  else
+    echo "./bin/update.sh <first signed release> (this server was installed before releases were signed, so its own version is refused; after that update, ./bin/update.sh <running version> works)"
+  fi
+}
+
+# ------------------------------------------------------------------ the DNS-01 gateway image
+# TLS_MODE=dns01's gateway: caddy with the DuckDNS plugin, built from gateway/Dockerfile by
+# .github/workflows/build-gateway.yml. It terminates all TLS and holds the DuckDNS token, and anything that can
+# push to the package can move its tag, so it runs by this digest, never by `latest` (Workforce issue 422's
+# review). The digest is the one that workflow's run on main (210419d, run 42611283067) pushed; after a rebuild,
+# take the digest from the run's summary and move it here in a reviewed change. bin/digest-check.py fails daily
+# while `latest` names other bytes than this pin.
+GATEWAY_DNS01_IMAGE="ghcr.io/marlon-thomas/workforce-deploy-gateway:latest@sha256:b736e9ab216c9c241d405b96b0a6222dcba15f1b9e323a668030bb188cc5e80c"
+
 # pin_gateway_image — a .env that names stock caddy by its tag alone (installs before issue 53: caddy:2.8.4) gets
-# the pinned image. Anything else is left as it is: an image already pinned, or the DNS-01 gateway build.
+# the pinned image, and one that names the DNS-01 build any other way than this bundle's pin (by tag alone, or
+# an older digest) gets this bundle's pin. Anything else is left as it is.
 pin_gateway_image() {
   [ -f .env ] || return 0
   if grep -qE '^GATEWAY_IMAGE=(docker\.io/(library/)?)?caddy:[^@]*$' .env; then
     sed -i "s|^GATEWAY_IMAGE=.*|GATEWAY_IMAGE=${GATEWAY_STOCK_IMAGE}|" .env
     echo "Pinned the gateway image in .env by its digest: ${GATEWAY_STOCK_IMAGE%%@*}"
+  fi
+  if grep -qE '^GATEWAY_IMAGE=ghcr\.io/marlon-thomas/workforce-deploy-gateway([:@]|$)' .env \
+     && ! grep -qxF "GATEWAY_IMAGE=${GATEWAY_DNS01_IMAGE}" .env; then
+    sed -i "s|^GATEWAY_IMAGE=.*|GATEWAY_IMAGE=${GATEWAY_DNS01_IMAGE}|" .env
+    echo "Pinned the DNS-01 gateway image in .env by its digest: ${GATEWAY_DNS01_IMAGE##*@}"
   fi
 }
 
