@@ -80,6 +80,16 @@ ENV
   else
     bad "docreader isolation or api tmpfs/init"
   fi
+  # Workforce ADR-0032 §2: the suite as the appliance controller runs it. No host path, no file secret and no Docker
+  # socket; each service only its own folder of the controller's volume, read-only.
+  # Every profile the controller can switch on: all of them except the one only today's host layout uses.
+  ctl_profiles="$(docker compose --env-file "$TMP/ci.env" -f compose.yaml -f compose.controller.yaml config --profiles | grep -vx host-layout-only | paste -sd, -)"
+  if COMPOSE_PROFILES="$ctl_profiles" docker compose --env-file "$TMP/ci.env" -f compose.yaml -f compose.controller.yaml config --format json > "$TMP/controller.json" \
+     && python3 -I bin/check-controller-compose.py "$TMP/controller.json"; then
+    echo "ok   compose.controller.yaml: no host path, file secret or socket; each service its own folder"
+  else
+    bad "compose.controller.yaml (bin/check-controller-compose.py, above)"
+  fi
   # Workforce issue 422: with APP_DIGEST in .env (install.sh and update.sh write it once the release key's
   # signature checks out), every service of the suite image runs that digest.
   { cat "$TMP/ci.env"; echo "APP_DIGEST=sha256:$(printf '%064d' 0 | tr 0 a)"; } > "$TMP/ci-digest.env"

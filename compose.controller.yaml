@@ -1,0 +1,135 @@
+# The suite as the appliance controller runs it (Workforce ADR-0032 §2; the controller's
+# controller/src/state/layout.mjs): compose.yaml with every host folder, host file and file secret replaced by
+# a folder or file of the controller's own volume, mounted by subpath, read-only, each service given only its
+# own `services/<service>/…` (the controller's allow-list proxy refuses anything else, and any host path).
+#
+#   docker compose -f compose.yaml -f compose.controller.yaml …
+#
+# Paths given to the Docker API resolve on the host, not in the controller, so no `./…` mount and no
+# `secrets: file:` can work there; bin/check-controller-compose.py fails CI if one comes back. compose.yaml
+# itself is unchanged: the install path of today keeps using it until the controller ships (ADR-0032).
+# Needs Docker Engine 26 or later (volume subpaths).
+
+x-own: &own
+  type: volume
+  source: controller
+  read_only: true
+
+services:
+  api:
+    volumes: !override
+      - app_data:/app/data
+      - pdf_socket:/run/pdf
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/api/secrets } }
+      - { <<: *own, target: /run/workforce-branding, volume: { subpath: services/api/branding } }
+      - { <<: *own, target: /app/api-truststore.jks, volume: { subpath: services/api/api-truststore.jks } }
+      - { <<: *own, target: /run/oidc/signing-pub.pem, volume: { subpath: services/api/oidc-signing-pub.pem } }
+      # What the controller's health watch last found (ADR-0027), and the ADR-0031 mailbox: the api may leave a
+      # request and read a result, nothing more.
+      - { <<: *own, target: /run/workforce-status, volume: { subpath: services/api/status } }
+      - { <<: *own, target: /run/workforce-actions/requests, read_only: false, volume: { subpath: mailbox/requests } }
+      - { <<: *own, target: /run/workforce-actions/results, volume: { subpath: mailbox/results } }
+    secrets: !reset []
+
+  worker:
+    volumes: !override
+      - app_data:/app/data
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/worker/secrets } }
+      - { <<: *own, target: /run/workforce-branding, volume: { subpath: services/worker/branding } }
+      - { <<: *own, target: /app/api-truststore.jks, volume: { subpath: services/worker/api-truststore.jks } }
+    secrets: !reset []
+
+  migrate:
+    volumes: !override
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/migrate/secrets } }
+    secrets: !reset []
+
+  postgres:
+    volumes: !override
+      - pg_data:/var/lib/postgresql/data
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/postgres/secrets } }
+    secrets: !reset []
+
+  authentik-postgres:
+    volumes: !override
+      - ak_pg_data:/var/lib/postgresql/data
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/authentik-postgres/secrets } }
+    secrets: !reset []
+
+  authentik-server:
+    volumes: !override
+      - ak_media:/data/media
+      - ak_certs:/certs
+      - ak_geoip:/geoip
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/authentik-server/secrets } }
+      - { <<: *own, target: /etc/authentik/config.yml, volume: { subpath: services/authentik-server/config.yml } }
+      - { <<: *own, target: /blueprints/workforce-app.yaml, volume: { subpath: services/authentik-server/blueprints/workforce-app.yaml } }
+      - { <<: *own, target: /blueprints/webmail-app.yaml, volume: { subpath: services/authentik-server/blueprints/webmail-app.yaml } }
+      - { <<: *own, target: /workforce, volume: { subpath: services/authentik-server/workforce } }
+      - { <<: *own, target: /branding, volume: { subpath: services/authentik-server/branding } }
+      - { <<: *own, target: /templates, volume: { subpath: services/authentik-server/branding/authentik-templates } }
+    secrets: !reset []
+
+  authentik-worker:
+    volumes: !override
+      - ak_media:/data/media
+      - ak_certs:/certs
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/authentik-worker/secrets } }
+      - { <<: *own, target: /etc/authentik/config.yml, volume: { subpath: services/authentik-worker/config.yml } }
+      - { <<: *own, target: /blueprints/workforce-app.yaml, volume: { subpath: services/authentik-worker/blueprints/workforce-app.yaml } }
+      - { <<: *own, target: /blueprints/webmail-app.yaml, volume: { subpath: services/authentik-worker/blueprints/webmail-app.yaml } }
+      - { <<: *own, target: /workforce, volume: { subpath: services/authentik-worker/workforce } }
+      - { <<: *own, target: /branding, volume: { subpath: services/authentik-worker/branding } }
+      - { <<: *own, target: /templates, volume: { subpath: services/authentik-worker/branding/authentik-templates } }
+    secrets: !reset []
+
+  object-storage:
+    volumes: !override
+      - minio_data:/data
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/object-storage/secrets } }
+    secrets: !reset []
+
+  init:
+    volumes: !override
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/init/secrets } }
+    secrets: !reset []
+
+  mail:
+    volumes: !override
+      - { <<: *own, target: /etc/stalwart, volume: { subpath: services/mail/stalwart } }
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/mail/secrets } }
+    secrets: !reset []
+
+  mail-db-init:
+    volumes: !override
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/mail-db-init/secrets } }
+    secrets: !reset []
+
+  webmail:
+    volumes: !override
+      - webmail_data:/var/roundcube/db
+      - { <<: *own, target: /var/roundcube/config, volume: { subpath: services/webmail/config } }
+      - { <<: *own, target: /opt/workforce/plugins/workforce_identities, volume: { subpath: services/webmail/config/plugins/workforce_identities } }
+      - { <<: *own, target: /entrypoint-tasks, volume: { subpath: services/webmail/config/entrypoint-tasks } }
+      - { <<: *own, target: /usr/local/etc/php/conf.d/zz-workforce-uploads.ini, volume: { subpath: services/webmail/config/php/uploads.ini } }
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/webmail/secrets } }
+    secrets: !reset []
+
+  gateway:
+    volumes: !override
+      - { <<: *own, target: /etc/caddy/gateway, volume: { subpath: services/gateway/caddy } }
+      - { <<: *own, target: /etc/caddy/tls, volume: { subpath: services/gateway/tls } }
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # Its jobs (the nightly backup, the health watch, the ADR-0031 helper) move into the controller, which reaches
+  # Docker only through its allow-list. No service keeps the Docker socket, so this one is never started here.
+  backup:
+    profiles: !override [host-layout-only]
+
+secrets: !reset {}
+
+volumes:
+  controller:
+    external: true
+    name: ${WORKFORCE_CONTROLLER_VOLUME:-workforce-controller}
