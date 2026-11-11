@@ -85,7 +85,8 @@ ENV
   # Every profile the controller can switch on: all of them except the one only today's host layout uses.
   ctl_profiles="$(docker compose --env-file "$TMP/ci.env" -f compose.yaml -f compose.controller.yaml config --profiles | grep -vx host-layout-only | paste -sd, -)"
   if COMPOSE_PROFILES="$ctl_profiles" docker compose --env-file "$TMP/ci.env" -f compose.yaml -f compose.controller.yaml config --format json > "$TMP/controller.json" \
-     && python3 -I bin/check-controller-compose.py "$TMP/controller.json"; then
+     && COMPOSE_PROFILES="$ctl_profiles" docker compose --env-file "$TMP/ci.env" -f compose.yaml config --format json > "$TMP/base.json" \
+     && python3 -I bin/check-controller-compose.py "$TMP/controller.json" "$TMP/base.json"; then
     echo "ok   compose.controller.yaml: no host path, file secret or socket; each service its own folder"
   else
     bad "compose.controller.yaml (bin/check-controller-compose.py, above)"

@@ -85,7 +85,8 @@ services:
 
   object-storage:
     volumes: !override
-      - minio_data:/data
+      # nocopy, as compose.yaml has it: Docker's copy-up would hand the volume back to root, undoing volume-owners.
+      - { type: volume, source: minio_data, target: /data, volume: { nocopy: true } }
       - { <<: *own, target: /run/secrets, volume: { subpath: services/object-storage/secrets } }
     secrets: !reset []
 
@@ -107,7 +108,7 @@ services:
 
   webmail:
     volumes: !override
-      - webmail_data:/var/roundcube/db
+      - { type: volume, source: webmail_data, target: /var/roundcube/db, volume: { nocopy: true } }
       - { <<: *own, target: /var/roundcube/config, volume: { subpath: services/webmail/config } }
       - { <<: *own, target: /opt/workforce/plugins/workforce_identities, volume: { subpath: services/webmail/config/plugins/workforce_identities } }
       - { <<: *own, target: /entrypoint-tasks, volume: { subpath: services/webmail/config/entrypoint-tasks } }
@@ -119,8 +120,8 @@ services:
     volumes: !override
       - { <<: *own, target: /etc/caddy/gateway, volume: { subpath: services/gateway/caddy } }
       - { <<: *own, target: /etc/caddy/tls, volume: { subpath: services/gateway/tls } }
-      - caddy_data:/data
-      - caddy_config:/config
+      - { type: volume, source: caddy_data, target: /data, volume: { nocopy: true } }
+      - { type: volume, source: caddy_config, target: /config, volume: { nocopy: true } }
 
   # Its jobs (the nightly backup, the health watch, the ADR-0031 helper) move into the controller, which reaches
   # Docker only through its allow-list. No service keeps the Docker socket, so this one is never started here.
