@@ -73,7 +73,8 @@ age_start_opens() {
 s3_newest_copy_start() {
   local bucket_path bucket prefix newest
   export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
-  newest="$(docker run --rm -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
+  helper_args "${COMPOSE_PROJECT_NAME:-x}_back"   # a way out to the target, under the controller
+  newest="$(docker run --rm "${HELPER[@]}" -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
     "$AWS_CLI_IMAGE" s3 ls "${BACKUP_TARGET%/}/" 2>/dev/null \
     | awk '{ print $NF }' | { grep -E '\.tar\.gz\.age$' || true; } | sort | tail -n 1)" || return 1
   [ -n "$newest" ] || return 1
@@ -82,7 +83,7 @@ s3_newest_copy_start() {
   bucket="${bucket_path%%/*}"
   prefix=""; [ "$bucket_path" = "$bucket" ] || prefix="${bucket_path#*/}/"
   # shellcheck disable=SC2016  # expanded inside the container
-  docker run --rm -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION --log-driver none \
+  docker run --rm "${HELPER[@]}" -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION --log-driver none \
     --entrypoint sh "$AWS_CLI_IMAGE" -c \
     'aws s3api get-object --bucket "$1" --key "$2" --range bytes=0-262143 /tmp/start >/dev/null && cat /tmp/start' \
     sh "$bucket" "${prefix}${newest}" 2>/dev/null
@@ -209,7 +210,8 @@ offsite_copy() {
       echo "Copying off-site to ${BACKUP_TARGET}…"
       # .env sets these but doesn't export them, and `docker run -e NAME` only passes an exported value.
       export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
-      offsite_stream "$1" | age_encrypt "$BACKUP_ENCRYPT_RECIPIENT" | docker run --rm -i -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
+      helper_args "${COMPOSE_PROJECT_NAME:-x}_back"
+      offsite_stream "$1" | age_encrypt "$BACKUP_ENCRYPT_RECIPIENT" | docker run --rm -i "${HELPER[@]}" -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
         "$AWS_CLI_IMAGE" s3 cp - "${BACKUP_TARGET%/}/${sent}" --sse AES256
       local rc=("${PIPESTATUS[@]}")
       if [ "${rc[0]}" -eq 2 ]; then
@@ -294,7 +296,16 @@ evidence_export > "${TMP}/evidence.tar" \
 
 PARTS="MANIFEST database.dump authentik.dump evidence.tar"
 [ -s "${TMP}/mail.dump" ] && PARTS="${PARTS} mail.dump"
-if docker compose cp api:/app/data/branding "${TMP}/branding" >/dev/null 2>&1; then
+# Under the controller, `compose cp` (Docker's archive calls) is refused by its proxy: the files come out of
+# the api as a tar stream instead, which the backup job's allow-list does give it (exec).
+copy_branding() {
+  if under_controller; then
+    mkdir -p "${TMP}/branding" && docker compose exec -T api tar -C /app/data/branding -cf - . | tar -C "${TMP}/branding" -xf -
+  else
+    docker compose cp api:/app/data/branding "${TMP}/branding"
+  fi
+}
+if copy_branding >/dev/null 2>&1; then
   PARTS="${PARTS} branding"
 else
   echo "  (no branding assets captured — api not running or none uploaded)"

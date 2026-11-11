@@ -91,6 +91,12 @@ ENV
   else
     bad "compose.controller.yaml (bin/check-controller-compose.py, above)"
   fi
+  # The images the controller may run (its proxy refuses any other): images.lock must be what they are now.
+  if python3 -I bin/images-lock.py "$TMP/controller.json" > "$TMP/images.lock" && diff -u images.lock "$TMP/images.lock"; then
+    echo "ok   images.lock: every image the controller's Compose file and the scripts run, by digest"
+  else
+    bad "images.lock is not what bin/images-lock.py prints (run it: the header says how)"
+  fi
   # Workforce issue 422: with APP_DIGEST in .env (install.sh and update.sh write it once the release key's
   # signature checks out), every service of the suite image runs that digest.
   { cat "$TMP/ci.env"; echo "APP_DIGEST=sha256:$(printf '%064d' 0 | tr 0 a)"; } > "$TMP/ci-digest.env"

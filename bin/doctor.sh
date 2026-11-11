@@ -550,7 +550,13 @@ disk_row() {
   elif [ "$pct" -lt 15 ]; then row "$1" warn "${pct}% free (${gb} GB) on ${mnt} — consider archiving"
   else row "$1" ok "${pct}% free (${gb} GB) on ${mnt}"; fi
 }
-disk_row "disk space" .
+if [ "${WORKFORCE_CONTROLLER:-}" = 1 ]; then
+  # Under the appliance controller the bundle is its volume, where the backups grow; the host's own folders
+  # are not this script's to look at. Docker's data is measured below, from this container's root.
+  disk_row "disk space (the controller's volume)" backups/
+else
+  disk_row "disk space" .
+fi
 if [ "$IN_STACK" -eq 1 ]; then
   DOCKER_ROOT=/          # this container's root sits on Docker's data filesystem
 else

@@ -334,12 +334,30 @@ AGE_IMAGE="alpine:3.20.10@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be1
 
 age_here() { command -v "${AGE_BIN:-age}" >/dev/null 2>&1; }
 
+# under_controller — true when the appliance controller runs this script (Workforce ADR-0032), with
+# its Docker reached through an allow-list proxy rather than the socket.
+under_controller() { [ "${WORKFORCE_CONTROLLER:-}" = 1 ]; }
+
+# helper_args NETWORK — fills the array HELPER with what a helper container (`docker run` of the off-site
+# copy or encryption tools) needs under the controller: the project's labels, as a one-off (the backup
+# job's allow-list lets it make only those), and one of the project's networks (or none), since the
+# controller refuses Docker's shared default network. Empty on today's host layout.
+helper_args() {
+  HELPER=()
+  under_controller || return 0
+  HELPER=(--label "com.docker.compose.project=${COMPOSE_PROJECT_NAME:?}" --label com.docker.compose.oneoff=True
+          --network "$1")
+}
+
 # age_container SCRIPT [ARG...] — run SCRIPT with age available, stdin and stdout passed through.
 # --log-driver none: otherwise docker keeps what the container prints on disk until it's removed,
 # and that is a private key or a decrypted backup. /k is memory, for the key on its way in.
 age_container() {
   local script="$1"; shift
-  docker run --rm -i --log-driver none --tmpfs /k:mode=0700,size=1m "$AGE_IMAGE" sh -c \
+  # Under the controller, age is in its image (age_here), so this runs only on today's host layout; the
+  # labels and network are there should it ever be needed there (it fetches age, so it needs a way out).
+  helper_args "${COMPOSE_PROJECT_NAME:-x}_back"
+  docker run --rm -i "${HELPER[@]}" --log-driver none --tmpfs /k:mode=0700,size=1m "$AGE_IMAGE" sh -c \
     "apk add -q --no-progress age </dev/null >/dev/null 2>&1 || { echo 'Could not install age in a helper container.' >&2; exit 125; }; $script" sh "$@"
 }
 

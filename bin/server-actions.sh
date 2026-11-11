@@ -96,6 +96,14 @@ mask_for_app() {
 # results/ and its files are this script's and readable by all: a file the app can't read would look
 # like a helper that never answered, as a 0600 secret once looked like a feature that was off.
 ensure_mailbox() {
+  # Under the appliance controller (Workforce ADR-0032) the controller makes the mailbox itself: requests/ is
+  # setgid to its group, where the app's 0640 files can be read by this job's user, and nobody is handed a
+  # folder. This job runs as its own user, so it only makes its own work folder.
+  if [ "${WORKFORCE_CONTROLLER:-}" = 1 ]; then
+    mkdir -p "$SA_WORK/seen" || return 1
+    [ -d "$SA_REQUESTS" ] && [ -d "$SA_RESULTS" ] || { sa_log "- - mailbox: the controller has not made it yet"; return 1; }
+    return 0
+  fi
   mkdir -p "$SA_REQUESTS" "$SA_RESULTS" "$SA_WORK/seen" || return 1
   chmod 755 "$SA_DIR" "$SA_RESULTS" 2>/dev/null
   chmod 700 "$SA_WORK" 2>/dev/null
