@@ -36,6 +36,11 @@ set -euo pipefail
 if under_controller; then HW_STATE_FILE="${HW_STATE_FILE:-logs/healthwatch.state}"; fi
 HW_STATE_FILE="${HW_STATE_FILE:-state/healthwatch.state}"
 HW_ALERT_DIR="${HW_ALERT_DIR:-alerts}"
+HW_RESULT_DIR="${HW_RESULT_DIR:-alerts-status}"
+# 1 only when this script runs as the controller's health job (main, below): its alerts go through the controller.
+# bin/server-actions.sh sources these functions too, and its notices (a security notice to the old address when an
+# alert setting changes, the test alert) still go straight to the relay: the helper holds the relay's settings.
+HW_VIA_CONTROLLER="${HW_VIA_CONTROLLER:-0}"
 HW_LOG_FILE="${HW_LOG_FILE:-logs/healthwatch.log}"
 HW_STATUS_FILE="${HW_STATUS_FILE:-status/health.json}"
 HW_BACKUP_DIR="${HW_BACKUP_DIR:-backups}"
@@ -99,20 +104,28 @@ decide() {
 }
 
 # ------------------------------------------------------------------ state
+# fail= is what the last email told (what was failing then); under the controller, pending* is the alert
+# handed to it and not yet known to be sent, with the fails it tells (Workforce issue 447).
 PREV_FAILS=""; LAST_SENT=0
+PENDING_HASH=""; PENDING_SUBJECT=""; PENDING_AT=0; PENDING_FAILS=""
 load_state() {
-  PREV_FAILS=""; LAST_SENT=0
+  PREV_FAILS=""; LAST_SENT=0; PENDING_HASH=""; PENDING_SUBJECT=""; PENDING_AT=0; PENDING_FAILS=""
   [ -f "$HW_STATE_FILE" ] || return 0
   local line v
   while IFS= read -r line; do
     case "$line" in
       last_sent=*) v="${line#*=}"; case "$v" in ''|*[!0-9]*) ;; *) LAST_SENT="$v" ;; esac ;;
       fail=*)      PREV_FAILS="${PREV_FAILS}${line#fail=}"$'\n' ;;
+      pending=*)   v="${line#*=}"; [[ "$v" =~ ^[0-9a-f]{64}$ ]] && PENDING_HASH="$v" ;;
+      pending_subject=*) PENDING_SUBJECT="${line#*=}" ;;
+      pending_at=*) v="${line#*=}"; case "$v" in ''|*[!0-9]*) ;; *) PENDING_AT="$v" ;; esac ;;
+      pending_fail=*) PENDING_FAILS="${PENDING_FAILS}${line#pending_fail=}"$'\n' ;;
     esac
   done < "$HW_STATE_FILE"
   PREV_FAILS="${PREV_FAILS%$'\n'}"
+  PENDING_FAILS="${PENDING_FAILS%$'\n'}"
 }
-save_state() { # save_state <fails> <last email epoch> <run epoch>
+save_state() { # save_state <fails> <last email epoch> <run epoch> — with PENDING_* as they are
   local tmp="${HW_STATE_FILE}.tmp.$$" l
   mkdir -p "$(dirname "$HW_STATE_FILE")"
   {
@@ -120,6 +133,12 @@ save_state() { # save_state <fails> <last email epoch> <run epoch>
     echo "last_run=$3"
     echo "last_sent=$2"
     while IFS= read -r l; do [ -n "$l" ] && echo "fail=$l"; done <<< "$1"
+    if [ -n "$PENDING_HASH" ]; then
+      echo "pending=$PENDING_HASH"
+      echo "pending_subject=$PENDING_SUBJECT"
+      echo "pending_at=$PENDING_AT"
+      while IFS= read -r l; do [ -n "$l" ] && echo "pending_fail=$l"; done <<< "$PENDING_FAILS"
+    fi
   } > "$tmp"
   mv -f "$tmp" "$HW_STATE_FILE"
 }
@@ -179,7 +198,7 @@ body_for() { # body_for <action> <rows> <previous fails> <last email epoch>
   echo "The watch log is logs/healthwatch.log in the same folder."
   echo
   echo "-- "
-  if under_controller; then
+  if [ "$HW_VIA_CONTROLLER" = 1 ]; then
     echo "Sent for bin/healthwatch.sh by the appliance controller, straight to the outgoing relay"
     echo "(${SMTP_HOST:-none}), not through Workforce or this server's own mail. OPS_ALERT_EMAIL in the"
     echo "controller's settings says who receives it."
@@ -288,19 +307,33 @@ sender() { printf '%s' "${OPS_ALERT_FROM:-${SMTP_FROM:-healthwatch@${APP_HOSTNAM
 # holds, to OPS_ALERT_EMAIL as the controller has it, from its own sender. The watch says only the subject and
 # the text (sent as plain text, cut to the controller's limits); never who it goes to, who it is from, or any
 # header. One file, replaced by a rename: the controller sends each one once, and only a few an hour however
-# many are left here. Prints why, and returns 1, when it couldn't be left.
+# many are left here. Prints the request's hash (how the controller's result names it), or why it couldn't be
+# left, returning 1.
 request_alert() {
-  local kind="$1" subject="$2" body="$3" tmp
+  local kind="$1" subject="$2" body="$3" tmp hash
   [ -d "$HW_ALERT_DIR" ] || { echo "the controller's alert folder ($HW_ALERT_DIR) is not there"; return 1; }
   tmp="$HW_ALERT_DIR/.request.json.tmp.$$"
   if { printf '{"schema":1,"kind":"%s","at":%s,"subject":%s,"body":%s}\n' "$kind" "$(now_epoch)" \
          "$(json_str "${subject:0:200}")" "$(json_str "$(head -c 7000 "$body")")" > "$tmp"; } 2>/dev/null \
+     && hash="$(sha256sum "$tmp" | cut -d' ' -f1)" && [[ "$hash" =~ ^[0-9a-f]{64}$ ]] \
      && chmod 644 "$tmp" && mv -f "$tmp" "$HW_ALERT_DIR/request.json"; then
+    printf '%s\n' "$hash"
     return 0
   fi
   rm -f "$tmp" 2>/dev/null || true
   echo "the alert could not be left for the controller in $HW_ALERT_DIR"
   return 1
+}
+
+# alert_result <hash> — what the controller says became of that request (alerts-status/result.json, which only
+# the controller writes): sent, repeat (the same went within the hour), gave-up, stale or refused (final), or
+# waiting, limited, unroutable, failed or blocked (it is still on it); nothing when it hasn't said.
+alert_result() {
+  local f="$HW_RESULT_DIR/result.json" j
+  { [ -f "$f" ] && [ ! -L "$f" ]; } || return 0
+  j="$(head -c 1024 "$f" 2>/dev/null | tr -d '\r\n')" || return 0
+  case "$j" in *"\"hash\":\"$1\""*) ;; *) return 0 ;; esac
+  printf '%s' "$j" | sed -nE 's/.*"outcome":"(sent|repeat|gave-up|stale|refused|waiting|limited|unroutable|failed|blocked)".*/\1/p' | head -n 1
 }
 
 # deliver <subject> <bodyfile> [<kind>] — 0 when sent (or handed to the controller) or nobody to send to; 1 on a
@@ -311,7 +344,7 @@ deliver() {
   if [ "${#RCPTS[@]}" -eq 0 ]; then
     DELIVER_NOTE="not emailed: OPS_ALERT_EMAIL is empty"; return 0
   fi
-  if under_controller; then
+  if [ "$HW_VIA_CONTROLLER" = 1 ]; then
     if out="$(request_alert "${3:-alert}" "$subject" "$body")"; then
       DELIVER_NOTE="handed to the controller to email ${#RCPTS[@]} address(es)"; return 0
     fi
@@ -332,7 +365,7 @@ deliver() {
 print_dry() { # print_dry <subject> <bodyfile>
   local to="(nobody — OPS_ALERT_EMAIL is empty; it would only be logged)" via="via ${SMTP_HOST:-<no SMTP_HOST>}:${SMTP_PORT:-587}"
   [ "${#RCPTS[@]}" -gt 0 ] && to="${RCPTS[*]}"
-  under_controller && via="by the controller, via ${SMTP_HOST:-<no SMTP_HOST>}"
+  [ "$HW_VIA_CONTROLLER" = 1 ] && via="by the controller, via ${SMTP_HOST:-<no SMTP_HOST>}"
   echo "----- would send (${via}) -----"
   echo "From:    $(sender)"
   echo "To:      $to"
@@ -512,7 +545,9 @@ watch_once() {
     return 0
   fi
 
-  if [ "$action" = none ]; then
+  if [ "$HW_VIA_CONTROLLER" = 1 ]; then
+    controller_round "$action" "$rows" "$cur" "$now" "$summary" || rc=$?
+  elif [ "$action" = none ]; then
     save_state "$cur" "$LAST_SENT" "$now"
     hw_log "$summary"
   else
@@ -540,6 +575,59 @@ watch_once() {
   [ "$rc" -eq 0 ] || return "$rc"
   [ -z "$cur" ] || return 1
   return 0
+}
+
+# controller_round <action> <rows> <fails> <now> <summary> — the alert part of a run as the controller's health job
+# (Workforce issue 447). What the last email told (fail=) changes only once the controller says it sent it: a
+# handed-over alert stays pending until then, and isn't handed over again while the decision is the same. One the
+# controller gave up on (or refused, or found too old) is asked for again by this very run's decision. Returns 3
+# when it couldn't be handed over.
+controller_round() {
+  local action="$1" rows="$2" cur="$3" now="$4" summary="$5" outcome note="" subject body out
+  if [ -n "$PENDING_HASH" ]; then
+    outcome="$(alert_result "$PENDING_HASH")"
+    case "$outcome" in
+      sent|repeat)
+        PREV_FAILS="$PENDING_FAILS"; LAST_SENT="$PENDING_AT"; PENDING_HASH=""
+        note="the controller sent \"${PENDING_SUBJECT}\"" ;;
+      gave-up|stale|refused)
+        PENDING_HASH=""
+        note="the controller did NOT send \"${PENDING_SUBJECT}\" (${outcome}): asking again" ;;
+      *) note="\"${PENDING_SUBJECT}\" is with the controller (${outcome:-not looked at yet})" ;;
+    esac
+    # The decision again, from what the last email now known to be sent told.
+    action="$(decide "$PREV_FAILS" "$cur" "$now" "$LAST_SENT")"
+  fi
+  if [ "$action" = none ]; then
+    save_state "$PREV_FAILS" "$LAST_SENT" "$now"
+    hw_log "$summary${note:+ — $note}"
+    return 0
+  fi
+  subject="$(subject_for "$action" "$cur")"
+  if [ -n "$PENDING_HASH" ] && [ "$PENDING_SUBJECT" = "$subject" ]; then
+    save_state "$PREV_FAILS" "$LAST_SENT" "$now"
+    hw_log "$summary — $action: waiting for the controller — $note"
+    return 0
+  fi
+  if [ "${#RCPTS[@]}" -eq 0 ]; then
+    PENDING_HASH=""
+    save_state "$cur" "$now" "$now"
+    hw_log "$summary — $action: \"$subject\" — not emailed: OPS_ALERT_EMAIL is empty${note:+ — $note}"
+    return 0
+  fi
+  body="$(mktemp)"
+  body_for "$action" "$rows" "$PREV_FAILS" "$LAST_SENT" > "$body"
+  if out="$(request_alert "$action" "$subject" "$body")"; then
+    PENDING_HASH="$out"; PENDING_SUBJECT="$subject"; PENDING_AT="$now"; PENDING_FAILS="$cur"
+    save_state "$PREV_FAILS" "$LAST_SENT" "$now"
+    rm -f "$body"
+    hw_log "$summary — $action: \"$subject\" — handed to the controller to email ${#RCPTS[@]} address(es)${note:+ — $note}"
+    return 0
+  fi
+  rm -f "$body"
+  save_state "$PREV_FAILS" "$LAST_SENT" "$now"
+  hw_log "$summary — $action: \"$subject\" — NOT handed to the controller: ${out:-no detail} (the next run tries again)${note:+ — $note}"
+  return 3
 }
 
 # heartbeat — "this server and its health watch are alive" to the outside uptime service. Never
@@ -592,6 +680,8 @@ main() {
   . ./.env
   use_signin_route
   HW_INVESTIGATE="cd $(pwd) && ./bin/doctor.sh"
+  # As the controller's health job: its alerts go through the controller (it holds no mail credential).
+  if under_controller; then HW_VIA_CONTROLLER=1; fi
 
   # On the host, hand the run to the backup container: the schedule runs there, and only there
   # do compose-network relay names (the test appliance's `mailpit`) resolve.

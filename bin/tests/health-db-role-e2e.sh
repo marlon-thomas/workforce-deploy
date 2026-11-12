@@ -135,21 +135,45 @@ check "not with another" "$(net_login wrong-password)" ""
 
 # An install that already has it, changed by hand, with a table added since: the next start puts it right.
 su_sql workforce <<'SQL' >/dev/null || exit 1
-ALTER ROLE workforce_health SUPERUSER CREATEROLE;
+ALTER ROLE workforce_health SUPERUSER CREATEROLE VALID UNTIL '2000-01-01';
 GRANT pg_execute_server_program, pg_write_server_files TO workforce_health;
 GRANT INSERT, UPDATE ON mail_setting TO workforce_health;
 GRANT SELECT ON mail_mailbox TO workforce_health;
+-- By another grantor, which a plain REVOKE by the owner leaves: a privilege and a membership.
+CREATE ROLE someone_else;
+GRANT SELECT ON mail_setting TO someone_else WITH GRANT OPTION;
+GRANT pg_read_server_files TO someone_else WITH ADMIN OPTION;
+SET ROLE someone_else;
+GRANT SELECT ON mail_setting TO workforce_health;
+GRANT pg_read_server_files TO workforce_health;
+RESET ROLE;
+-- A role that would get its privileges, settings of its own, a schema privilege and a table it owns.
+CREATE ROLE borrower IN ROLE workforce_health;
+ALTER ROLE workforce_health SET default_transaction_read_only = off;
+ALTER ROLE workforce_health IN DATABASE workforce SET statement_timeout = 0;
+GRANT CREATE ON SCHEMA public TO workforce_health;
+CREATE TABLE owned_by_it (x int);
+ALTER TABLE owned_by_it OWNER TO workforce_health;
 CREATE TABLE mail_send_alert (address text, kind text, first_at timestamptz, body text);
 SQL
 ROLE_PW="fictitious$(od -An -tx1 -N12 /dev/urandom | tr -d ' \n')"; printf '%s' "$ROLE_PW" > "$WORK/secrets/health_db_password"
 out="$(init workforce db_password "$APP_COLS")"; check "again, on an existing install" "$?:$out" "0:the health watch's database role is ready"
 check "again: no superuser" "$(su_sql workforce <<< "select rolsuper, rolcreaterole from pg_roles where rolname = 'workforce_health'")" "f|f"
-check "again: a member of nothing" "$(su_sql workforce <<< "select count(*) from pg_auth_members where member = 'workforce_health'::regrole")" 0
+check "again: a member of nothing, whoever granted it" "$(su_sql workforce <<< "select count(*) from pg_auth_members where member = 'workforce_health'::regrole")" 0
+check "again: nobody a member of it" "$(su_sql workforce <<< "select count(*) from pg_auth_members where roleid = 'workforce_health'::regrole")" 0
+check "again: its own settings only, in no database apart" "$(su_sql workforce <<< "select setdatabase, array_to_string(setconfig, ',') from pg_db_role_setting where setrole = 'workforce_health'::regrole")" "0|default_transaction_read_only=on,statement_timeout=60s"
+check "again: no expiry" "$(su_sql workforce <<< "select coalesce(rolvaliduntil::text, 'none') from pg_roles where rolname = 'workforce_health'")" infinity
+check "again: owns nothing" "$(su_sql workforce <<< "select count(*) from pg_class where relowner = 'workforce_health'::regrole")" 0
+refused "again: not another grantor's whole row" workforce "select * from mail_setting"
+refused "again: no server files" workforce "select pg_read_file('/etc/passwd')"
+refused "again: no table of its own" workforce "set default_transaction_read_only = off; create table mine (x int)"
 refused "again: no write" workforce "set default_transaction_read_only = off; update mail_setting set enabled = false"
 refused "again: no whole table" workforce "select * from mail_mailbox"
 check "again: the new table's columns" "$(as_role workforce "select count(distinct address) from mail_send_alert where kind = 'LIMIT_REACHED' and first_at > now() - interval '24 hours'")" 0
 refused "again: not its other columns" workforce "select body from mail_send_alert"
 check "again: the new password" "$(net_login "$ROLE_PW")" 1
+# And a third time, with nothing changed: the same, and no error.
+out="$(init workforce db_password "$APP_COLS")"; check "a third time" "$?:$out" "0:the health watch's database role is ready"
 
 echo "health-db-role e2e: ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]

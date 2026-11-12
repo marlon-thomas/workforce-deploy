@@ -406,36 +406,81 @@ check "the page's setting reaches the api" "$(grep -cF 'WORKFORCE_SERVER_HEALTH_
 )
 read -r PASS FAILN < "$WORK/route.counts"
 
-# --- under the appliance controller (Workforce issue 447): the watch emails nothing itself. It leaves the alert for
-#     the controller, with only the subject and the text; and it reads the backup's status from the backup job's file.
+# --- under the appliance controller (Workforce issue 447): the health job emails nothing itself. It leaves the alert
+#     for the controller, with only the subject and the text, and what the last email told changes only once the
+#     controller says it sent it. It reads the backup's status from the backup job's file.
 (
-  export WORKFORCE_CONTROLLER=1
-  HW_ALERT_DIR="$WORK/alerts"; mkdir -p "$HW_ALERT_DIR"
+  export WORKFORCE_CONTROLLER=1 HW_VIA_CONTROLLER=1
+  HW_ALERT_DIR="$WORK/alerts"; HW_RESULT_DIR="$WORK/alerts-status"; mkdir -p "$HW_ALERT_DIR" "$HW_RESULT_DIR"
   BACKUP_STATUS_FILE="$WORK/backup-status/last.json"; mkdir -p "$WORK/backup-status"
   rm -f "$HW_STATE_FILE"; rm -rf "$SENT_DIR"; mkdir -p "$SENT_DIR"
   eval "$SEND_STUB"
+  REQ="$HW_ALERT_DIR/request.json"
+  req() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$REQ" "$1"; }
+  says() { printf '{"schema":1,"hash":"%s","outcome":"%s","at":1}\n' "$(sha256sum "$REQ" | cut -d' ' -f1)" "$1" > "$HW_RESULT_DIR/result.json"; }
   doctor "OK|database|accepting" "FAIL|object storage|unreachable \"quoted\"\\ and a tab"
   run
   check "controller: failing exit" "$RC" 1
   check "controller: nothing sent by the watch" "$(sent_count)" 0
-  REQ="$HW_ALERT_DIR/request.json"
   check "controller: the request is there, 0644" "$(stat -c %a "$REQ" 2>/dev/null)" 644
   check "controller: no temporary file left" "$(find "$HW_ALERT_DIR" -name '.*' | wc -l | tr -d ' ')" 0
   check "controller: the request's fields, and only those" \
     "$(python3 -I -c 'import json,sys; print(sorted(json.load(open(sys.argv[1]))))' "$REQ")" "['at', 'body', 'kind', 'schema', 'subject']"
-  check "controller: kind" "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["kind"])' "$REQ")" alert
-  contains "controller: subject" "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["subject"])' "$REQ")" "1 check failing: object storage"
-  contains "controller: text" "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["body"])' "$REQ")" 'FAIL  object storage: unreachable "quoted"\ and a tab'
-  contains "controller: the text says the controller sent it" "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["body"])' "$REQ")" "by the appliance controller"
+  check "controller: kind" "$(req kind)" alert
+  contains "controller: subject" "$(req subject)" "1 check failing: object storage"
+  contains "controller: text" "$(req body)" 'FAIL  object storage: unreachable "quoted"\ and a tab'
+  contains "controller: the text says the controller sent it" "$(req body)" "by the appliance controller"
   check "controller: no address in the request" "$(grep -c 'ops@example\|oncall@example\|workforce@app' "$REQ")" 0
-  contains "controller: logged as handed over" "$(tail -1 "$HW_LOG_FILE")" "handed to the controller to email ${#RCPTS[@]} address(es)"
-  contains "controller: the state says it went" "$(cat "$HW_STATE_FILE")" "fail=object storage"
-  # The folder gone: a failed hand-over, tried again by the next run, as a failed send was.
+  contains "controller: logged as handed over" "$(tail -1 "$HW_LOG_FILE")" "handed to the controller to email"
+  check "controller: pending, by the request's hash" "$(sed -n 's/^pending=//p' "$HW_STATE_FILE")" "$(sha256sum "$REQ" | cut -d' ' -f1)"
+  check "controller: not told yet" "$(grep -c '^fail=' "$HW_STATE_FILE")" 0
+  # The same decision while it is with the controller: not asked for again.
+  first="$(sha256sum "$REQ")"
+  says limited; NOW=$((NOW + 900)); run
+  check "controller: the same decision, the same request" "$(sha256sum "$REQ")" "$first"
+  contains "controller: waiting, said" "$(tail -1 "$HW_LOG_FILE")" "waiting for the controller"
+  contains "controller: and why" "$(tail -1 "$HW_LOG_FILE")" "(limited)"
+  # Sent: now it is what the last email told.
+  says sent; NOW=$((NOW + 900)); run
+  check "controller: told once sent" "$(sed -n 's/^fail=//p' "$HW_STATE_FILE")" "object storage"
+  check "controller: nothing pending" "$(grep -c '^pending=' "$HW_STATE_FILE")" 0
+  check "controller: no new request" "$(sha256sum "$REQ")" "$first"
+  # Resolved, then failing again within the hour: each one a request of its own.
+  doctor "OK|database|accepting" "OK|object storage|live"
+  NOW=$((NOW + 900)); run
+  check "controller: resolved asked for" "$(req kind)" resolved
+  says sent
+  doctor "OK|database|accepting" "FAIL|object storage|unreachable"
+  NOW=$((NOW + 900)); run
+  check "controller: failing again asked for" "$(req kind)" alert
+  check "controller: the resolved one is what was told" "$(grep -c '^fail=' "$HW_STATE_FILE")" 0
+  # Given up: this very run asks again.
+  given="$(sha256sum "$REQ")"
+  says gave-up; NOW=$((NOW + 900)); run
+  check "controller: asked again after it was given up" "$( [ "$(sha256sum "$REQ")" != "$given" ] && echo yes)" yes
+  contains "controller: and said" "$(tail -1 "$HW_LOG_FILE")" "did NOT send"
+  # A result for another request says nothing about this one.
+  printf '{"schema":1,"hash":"%064d","outcome":"sent","at":1}\n' 0 > "$HW_RESULT_DIR/result.json"
+  NOW=$((NOW + 900)); run
+  check "controller: another request's result is not this one's" "$(grep -c '^fail=' "$HW_STATE_FILE")" 0
+  # The folder gone: not handed over, exit 3, tried again by the next run.
   rm -rf "$HW_ALERT_DIR"; rm -f "$HW_STATE_FILE"
   run
   check "controller: no folder, exit 3" "$RC" 3
   contains "controller: no folder, said" "$(tail -1 "$HW_LOG_FILE")" "NOT handed to the controller"
   mkdir -p "$HW_ALERT_DIR"
+  # The helper's notices (bin/server-actions.sh sources this file): straight to the relay, as before, even under
+  # the controller, so a stolen session's change of the alert address still reaches the old one.
+  (
+    HW_VIA_CONTROLLER=0
+    body="$WORK/notice"; echo "the alert address changed" > "$body"
+    before="$(sent_count)"
+    deliver "[Workforce test app] server setting changed" "$body"
+    check "helper: sent straight to the relay" "$(sent_count)" "$((before + 1))"
+    check "helper: nothing left for the controller" "$(ls "$HW_ALERT_DIR" | wc -l | tr -d ' ')" 0
+    echo "$PASS $FAILN" > "$WORK/helper.counts"
+  )
+  read -r PASS FAILN < "$WORK/helper.counts"
   # The backup's status, from the backup job's file; anything that isn't what backup.sh writes is not used.
   rm -rf "$HW_BACKUP_DIR"; mkdir -p "$HW_BACKUP_DIR"; : > "$HW_BACKUP_DIR/9999-01-01_000000.tar.gz"
   BACKUP_TARGET="s3://bucket/x"; BACKUP_ENCRYPT_RECIPIENT=age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
@@ -446,6 +491,9 @@ read -r PASS FAILN < "$WORK/route.counts"
   printf '{"schema":1,"lastAtEpoch":1700000000;rm -rf /,"sizeBytes":"12","kept":7,"offsite":{"lastCopy":"MAYBE"}}\n' > "$BACKUP_STATUS_FILE"
   run
   check "controller: nothing unchecked is used" "$(json_get 'd["backup"]["lastAt"], d["backup"]["sizeBytes"], d["backup"]["offsite"]["lastCopy"]')" "(None, None, 'UNKNOWN')"
+  printf '{"schema":1,"lastAtEpoch":%s,"sizeBytes":1,"kept":1,"offsite":{"lastCopy":"OK"}}\n' "$(( $(date +%s) + 86400 ))" > "$BACKUP_STATUS_FILE"
+  run
+  check "controller: a time in the future is not used" "$(json_get 'd["backup"]["lastAt"]')" None
   rm -f "$BACKUP_STATUS_FILE"; run
   check "controller: no status yet" "$(json_get 'd["backup"]["lastAt"], d["backup"]["kept"]')" "(None, 0)"
   echo "$PASS $FAILN" > "$WORK/controller.counts"
