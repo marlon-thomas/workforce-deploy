@@ -327,7 +327,8 @@ in the source repo). Off until switched on:
   server with it), `mail_db_password` (its own `stalwart` database on the suite's PostgreSQL —
   in the nightly backup and `restore.sh`), `mail_lookup_key` (the sign-in server asks Workforce which
   mailbox a login has, and webmail which shared mailboxes it may use), `webmail_oidc_secret`,
-  `webmail_des_key`; `mail_relay_password` starts empty.
+  `webmail_des_key`; `mail_relay_password` starts empty. (Generated whether or not staff email is on,
+  with `health_db_password`: the health watch's read-only database role, Workforce issue 447.)
 - Webmail signs in through the suite's sign-in server only; people without a working mailbox are
   refused there. `./bin/staff-mail.sh off` stops the mail server and webmail and keeps their data.
 - **Shared mailboxes** (hr@, admin@ …) are set up in Workforce (Setup → Email). In webmail they

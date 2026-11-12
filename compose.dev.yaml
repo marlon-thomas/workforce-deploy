@@ -35,6 +35,10 @@ services:
   authentik-worker:
     profiles: ["auth"]
 
+  # The health watch's role on the sign-in database (Workforce issue 447) comes and goes with authentik.
+  ak-health-db-init:
+    profiles: ["auth"]
+
   # Local runs keep Flyway embedded in the app; skip the one-shot services.
   migrate:
     command: ["true"]

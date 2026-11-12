@@ -406,5 +406,51 @@ check "the page's setting reaches the api" "$(grep -cF 'WORKFORCE_SERVER_HEALTH_
 )
 read -r PASS FAILN < "$WORK/route.counts"
 
+# --- under the appliance controller (Workforce issue 447): the watch emails nothing itself. It leaves the alert for
+#     the controller, with only the subject and the text; and it reads the backup's status from the backup job's file.
+(
+  export WORKFORCE_CONTROLLER=1
+  HW_ALERT_DIR="$WORK/alerts"; mkdir -p "$HW_ALERT_DIR"
+  BACKUP_STATUS_FILE="$WORK/backup-status/last.json"; mkdir -p "$WORK/backup-status"
+  rm -f "$HW_STATE_FILE"; rm -rf "$SENT_DIR"; mkdir -p "$SENT_DIR"
+  eval "$SEND_STUB"
+  doctor "OK|database|accepting" "FAIL|object storage|unreachable \"quoted\"\\ and a tab"
+  run
+  check "controller: failing exit" "$RC" 1
+  check "controller: nothing sent by the watch" "$(sent_count)" 0
+  REQ="$HW_ALERT_DIR/request.json"
+  check "controller: the request is there, 0644" "$(stat -c %a "$REQ" 2>/dev/null)" 644
+  check "controller: no temporary file left" "$(find "$HW_ALERT_DIR" -name '.*' | wc -l | tr -d ' ')" 0
+  check "controller: the request's fields, and only those" \
+    "$(python3 -I -c 'import json,sys; print(sorted(json.load(open(sys.argv[1]))))' "$REQ")" "['at', 'body', 'kind', 'schema', 'subject']"
+  check "controller: kind" "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["kind"])' "$REQ")" alert
+  contains "controller: subject" "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["subject"])' "$REQ")" "1 check failing: object storage"
+  contains "controller: text" "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["body"])' "$REQ")" 'FAIL  object storage: unreachable "quoted"\ and a tab'
+  contains "controller: the text says the controller sent it" "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["body"])' "$REQ")" "by the appliance controller"
+  check "controller: no address in the request" "$(grep -c 'ops@example\|oncall@example\|workforce@app' "$REQ")" 0
+  contains "controller: logged as handed over" "$(tail -1 "$HW_LOG_FILE")" "handed to the controller to email ${#RCPTS[@]} address(es)"
+  contains "controller: the state says it went" "$(cat "$HW_STATE_FILE")" "fail=object storage"
+  # The folder gone: a failed hand-over, tried again by the next run, as a failed send was.
+  rm -rf "$HW_ALERT_DIR"; rm -f "$HW_STATE_FILE"
+  run
+  check "controller: no folder, exit 3" "$RC" 3
+  contains "controller: no folder, said" "$(tail -1 "$HW_LOG_FILE")" "NOT handed to the controller"
+  mkdir -p "$HW_ALERT_DIR"
+  # The backup's status, from the backup job's file; anything that isn't what backup.sh writes is not used.
+  rm -rf "$HW_BACKUP_DIR"; mkdir -p "$HW_BACKUP_DIR"; : > "$HW_BACKUP_DIR/9999-01-01_000000.tar.gz"
+  BACKUP_TARGET="s3://bucket/x"; BACKUP_ENCRYPT_RECIPIENT=age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
+  printf '{"schema":1,"lastAt":"2023-11-14T22:13:20Z","lastAtEpoch":1700000000,"sizeBytes":4096,"archive":"a.tar.gz","kept":7,"offsite":{"lastCopy":"FAILED","at":"2023-11-14T22:13:20Z","atEpoch":1700000000}}\n' > "$BACKUP_STATUS_FILE"
+  run
+  check "controller: backup from the status file" "$(json_get 'd["backup"]["lastAt"], d["backup"]["sizeBytes"], d["backup"]["kept"], d["backup"]["offsite"]["lastCopy"]')" "('2023-11-14T22:13:20Z', 4096, 7, 'FAILED')"
+  check "controller: off-site from the status file" "$(offsite_last_copy)" FAILED
+  printf '{"schema":1,"lastAtEpoch":1700000000;rm -rf /,"sizeBytes":"12","kept":7,"offsite":{"lastCopy":"MAYBE"}}\n' > "$BACKUP_STATUS_FILE"
+  run
+  check "controller: nothing unchecked is used" "$(json_get 'd["backup"]["lastAt"], d["backup"]["sizeBytes"], d["backup"]["offsite"]["lastCopy"]')" "(None, None, 'UNKNOWN')"
+  rm -f "$BACKUP_STATUS_FILE"; run
+  check "controller: no status yet" "$(json_get 'd["backup"]["lastAt"], d["backup"]["kept"]')" "(None, 0)"
+  echo "$PASS $FAILN" > "$WORK/controller.counts"
+)
+read -r PASS FAILN < "$WORK/controller.counts"
+
 echo "healthwatch self-test: ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]

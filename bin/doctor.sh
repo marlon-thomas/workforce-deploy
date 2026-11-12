@@ -89,6 +89,8 @@ fi
 # shellcheck source=lib/common.sh
 . ./bin/lib/common.sh
 use_docker_socket
+# Who the queries below run as: under the controller the health watch's read-only role (Workforce issue 447).
+health_db_client
 row "configuration" ok "hostname ${APP_HOSTNAME}"
 
 # Inside the stack: reach the gateway at its private address, presenting the public names.
@@ -201,7 +203,7 @@ fi
 # --- database + migrations
 DB_OK=$(docker compose exec -T postgres pg_isready -U "${DB_USER}" -d "${DB_NAME}" >/dev/null 2>&1 && echo yes || echo no)
 if [ "$DB_OK" = yes ]; then row "database" ok "accepting connections"; else row "database" fail "not accepting"; fi
-FW=$(docker compose exec -T postgres psql -U "${DB_USER}" -d "${DB_NAME}" -tAc \
+FW=$(docker compose exec -T ${PSQL_ENV[@]+"${PSQL_ENV[@]}"} postgres psql -U "${PSQL_DB_USER}" -d "${DB_NAME}" -tAc \
   "select coalesce((select version from flyway_schema_history where success and version is not null order by installed_rank desc limit 1),'none')" 2>/dev/null || echo "?")
 case "$FW" in
   none|\?|"") row "schema migrations" fail "no successful migration history" ;;
@@ -209,10 +211,11 @@ case "$FW" in
 esac
 
 # db_value <sql> — one READ-ONLY query on the application database; prints the value.
-# Non-zero when the database or the query fails (callers degrade to WARN/SKIP).
+# Non-zero when the database or the query fails (callers degrade to WARN/SKIP). Each psql command here, word for
+# word, is also in the controller's EXEC_RULES (controller/src/proxy/policy.mjs): change both together.
 db_value() {
-  docker compose exec -T -e "PGOPTIONS=-c default_transaction_read_only=on" postgres \
-    psql -X -q -v ON_ERROR_STOP=1 -U "${DB_USER}" -d "${DB_NAME}" -tAc "$1" 2>/dev/null
+  docker compose exec -T -e "PGOPTIONS=-c default_transaction_read_only=on" ${PSQL_ENV[@]+"${PSQL_ENV[@]}"} postgres \
+    psql -X -q -v ON_ERROR_STOP=1 -U "${PSQL_DB_USER}" -d "${DB_NAME}" -tAc "$1" 2>/dev/null
 }
 db_has_table() { [ "$(db_value "select to_regclass('$1') is not null" || true)" = t ]; }
 
@@ -264,14 +267,14 @@ else
   # This server's names and their parent domains (only names with a dot: never a bare TLD).
   HOSTED="$(printf '%s\n' "${APP_HOSTNAME:-}" "${AUTH_HOSTNAME:-}" "${WEBMAIL_HOSTNAME:-}" \
     "${APP_HOSTNAME#*.}" "${AUTH_HOSTNAME#*.}" | tr '[:upper:]' '[:lower:]' | grep '\.' | sort -u || true)"
-  STAFF_DOMAINS="$(docker compose exec -T postgres psql -U "${DB_USER}" -d "${DB_NAME}" -tAc \
+  STAFF_DOMAINS="$(docker compose exec -T ${PSQL_ENV[@]+"${PSQL_ENV[@]}"} postgres psql -U "${PSQL_DB_USER}" -d "${DB_NAME}" -tAc \
     "select staff_domain from mail_setting where staff_domain is not null" 2>/dev/null || true)"
   ON_HERE=""
   for d in $HOSTED $STAFF_DOMAINS; do
     case "$R_DOMAIN" in "$d"|*."$d") ON_HERE="$d"; break ;; esac
   done
   # What authentik holds now (applied by the identity converge in ./bin/update.sh).
-  AK_NOW="$(docker compose exec -T authentik-postgres psql -U "${AK_DB_USER:-authentik}" -d "${AK_DB_NAME:-authentik}" -tAc \
+  AK_NOW="$(docker compose exec -T ${PSQL_ENV[@]+"${PSQL_ENV[@]}"} authentik-postgres psql -U "${PSQL_AK_USER}" -d "${AK_DB_NAME:-authentik}" -tAc \
     "select lower(email) from authentik_core_user where username = 'admin'" 2>/dev/null | tr -d '[:space:]' || true)"
   MASKED="${RECOVERY:0:1}•••@${R_DOMAIN}"
   if [ -n "$ON_HERE" ]; then
@@ -395,7 +398,7 @@ fi
 EMPTY=""
 need_secret() { [ -s "secrets/$1" ] || EMPTY="${EMPTY:+${EMPTY}, }$1"; }
 for s in db_password minio_access minio_secret ak_db_password ak_secret oidc_client_id \
-         oidc_client_secret oidc_jwks_uri ai_credential_key; do need_secret "$s"; done
+         oidc_client_secret oidc_jwks_uri ai_credential_key health_db_password; do need_secret "$s"; done
 case ",${COMPOSE_PROFILES:-}," in
   *,staffmail,*) for s in mail_admin_password mail_db_password mail_lookup_key webmail_oidc_secret webmail_des_key; do need_secret "$s"; done ;;
 esac
@@ -582,17 +585,31 @@ if [ -n "$DOCKER_MNT" ] && [ "$DOCKER_MNT" != "$BUNDLE_MNT" ]; then
 fi
 
 # --- backups: backup.sh only ever leaves a finished archive in backups/ (a failed run leaves none),
-#     so the newest archive's age is the age of the last successful backup.
-LATEST=$( { ls -1t backups/*.tar.gz 2>/dev/null || true; } | head -1 )
-if [ -n "$LATEST" ]; then
-  AGE_S=$(( $(date +%s) - $(stat -c %Y "$LATEST") )); AGE_H=$(( AGE_S / 3600 ))
+#     so the newest archive's age is the age of the last successful backup. Under the controller the health
+#     job can't list backups/: the backup job's own record of it says (backup-status/last.json, common.sh).
+LAST_BACKUP=""; BACKUP_LOG="backups/cron.log"; OFFSITE_FAILED=0
+if under_controller; then
+  BACKUP_LOG="the backup job's log (the controller's volume, jobs/backup)"
+  if backup_status_read; then
+    LAST_BACKUP="$BS_LAST_EPOCH"
+    [ "$BS_OFFSITE" != FAILED ] || OFFSITE_FAILED=1
+  fi
+else
+  LATEST=$( { ls -1t backups/*.tar.gz 2>/dev/null || true; } | head -1 )
+  [ -z "$LATEST" ] || LAST_BACKUP="$(stat -c %Y "$LATEST" 2>/dev/null)" || LAST_BACKUP=""
+  # The newest run's off-site copy (backup.sh logs a failure but keeps the local archive).
+  OFFSITE_FAILED="$( { tail -n 400 backups/cron.log 2>/dev/null || true; } \
+    | awk '/^Dumping the application database|^Testing the off-site copy/ { f = 0 } /Off-site copy failed/ { f = 1 } END { print f + 0 }')" || OFFSITE_FAILED=0
+fi
+if is_count "$LAST_BACKUP"; then
+  AGE_S=$(( $(date +%s) - LAST_BACKUP )); AGE_H=$(( AGE_S / 3600 ))
   if [ "$AGE_S" -le $((26 * 3600)) ]; then row "last backup" ok "$AGE_H h ago"
-  else oprow "last backup" fail "$AGE_H h old — the nightly backup is not succeeding: see backups/cron.log, run ./bin/backup.sh"; fi
+  else oprow "last backup" fail "$AGE_H h old — the nightly backup is not succeeding: see ${BACKUP_LOG}, run ./bin/backup.sh"; fi
 else
   # Installed more than 26 h ago (the secrets are written once, at install) and never backed up.
   SINCE="$(stat -c %Y secrets/db_password 2>/dev/null)" || SINCE=""
   if is_count "$SINCE" && [ $(( $(date +%s) - SINCE )) -gt $((26 * 3600)) ]; then
-    oprow "last backup" fail "none at all — see backups/cron.log, run ./bin/backup.sh"
+    oprow "last backup" fail "none at all — see ${BACKUP_LOG}, run ./bin/backup.sh"
   else
     row "last backup" warn "none yet — ./bin/backup.sh after your first data entry"
   fi
@@ -603,11 +620,8 @@ elif OFFSITE_PROBLEM="$(offsite_encryption_problem "${BACKUP_ENCRYPT_RECIPIENT:-
   # Backups are never sent unencrypted, so a target with no usable recipient means no off-site copy.
   oprow "off-site backup" fail "nothing is going off-site: ${OFFSITE_PROBLEM}, and backups never leave this server unencrypted — RUNBOOK, \"Off-site backup targets\""
 else
-  # The newest run's off-site copy (backup.sh logs a failure but keeps the local archive).
-  OFFSITE_FAILED="$( { tail -n 400 backups/cron.log 2>/dev/null || true; } \
-    | awk '/^Dumping the application database|^Testing the off-site copy/ { f = 0 } /Off-site copy failed/ { f = 1 } END { print f + 0 }')" || OFFSITE_FAILED=0
   case "$BACKUP_TARGET" in s3://*) KIND=S3 ;; *) KIND=rsync ;; esac
-  if [ "$OFFSITE_FAILED" = 1 ]; then row "off-site backup" warn "the last off-site copy failed (${KIND}) — see backups/cron.log"
+  if [ "$OFFSITE_FAILED" = 1 ]; then row "off-site backup" warn "the last off-site copy failed (${KIND}) — see ${BACKUP_LOG}"
   else row "off-site backup" ok "configured (${KIND}, encrypted)"; fi
 fi
 
@@ -661,10 +675,13 @@ alerts_row() {
         issues="${issues}; ${alert_var} is this server's own mail server — alerts stop when it does" ;;
     esac
   fi
-  ts="$(sed -n 's/^last_run=\([0-9][0-9]*\)$/\1/p' state/healthwatch.state 2>/dev/null | head -1)" || ts=""
+  # Under the controller the watch keeps its state in its own folder (bin/healthwatch.sh).
+  local state=state/healthwatch.state where="is the backup container running?"
+  if under_controller; then state=logs/healthwatch.state; where="is the controller running its jobs?"; fi
+  ts="$(sed -n 's/^last_run=\([0-9][0-9]*\)$/\1/p' "$state" 2>/dev/null | head -1)" || ts=""
   if is_count "$ts"; then
     age=$(( ( $(date +%s) - ts ) / 60 ))
-    [ "$age" -le 60 ] || issues="${issues}; the health watch last ran ${age} min ago — is the backup container running?"
+    [ "$age" -le 60 ] || issues="${issues}; the health watch last ran ${age} min ago — ${where}"
     ok_to="${ok_to} (watch ran ${age} min ago)"
   else
     ok_to="${ok_to} (the watch has not run yet)"

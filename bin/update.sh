@@ -90,6 +90,8 @@ ensure_secrets() {
     [ -s "secrets/$s" ] || ( umask 077; openssl rand -hex 24 | tr -d '\n' > "secrets/$s" )
   done
   [ -e secrets/mail_relay_password ] || ( umask 077; : > secrets/mail_relay_password )
+  # Workforce issue 447: the health watch's read-only database role; health-db-init sets it at every start.
+  [ -s secrets/health_db_password ] || ( umask 077; openssl rand -hex 24 | tr -d '\n' > secrets/health_db_password )
   # The authentik containers bind-mount the webmail blueprint; the identity converge renders it.
   mkdir -p blueprints
   [ -e blueprints/webmail-app.yaml ] || printf 'version: 1\nentries: []\n' > blueprints/webmail-app.yaml

@@ -9,6 +9,8 @@
 #   - every FAIL has cleared                                 "… resolved: no checks failing"
 # The email goes straight to SMTP_HOST:SMTP_PORT with curl — never through Workforce and never
 # through this server's own mail server (Stalwart) — so it still arrives when those are what broke.
+# Under the appliance controller (Workforce ADR-0032, issue 447) the watch holds no mail credential: it
+# leaves each alert in alerts/request.json and the controller emails it (request_alert, below).
 # OPS_ALERT_EMAIL empty = problems are only logged. Log: logs/healthwatch.log.
 # OPS_HEARTBEAT_URL (optional): after every run, a ping to an outside uptime service (e.g.
 # Healthchecks.io), which emails you when the pings stop — the server is off or offline. The URL is
@@ -30,7 +32,10 @@ set -euo pipefail
 # shellcheck source=lib/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
 
+# Under the controller the run folder is root's: the state goes in the job's own folder (doctor.sh reads it there).
+if under_controller; then HW_STATE_FILE="${HW_STATE_FILE:-logs/healthwatch.state}"; fi
 HW_STATE_FILE="${HW_STATE_FILE:-state/healthwatch.state}"
+HW_ALERT_DIR="${HW_ALERT_DIR:-alerts}"
 HW_LOG_FILE="${HW_LOG_FILE:-logs/healthwatch.log}"
 HW_STATUS_FILE="${HW_STATUS_FILE:-status/health.json}"
 HW_BACKUP_DIR="${HW_BACKUP_DIR:-backups}"
@@ -174,8 +179,14 @@ body_for() { # body_for <action> <rows> <previous fails> <last email epoch>
   echo "The watch log is logs/healthwatch.log in the same folder."
   echo
   echo "-- "
-  echo "Sent by bin/healthwatch.sh straight to the outgoing relay (${SMTP_HOST:-none}), not through"
-  echo "Workforce or this server's own mail. Set OPS_ALERT_EMAIL in .env to change who receives it."
+  if under_controller; then
+    echo "Sent for bin/healthwatch.sh by the appliance controller, straight to the outgoing relay"
+    echo "(${SMTP_HOST:-none}), not through Workforce or this server's own mail. OPS_ALERT_EMAIL in the"
+    echo "controller's settings says who receives it."
+  else
+    echo "Sent by bin/healthwatch.sh straight to the outgoing relay (${SMTP_HOST:-none}), not through"
+    echo "Workforce or this server's own mail. Set OPS_ALERT_EMAIL in .env to change who receives it."
+  fi
 }
 
 encode_header() { # RFC 2047 when the text is not plain ASCII
@@ -271,12 +282,41 @@ load_recipients() {
 }
 sender() { printf '%s' "${OPS_ALERT_FROM:-${SMTP_FROM:-healthwatch@${APP_HOSTNAME:-localhost}}}"; }
 
-# deliver <subject> <bodyfile> — 0 when sent or nobody to send to; 1 on a failed send.
+# request_alert <kind> <subject> <bodyfile> — under the appliance controller (Workforce issue 447). The watch
+# holds no mail credential, so it asks the controller: it leaves the alert as alerts/request.json, in a folder
+# only it may write and only the controller reads, and the controller emails it with the relay settings it
+# holds, to OPS_ALERT_EMAIL as the controller has it, from its own sender. The watch says only the subject and
+# the text (sent as plain text, cut to the controller's limits); never who it goes to, who it is from, or any
+# header. One file, replaced by a rename: the controller sends each one once, and only a few an hour however
+# many are left here. Prints why, and returns 1, when it couldn't be left.
+request_alert() {
+  local kind="$1" subject="$2" body="$3" tmp
+  [ -d "$HW_ALERT_DIR" ] || { echo "the controller's alert folder ($HW_ALERT_DIR) is not there"; return 1; }
+  tmp="$HW_ALERT_DIR/.request.json.tmp.$$"
+  if { printf '{"schema":1,"kind":"%s","at":%s,"subject":%s,"body":%s}\n' "$kind" "$(now_epoch)" \
+         "$(json_str "${subject:0:200}")" "$(json_str "$(head -c 7000 "$body")")" > "$tmp"; } 2>/dev/null \
+     && chmod 644 "$tmp" && mv -f "$tmp" "$HW_ALERT_DIR/request.json"; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  echo "the alert could not be left for the controller in $HW_ALERT_DIR"
+  return 1
+}
+
+# deliver <subject> <bodyfile> [<kind>] — 0 when sent (or handed to the controller) or nobody to send to; 1 on a
+# failed send.
 DELIVER_NOTE=""
 deliver() {
   local subject="$1" body="$2" msg out from
   if [ "${#RCPTS[@]}" -eq 0 ]; then
     DELIVER_NOTE="not emailed: OPS_ALERT_EMAIL is empty"; return 0
+  fi
+  if under_controller; then
+    if out="$(request_alert "${3:-alert}" "$subject" "$body")"; then
+      DELIVER_NOTE="handed to the controller to email ${#RCPTS[@]} address(es)"; return 0
+    fi
+    DELIVER_NOTE="NOT handed to the controller: ${out:-no detail}"
+    return 1
   fi
   from="$(sender)"
   msg="$(umask 077 && mktemp)"
@@ -290,9 +330,10 @@ deliver() {
 }
 
 print_dry() { # print_dry <subject> <bodyfile>
-  local to="(nobody — OPS_ALERT_EMAIL is empty; it would only be logged)"
+  local to="(nobody — OPS_ALERT_EMAIL is empty; it would only be logged)" via="via ${SMTP_HOST:-<no SMTP_HOST>}:${SMTP_PORT:-587}"
   [ "${#RCPTS[@]}" -gt 0 ] && to="${RCPTS[*]}"
-  echo "----- would send (via ${SMTP_HOST:-<no SMTP_HOST>}:${SMTP_PORT:-587}) -----"
+  under_controller && via="by the controller, via ${SMTP_HOST:-<no SMTP_HOST>}"
+  echo "----- would send (${via}) -----"
   echo "From:    $(sender)"
   echo "To:      $to"
   echo "Subject: $1"
@@ -356,6 +397,12 @@ version_or_empty() { case "$1" in ''|*[!A-Za-z0-9._+-]*) ;; *) printf '%s' "$1" 
 # a failure and keeps the local archive): the nightly one, or one started from the app, which goes in
 # the same log (bin/server-actions.sh). OK | FAILED | UNKNOWN (no copy in that run).
 offsite_last_copy() {
+  # Under the controller, from the backup job's own record of it (common.sh, backup_status_read).
+  if under_controller; then
+    backup_status_read >/dev/null 2>&1 || true
+    printf '%s\n' "${BS_OFFSITE:-UNKNOWN}"
+    return 0
+  fi
   { tail -n 400 "$HW_BACKUP_DIR/cron.log" 2>/dev/null || true; } | awk '
     /^Dumping the application database/ { copy = 0; bad = 0 }
     /^Testing the off-site copy/        { copy = 0; bad = 0 }
@@ -368,11 +415,19 @@ offsite_last_copy() {
 
 backup_json() { # the backup summary; never the target itself, which can name a user and a host
   local latest="" kept=0 p last_at="" size="" kind="" configured=false encrypted=false copy=UNKNOWN m
-  for p in "$HW_BACKUP_DIR"/*.tar.gz; do
-    [ -e "$p" ] || continue
-    kept=$((kept + 1))
-    if [ -z "$latest" ] || [ "$p" -nt "$latest" ]; then latest="$p"; fi
-  done
+  if under_controller; then
+    # The health job can't list backups/: the backup job's own record (common.sh, backup_status_read).
+    if backup_status_read; then
+      kept="${BS_KEPT:-0}"; size="$BS_SIZE"
+      [ -z "$BS_LAST_EPOCH" ] || last_at="$(iso_time "$BS_LAST_EPOCH")"
+    fi
+  else
+    for p in "$HW_BACKUP_DIR"/*.tar.gz; do
+      [ -e "$p" ] || continue
+      kept=$((kept + 1))
+      if [ -z "$latest" ] || [ "$p" -nt "$latest" ]; then latest="$p"; fi
+    done
+  fi
   if [ -n "$latest" ]; then
     m="$(stat -c %Y "$latest" 2>/dev/null)" || m=""
     size="$(stat -c %s "$latest" 2>/dev/null)" || size=""
@@ -464,7 +519,7 @@ watch_once() {
     subject="$(subject_for "$action" "$cur")"
     body="$(mktemp)"
     body_for "$action" "$rows" "$PREV_FAILS" "$LAST_SENT" > "$body"
-    if deliver "$subject" "$body"; then
+    if deliver "$subject" "$body" "$action"; then
       sent_at="$now"
       save_state "$cur" "$sent_at" "$now"
     else
@@ -510,7 +565,7 @@ send_test() { # send_test <dry 0|1>
   body="$(mktemp)"
   body_for test "" "" 0 > "$body"
   if [ "$1" -eq 1 ]; then print_dry "$subject" "$body"; rm -f "$body"; return 0; fi
-  deliver "$subject" "$body" || rc=3
+  deliver "$subject" "$body" test || rc=3
   rm -f "$body"
   hw_log "test alert: \"$subject\" — $DELIVER_NOTE"
   return "$rc"

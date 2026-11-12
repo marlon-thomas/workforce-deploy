@@ -972,6 +972,8 @@ for s in mail_admin_password mail_db_password mail_lookup_key webmail_oidc_secre
   [ -s "secrets/$s" ] || openssl rand -hex 24 | tr -d '\n' > "secrets/$s"
 done
 [ -e secrets/mail_relay_password ] || : > secrets/mail_relay_password
+# Workforce issue 447: the health watch's read-only database role (health-db-init in compose.yaml).
+[ -s secrets/health_db_password ] || openssl rand -hex 24 | tr -d '\n' > secrets/health_db_password
 [ -e blueprints/webmail-app.yaml ] || printf 'version: 1\nentries: []\n' > blueprints/webmail-app.yaml
 {
   echo "secret_key: $(cat secrets/ak_secret)"

@@ -54,6 +54,39 @@ AWS_CLI_IMAGE="amazon/aws-cli@sha256:6977c83ae3dc99f28fcf8276b9ea5eec33833cd5be4
 
 umask 077
 mkdir -p backups
+
+# backup_status_write — under the appliance controller, what this run did, for the health watch, which can't list
+# backups/ (Workforce issue 447): backup-status/last.json, in the format common.sh describes, from BS_* (as
+# backup_status_read sets them, changed by this run). A temporary file renamed into place, 0644: the health job
+# reads it, and never sees half of one. On today's host layout nothing: the watch reads backups/ itself. A
+# status that can't be written is said, and changes nothing else here.
+backup_status_write() {
+  under_controller || return 0
+  local dir tmp kept=0 p iso_last=null iso_off=null arc=null
+  dir="$(dirname "$BACKUP_STATUS_FILE")"
+  case "${BS_ARCHIVE:-}" in ''|*[!A-Za-z0-9._-]*) ;; *) arc="\"${BS_ARCHIVE}\"" ;; esac
+  for p in backups/*.tar.gz; do if [ -e "$p" ]; then kept=$((kept + 1)); fi; done
+  [ -z "${BS_LAST_EPOCH:-}" ] || iso_last="\"$(date -u -d "@${BS_LAST_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')\""
+  [ -z "${BS_OFFSITE_EPOCH:-}" ] || iso_off="\"$(date -u -d "@${BS_OFFSITE_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')\""
+  tmp="${dir}/.last.json.tmp.$$"
+  if { printf '{"schema":1,"lastAt":%s,"lastAtEpoch":%s,"sizeBytes":%s,"archive":%s,"kept":%s,"offsite":{"lastCopy":"%s","at":%s,"atEpoch":%s}}\n' \
+         "$iso_last" "${BS_LAST_EPOCH:-null}" "${BS_SIZE:-null}" "$arc" "$kept" \
+         "${BS_OFFSITE:-UNKNOWN}" "$iso_off" "${BS_OFFSITE_EPOCH:-null}" > "$tmp"; } 2>/dev/null \
+     && chmod 644 "$tmp" && mv -f "$tmp" "$BACKUP_STATUS_FILE"; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  echo "  (the backup's status for the health watch could not be written to ${BACKUP_STATUS_FILE})"
+  return 0
+}
+# backup_status_offsite <0|1> — the off-site copy just made worked (0) or didn't (1): into the status.
+backup_status_offsite() {
+  under_controller || return 0
+  backup_status_read || true
+  if [ "$1" -eq 0 ]; then BS_OFFSITE=OK; else BS_OFFSITE=FAILED; fi
+  BS_OFFSITE_EPOCH="$(date +%s)"
+  backup_status_write
+}
 # The encrypted file an rsync copy sends from, for as long as that takes. Only the holder of the lock
 # below touches it.
 SEND_DIR="backups/.offsite-send"
@@ -264,6 +297,7 @@ if [ "$OFFSITE_ONLY" -eq 1 ]; then
   [ -n "$NEWEST" ] || { echo "No backup to copy yet."; exit 5; }
   echo "Testing the off-site copy with ${NEWEST}…"
   RC=0; offsite_copy "$NEWEST" || RC=3
+  backup_status_offsite "$RC"
   echo "Off-site copy test finished."
   exit "$RC"
 fi
@@ -332,11 +366,19 @@ tar -czf "${OUT}.part" -C "$TMP" ${PARTS}
 mv "${OUT}.part" "$OUT"
 chmod 600 "$OUT"
 echo "Wrote $OUT ($(du -h "$OUT" | cut -f1))"
+if under_controller; then
+  backup_status_read || true
+  BS_LAST_EPOCH="$(date +%s)"; BS_SIZE="$(stat -c %s "$OUT" 2>/dev/null)" || BS_SIZE=""
+  case "$BS_SIZE" in ''|*[!0-9]*) BS_SIZE="" ;; esac
+  BS_ARCHIVE="$(basename "$OUT")"
+  backup_status_write
+fi
 
 # --- off-site (optional) -----------------------------------------------------
 # A failed copy is reported and the local archive stands: this isn't a failed backup.
 if [ -n "${BACKUP_TARGET:-}" ]; then
-  offsite_copy "$OUT" || true
+  OFFSITE_RC=0; offsite_copy "$OUT" || OFFSITE_RC=1
+  backup_status_offsite "$OFFSITE_RC"
 fi
 
 # --- retention ---------------------------------------------------------------
@@ -366,3 +408,5 @@ for t in pre-update pre-authentik-upgrade; do
     | tail -n +6 | while read -r old; do rm -f "backups/$old"; done
 done
 echo "Retention applied (nightly: 14 daily / 8 weekly / 12 monthly; tagged archives kept)."
+# How many are kept now, for the health watch.
+if under_controller; then backup_status_read || true; backup_status_write; fi

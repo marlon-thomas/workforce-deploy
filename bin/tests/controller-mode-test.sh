@@ -35,5 +35,70 @@ check "backup.sh: the branding copy is a one-off with no network, whose output D
 ! grep -q 'exec -T api' "$HERE/../backup.sh"; check "backup.sh: nothing exec'd in the api" "$?" 0
 grep -q 'source=${COMPOSE_PROJECT_NAME}_app_data,target=/d,readonly' "$HERE/../backup.sh"; check "backup.sh: the branding read from the api's volume, read-only" "$?" 0
 
+# Workforce issue 447: under the controller doctor.sh's psql runs as the health watch's read-only role, its password
+# in the environment only; on today's host layout as the database's own user, as before.
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/secrets"; printf 'fictitious-role-password\n' > "$WORK/secrets/health_db_password"
+(
+  cd "$WORK" || exit 1
+  DB_USER=workforce_app; AK_DB_USER=authentik
+  unset WORKFORCE_CONTROLLER PGPASSWORD; health_db_client
+  check "host layout: psql as the database's user" "$PSQL_DB_USER $PSQL_AK_USER ${#PSQL_ENV[@]} ${PGPASSWORD:-none}" "workforce_app authentik 0 none"
+  export WORKFORCE_CONTROLLER=1; health_db_client
+  check "controller: psql as the health role" "$PSQL_DB_USER $PSQL_AK_USER" "workforce_health workforce_health"
+  check "controller: the password by name only" "${PSQL_ENV[*]}" "-e PGPASSWORD"
+  check "controller: the password from its secret" "$PGPASSWORD" "fictitious-role-password"
+  rm secrets/health_db_password; health_db_client
+  check "controller: no secret, no -e" "${#PSQL_ENV[@]}" 0
+  echo "$PASS $FAILN" > "$WORK/counts"
+)
+read -r PASS FAILN < "$WORK/counts"
+# Every psql doctor.sh (and common.sh's signing-key check) runs takes its user from health_db_client.
+check "doctor.sh: no psql as a fixed user" "$(grep -c 'psql[^|]*-U "\${DB_USER\|psql[^|]*-U "\${AK_DB_USER' "$HERE/../doctor.sh")" 0
+check "doctor.sh: each psql as PSQL_DB_USER or PSQL_AK_USER" "$(grep -c 'psql.*-U "\${PSQL_\(DB\|AK\)_USER}"' "$HERE/../doctor.sh")" 4
+grep -q 'psql -X -U "${PSQL_AK_USER:-${AK_DB_USER:-authentik}}"' "$HERE/../lib/common.sh"; check "common.sh: the signing-key check too" "$?" 0
+
+# The backup's status for the health watch: written by backup.sh under the controller, read back by common.sh.
+eval "$(sed -n '/^backup_status_write() {/,/^}/p; /^backup_status_offsite() {/,/^}/p' "$HERE/../backup.sh")"
+(
+  cd "$WORK" || exit 1
+  umask 077
+  mkdir -p backups backup-status; : > backups/a.tar.gz; : > backups/b.tar.gz
+  export WORKFORCE_CONTROLLER=1
+  BACKUP_STATUS_FILE=backup-status/last.json
+  BS_LAST_EPOCH=1700000000; BS_SIZE=4096; BS_ARCHIVE=2023-11-14_221320.tar.gz; BS_OFFSITE=UNKNOWN; BS_OFFSITE_EPOCH=""
+  backup_status_write >/dev/null
+  check "status: written 0644" "$(stat -c %a backup-status/last.json)" 644
+  check "status: no temporary file left" "$(find backup-status -name '.*' | wc -l | tr -d ' ')" 0
+  check "status: valid JSON, as described" "$(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["schema"], d["lastAt"], d["sizeBytes"], d["archive"], d["kept"], d["offsite"])' backup-status/last.json)" \
+    "1 2023-11-14T22:13:20Z 4096 2023-11-14_221320.tar.gz 2 {'lastCopy': 'UNKNOWN', 'at': None, 'atEpoch': None}"
+  BS_LAST_EPOCH=""; BS_SIZE=""; backup_status_read
+  check "status: read back" "$BS_LAST_EPOCH $BS_SIZE $BS_ARCHIVE $BS_KEPT $BS_OFFSITE" "1700000000 4096 2023-11-14_221320.tar.gz 2 UNKNOWN"
+  backup_status_offsite 1 >/dev/null; backup_status_read
+  check "status: a failed off-site copy keeps the archive's" "$BS_OFFSITE $BS_LAST_EPOCH" "FAILED 1700000000"
+  case "$BS_OFFSITE_EPOCH" in ''|*[!0-9]*) check "status: off-site time" "$BS_OFFSITE_EPOCH" "a number" ;; *) check "status: off-site time" ok ok ;; esac
+  backup_status_offsite 0 >/dev/null; backup_status_read
+  check "status: then a good one" "$BS_OFFSITE" OK
+  BS_ARCHIVE='bad name"},"x":{'; backup_status_write >/dev/null
+  check "status: an odd archive name is left out, the file still JSON" "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["archive"])' backup-status/last.json)" None
+  # Somewhere it can't write (the helper's runs): said, and nothing else stops.
+  chmod 555 backup-status
+  if [ ! -w backup-status ]; then
+    out="$(backup_status_write)"; rc=$?
+    check "status: unwritable is not an error" "$rc" 0
+    case "$out" in *"could not be written"*) check "status: unwritable is said" ok ok ;; *) check "status: unwritable is said" "$out" "could not be written" ;; esac
+  fi
+  chmod 755 backup-status
+  # Today's host layout: nothing written.
+  rm -f backup-status/last.json; unset WORKFORCE_CONTROLLER; backup_status_write
+  check "host layout: no status file" "$(ls backup-status | wc -l | tr -d ' ')" 0
+  # What another job's file can't make the reader take: a link, or values not of backup.sh's shape.
+  export WORKFORCE_CONTROLLER=1
+  ln -s ../backups/a.tar.gz backup-status/last.json
+  backup_status_read; check "status: a link is not read" "$?" 1
+  echo "$PASS $FAILN" > "$WORK/counts"
+)
+read -r PASS FAILN < "$WORK/counts"
+
 echo "controller-mode self-test: ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]

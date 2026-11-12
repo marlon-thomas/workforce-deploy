@@ -23,6 +23,7 @@ GOOD = {
             own("/run/secrets", "services/api/secrets"),
             own("/run/workforce-actions/requests", "mailbox/requests", ro=False),
             own("/run/workforce-actions/results", "mailbox/results"),
+            own("/run/workforce-status", "status/health"),
         ]},
         "postgres": {"volumes": [{"type": "volume", "source": "pg_data", "target": "/var/lib/postgresql/data"}, own("/run/secrets", "services/postgres/secrets")]},
         "gateway": {"volumes": [{"type": "volume", "source": "caddy_data", "target": "/data", "volume": {"nocopy": True}}]},
@@ -77,6 +78,10 @@ expect("the Docker socket", lambda c: c["services"]["postgres"]["volumes"].appen
 expect("a writable subpath", lambda c: c["services"]["postgres"]["volumes"].append(own("/y", "services/postgres/secrets", ro=False)), "must be read-only")
 expect("another service's folder", lambda c: c["services"]["postgres"]["volumes"].append(own("/z", "services/api/secrets")), "not its own services/postgres/")
 expect("the mailbox for another service", lambda c: c["services"]["postgres"]["volumes"].append(own("/z", "mailbox/requests", ro=False)), "only the api gets the mailbox")
+expect("the health watch's status for another service", lambda c: c["services"]["postgres"]["volumes"].append(own("/z", "status/health")), "only the api gets the health watch's status")
+expect("the health watch's status made writable", lambda c: c["services"]["api"]["volumes"].append(own("/y", "status/health", ro=False)), "status/health must be read-only")
+expect("the backup's status for anyone", lambda c: c["services"]["api"]["volumes"].append(own("/y", "status/backup")), "not its own services/api/")
+expect("the alerts for anyone", lambda c: c["services"]["api"]["volumes"].append(own("/y", "alerts")), "not its own services/api/")
 expect("results made writable", lambda c: c["services"]["api"]["volumes"].__setitem__(3, own("/run/workforce-actions/results", "mailbox/results", ro=False)), "mailbox/results must be read-only")
 expect("a subpath out of its volume", lambda c: c["services"]["postgres"]["volumes"].append(own("/z", "services/postgres/../api")), "without a plain subpath")
 expect("a file secret", lambda c: c["services"]["api"].update(secrets=[{"source": "db_password"}]), "file secrets remain")

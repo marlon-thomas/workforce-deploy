@@ -24,9 +24,9 @@ services:
       - { <<: *own, target: /run/workforce-branding, volume: { subpath: services/api/branding } }
       - { <<: *own, target: /app/api-truststore.jks, volume: { subpath: services/api/api-truststore.jks } }
       - { <<: *own, target: /run/oidc/signing-pub.pem, volume: { subpath: services/api/oidc-signing-pub.pem } }
-      # What the controller's health watch last found (ADR-0027), and the ADR-0031 mailbox: the api may leave a
-      # request and read a result, nothing more.
-      - { <<: *own, target: /run/workforce-status, volume: { subpath: services/api/status } }
+      # What the controller's health watch last found (ADR-0027): the health job's own folder, outside services/
+      # (Workforce PR 438), read-only. And the ADR-0031 mailbox: the api may leave a request and read a result.
+      - { <<: *own, target: /run/workforce-status, volume: { subpath: status/health } }
       - { <<: *own, target: /run/workforce-actions/requests, read_only: false, volume: { subpath: mailbox/requests } }
       - { <<: *own, target: /run/workforce-actions/results, volume: { subpath: mailbox/results } }
     secrets: !reset []
@@ -104,6 +104,18 @@ services:
   mail-db-init:
     volumes: !override
       - { <<: *own, target: /run/secrets, volume: { subpath: services/mail-db-init/secrets } }
+    secrets: !reset []
+
+  # The health watch's read-only database role (Workforce issue 447): each with its database's superuser password
+  # and the role's own, nothing else.
+  health-db-init:
+    volumes: !override
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/health-db-init/secrets } }
+    secrets: !reset []
+
+  ak-health-db-init:
+    volumes: !override
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/ak-health-db-init/secrets } }
     secrets: !reset []
 
   webmail:

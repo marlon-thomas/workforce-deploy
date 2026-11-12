@@ -42,6 +42,50 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "3"
 
+# One-shot, on each database the health watch reads (Workforce issue 447): its own role, workforce_health. A login
+# and nothing more: not a superuser, no role it is a member of (so no COPY … TO PROGRAM, no server files), every
+# session read-only by default with a statement time limit, and SELECT on exactly the columns bin/doctor.sh's queries
+# read (HEALTH_COLUMNS), never a whole table: authentik's password hashes and private keys stay out of its reach.
+# The appliance controller's health job runs psql as this role. At every start, on a new install and on one made
+# before it, all of it is made again from nothing in one transaction: the password from the health_db_password
+# secret, the attributes, the memberships taken away and the grants given anew, so a change made by hand, or a
+# column no longer read, doesn't stay. A table that isn't there yet is skipped until the next start.
+# bin/tests/health-db-role-e2e.sh proves it against PostgreSQL. No `$` in the SQL: compose would read it.
+x-health-db-init: &health-db-init
+  image: postgres:16.4@sha256:e62fbf9d3e2b49816a32c400ed2dba83e3b361e6833e624024309c35d334b412
+  restart: "no"
+  user: "999:999"   # the image's postgres user: a client only here
+  read_only: true
+  tmpfs: ["/tmp:size=8m"]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  deploy:
+    resources:
+      limits: { memory: 64m, pids: 32 }
+  networks: [data]
+  entrypoint:
+    - /bin/sh
+    - -c
+    - |
+      set -eu
+      export PGPASSWORD="$$(cat "/run/secrets/$$SUPER_SECRET")"
+      until pg_isready -q; do sleep 2; done
+      psql -X -q -v ON_ERROR_STOP=1 -v cols="$$HEALTH_COLUMNS" <<'SQL'
+      \set pw `cat /run/secrets/health_db_password`
+      BEGIN;
+      SELECT 'CREATE ROLE workforce_health' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'workforce_health')\gexec
+      ALTER ROLE workforce_health WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 4 PASSWORD :'pw';
+      ALTER ROLE workforce_health SET default_transaction_read_only = on;
+      ALTER ROLE workforce_health SET statement_timeout = '60s';
+      SELECT format('REVOKE %I FROM workforce_health', r.rolname) FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid WHERE m.member = 'workforce_health'::regrole\gexec
+      REVOKE ALL ON ALL TABLES IN SCHEMA public FROM workforce_health;
+      REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM workforce_health;
+      SELECT format('GRANT SELECT (%I) ON public.%I TO workforce_health', a.attname, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relname || '.' || a.attname = ANY (string_to_array(:'cols', ' '))\gexec
+      COMMIT;
+      SQL
+      echo "the health watch's database role is ready"
+  logging: *default-logging
+
 # Least privilege (Workforce ADR-0032 §5, issue 53), the same for every service unless its own comment says why not:
 # a user of its own, never root; a read-only root file system, with sized tmpfs folders for what it must write; every
 # Linux capability dropped, and only those a service can't start without added back, each with its reason;
@@ -356,6 +400,60 @@ services:
         echo "mail database ready"
     depends_on:
       postgres:
+        condition: service_healthy
+
+  # The health watch's role (x-health-db-init, above) on the application database, once its tables are there.
+  health-db-init:
+    <<: *health-db-init
+    environment:
+      TZ: Europe/London
+      PGHOST: postgres
+      PGDATABASE: ${DB_NAME}
+      PGUSER: ${DB_USER}
+      SUPER_SECRET: db_password
+      # table.column, as bin/doctor.sh's queries read them.
+      HEALTH_COLUMNS: >-
+        flyway_schema_history.version flyway_schema_history.success flyway_schema_history.installed_rank
+        mail_setting.staff_domain mail_setting.enabled mail_setting.last_sync_error
+        mail_mailbox.sync_error mail_mailbox.kind mail_mailbox.suspended_at
+        mail_send_alert.address mail_send_alert.kind mail_send_alert.first_at
+        mail_event_feed.id mail_event_feed.last_at
+        notification_delivery.state notification_delivery.created_at notification_delivery.error_message notification_delivery.sent_at
+    secrets:
+      - source: db_password
+        mode: 0444
+      - source: health_db_password
+        mode: 0444
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # And on the sign-in database, once authentik has made its tables (it is healthy only after its migrations).
+  ak-health-db-init:
+    <<: *health-db-init
+    environment:
+      TZ: Europe/London
+      PGHOST: authentik-postgres
+      PGDATABASE: ${AK_DB_NAME}
+      PGUSER: ${AK_DB_USER}
+      SUPER_SECRET: ak_db_password
+      # The admin's address, and the Workforce sign-in's public certificate: never a password hash or a private key.
+      HEALTH_COLUMNS: >-
+        authentik_core_user.username authentik_core_user.email
+        authentik_core_application.name authentik_core_application.provider_id
+        authentik_providers_oauth2_oauth2provider.provider_ptr_id authentik_providers_oauth2_oauth2provider.signing_key_id
+        authentik_crypto_certificatekeypair.kp_uuid authentik_crypto_certificatekeypair.certificate_data
+    secrets:
+      - source: ak_db_password
+        mode: 0444
+      - source: health_db_password
+        mode: 0444
+    depends_on:
+      authentik-postgres:
+        condition: service_healthy
+      authentik-server:
         condition: service_healthy
 
   mail:
@@ -1276,6 +1374,9 @@ secrets:
     file: ./secrets/webmail_oidc_secret
   webmail_des_key:
     file: ./secrets/webmail_des_key
+  # Workforce issue 447: the health watch's read-only database role (health-db-init). Generated by install and update.
+  health_db_password:
+    file: ./secrets/health_db_password
 
 volumes:
   caddy_data:

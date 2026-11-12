@@ -10,7 +10,7 @@ Docker API resolve on the host, not in the controller, so this fails on:
 - any file secret (`secrets:`), at the top or in a service;
 - a mount of the controller's volume, by whatever key the file gives it (the volume is known by the name Docker
   knows it by), without a plain subpath, or outside the service's own `services/<service>/…` (the api alone also
-  gets the ADR-0031 mailbox), or not read-only (only the mailbox's requests are written);
+  gets the ADR-0031 mailbox and the health watch's status/health), or not read-only (only the mailbox's requests are written);
 - a volume mount without `nocopy` where compose.yaml has it: Docker's copy-up would hand the volume back to root
   and undo volume-owners.
 
@@ -25,6 +25,8 @@ import sys
 
 CONTROLLER_KEY = "controller"
 MAILBOX = {"mailbox/requests": False, "mailbox/results": True}  # subpath -> must be read-only
+# What the health watch last found: the health job's folder, outside services/ (Workforce PR 438), for the api only.
+STATUS = {"status/health": True}  # subpath -> must be read-only
 TMPFS_OPTION = re.compile(r"^(uid=\d+|gid=\d+|mode=0?[0-7]{3,4}|size=\d+[kmg]?|nr_inodes=\d+[kmg]?)$")
 
 
@@ -93,10 +95,11 @@ def problems_in(config, base=None):
             parts = sub.split("/")
             if not sub or posixpath.normpath(sub) != sub or any(p in ("", ".", "..") for p in parts):
                 out.append(f"{svc}: the controller's volume mounted without a plain subpath -> {target}")
-            elif sub in MAILBOX:
+            elif sub in MAILBOX or sub in STATUS:
                 if svc != "api":
-                    out.append(f"{svc}: only the api gets the mailbox ({sub})")
-                elif MAILBOX[sub] and not m.get("read_only"):
+                    what = "the mailbox" if sub in MAILBOX else "the health watch's status"
+                    out.append(f"{svc}: only the api gets {what} ({sub})")
+                elif {**MAILBOX, **STATUS}[sub] and not m.get("read_only"):
                     out.append(f"{svc}: {sub} must be read-only")
             elif parts[0] != "services" or len(parts) < 3 or parts[1] != svc:
                 out.append(f"{svc}: gets {sub}, which is not its own services/{svc}/ folder")

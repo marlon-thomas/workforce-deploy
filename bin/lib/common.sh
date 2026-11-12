@@ -154,9 +154,11 @@ secret_modes() {
 # messages still say only yes or no.
 
 # oidc_signing_pub — the public key of the Workforce sign-in, as authentik holds it now, or nothing
-# when it can't be read. The exact name: this database also has "Workforce webmail".
+# when it can't be read. The exact name: this database also has "Workforce webmail". As the health watch's
+# role when doctor.sh has called health_db_client under the controller (its exec, word for word, is one of
+# the controller's EXEC_RULES), else as the database's own user.
 oidc_signing_pub() {
-  docker compose exec -T authentik-postgres psql -X -U "${AK_DB_USER:-authentik}" -d "${AK_DB_NAME:-authentik}" -t -A -c \
+  docker compose exec -T ${PSQL_ENV[@]+"${PSQL_ENV[@]}"} authentik-postgres psql -X -U "${PSQL_AK_USER:-${AK_DB_USER:-authentik}}" -d "${AK_DB_NAME:-authentik}" -t -A -c \
     "SELECT c.certificate_data FROM authentik_core_application a \
        JOIN authentik_providers_oauth2_oauth2provider p ON p.provider_ptr_id = a.provider_id \
        JOIN authentik_crypto_certificatekeypair c ON c.kp_uuid = p.signing_key_id \
@@ -337,6 +339,58 @@ age_here() { command -v "${AGE_BIN:-age}" >/dev/null 2>&1; }
 # under_controller — true when the appliance controller runs this script (Workforce ADR-0032), with
 # its Docker reached through an allow-list proxy rather than the socket.
 under_controller() { [ "${WORKFORCE_CONTROLLER:-}" = 1 ]; }
+
+# The health watch's own database role (Workforce issue 447; x-health-db-init in compose.yaml): a login with SELECT
+# on the columns doctor.sh reads and nothing else. Under the controller doctor.sh's psql runs as it, and the
+# controller's proxy allows no other user there; its password goes to psql in the exec's environment
+# (`docker compose exec -e PGPASSWORD` takes it from ours), never on a command line. On today's host layout the
+# queries run as each database's own user, as before.
+HEALTH_DB_ROLE=workforce_health
+
+# health_db_client — sets PSQL_DB_USER and PSQL_AK_USER (who doctor.sh's psql runs as, on the application and the
+# sign-in database) and PSQL_ENV (what its `docker compose exec` adds: the password, by name only).
+health_db_client() {
+  PSQL_ENV=()
+  if under_controller; then
+    PSQL_DB_USER="$HEALTH_DB_ROLE"; PSQL_AK_USER="$HEALTH_DB_ROLE"
+    PGPASSWORD="$(head -c 256 secrets/health_db_password 2>/dev/null | tr -d '\r\n')" || PGPASSWORD=""
+    export PGPASSWORD
+    # The containers' own connections are trusted locally today, so an empty one still connects as the role.
+    [ -z "$PGPASSWORD" ] || PSQL_ENV=(-e PGPASSWORD)
+  else
+    PSQL_DB_USER="${DB_USER:-}"; PSQL_AK_USER="${AK_DB_USER:-authentik}"
+  fi
+}
+
+# ------------------------------------------------------------------ the backup's status, for the health watch
+# Under the controller the health job can't list backups/ (Workforce PR 438), so bin/backup.sh leaves what it last
+# did in backup-status/last.json (the backup job's folder, which the health job may read), one line:
+#   {"schema":1,"lastAt":"…Z","lastAtEpoch":N,"sizeBytes":N,"archive":"name","kept":N,
+#    "offsite":{"lastCopy":"OK|FAILED|UNKNOWN","at":"…Z","atEpoch":N}}
+# lastAt* and sizeBytes are of the last good archive (null before the first), offsite of the last off-site copy
+# (UNKNOWN and null before the first). On today's host layout nothing writes it: the scripts read backups/.
+BACKUP_STATUS_FILE="${BACKUP_STATUS_FILE:-backup-status/last.json}"
+
+# backup_status_read — sets BS_LAST_EPOCH, BS_SIZE, BS_ARCHIVE, BS_KEPT, BS_OFFSITE (OK|FAILED|UNKNOWN) and
+# BS_OFFSITE_EPOCH from that file, each empty (BS_OFFSITE UNKNOWN) where it is missing or not what backup.sh
+# writes: it is another job's file, so nothing in it is used unchecked. Returns 1 when there is no file to read.
+backup_status_read() {
+  local j
+  BS_LAST_EPOCH=""; BS_SIZE=""; BS_ARCHIVE=""; BS_KEPT=""; BS_OFFSITE=UNKNOWN; BS_OFFSITE_EPOCH=""
+  { [ -f "$BACKUP_STATUS_FILE" ] && [ ! -L "$BACKUP_STATUS_FILE" ]; } || return 1
+  j="$(head -c 4096 "$BACKUP_STATUS_FILE" 2>/dev/null | tr -d '\r\n')" || return 1
+  case "$j" in '{"schema":1,'*) ;; *) return 1 ;; esac
+  BS_LAST_EPOCH="$(bs_field "$j" lastAtEpoch '[0-9]{1,12}')"
+  BS_SIZE="$(bs_field "$j" sizeBytes '[0-9]{1,15}')"
+  BS_ARCHIVE="$(bs_field "$j" archive '"[A-Za-z0-9._-]{1,128}"' | tr -d '"')"
+  BS_KEPT="$(bs_field "$j" kept '[0-9]{1,6}')"
+  BS_OFFSITE="$(bs_field "$j" lastCopy '"(OK|FAILED|UNKNOWN)"' | tr -d '"')"
+  [ -n "$BS_OFFSITE" ] || BS_OFFSITE=UNKNOWN
+  BS_OFFSITE_EPOCH="$(bs_field "$j" atEpoch '[0-9]{1,12}')"
+  return 0
+}
+# bs_field <json> <key> <value pattern> — the value of "key", only when it is exactly the pattern.
+bs_field() { printf '%s' "$1" | sed -nE "s/.*[{,]\"$2\":($3)[,}].*/\\1/p" | head -n 1; }
 
 # helper_args NETWORK — fills the array HELPER with what a helper container (`docker run` of the off-site
 # copy or encryption tools) needs under the controller: the project's labels, as a one-off (the backup
