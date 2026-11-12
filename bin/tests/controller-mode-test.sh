@@ -95,7 +95,33 @@ eval "$(sed -n '/^backup_status_write() {/,/^}/p; /^backup_status_offsite() {/,/
   # What another job's file can't make the reader take: a link, or values not of backup.sh's shape.
   export WORKFORCE_CONTROLLER=1
   ln -s ../backups/a.tar.gz backup-status/last.json
-  backup_status_read; check "status: a link is not read" "$?" 1
+  backup_status_read; check "status: a link is not read" "$?" 2
+  rm -f backup-status/last.json
+  backup_status_read; check "status: none at all" "$?" 1
+  # Numbers as backup.sh writes them, and nothing else: no leading zero (bash reads 0999 as octal, JSON refuses
+  # it), not too long, not empty.
+  w() { printf '%s\n' "$1" > backup-status/last.json; backup_status_read; }
+  w '{"schema":1,"lastAtEpoch":0999,"sizeBytes":007,"kept":0123,"offsite":{"lastCopy":"OK","atEpoch":0}}'
+  check "status: leading zeros are not taken" "[$BS_LAST_EPOCH][$BS_SIZE][$BS_KEPT][$BS_OFFSITE_EPOCH]" "[][][][0]"
+  w '{"schema":1,"lastAtEpoch":1700000000000000,"sizeBytes":9999999999999999,"kept":1234567,"offsite":{"lastCopy":"OK"}}'
+  check "status: too long is not taken" "[$BS_LAST_EPOCH][$BS_SIZE][$BS_KEPT]" "[][][]"
+  w '{"schema":1,"lastAtEpoch":,"sizeBytes":"","kept":null,"offsite":{"lastCopy":""}}'
+  check "status: empty is not taken" "[$BS_LAST_EPOCH][$BS_SIZE][$BS_KEPT][$BS_OFFSITE]" "[][][][UNKNOWN]"
+  w '{"schema":1,"lastAtEpoch":1700000000,"sizeBytes":0,"kept":0,"offsite":{"lastCopy":"OK"}}'
+  check "status: plain numbers are" "[$BS_LAST_EPOCH][$BS_SIZE][$BS_KEPT]" "[1700000000][0][0]"
+  # A pipe where the file should be (another job's folder: it could be swapped in at any moment): the read gives
+  # up within seconds and says it couldn't read it, rather than hold the health watch until its time limit.
+  rm -f backup-status/last.json
+  if mkfifo backup-status/last.json 2>/dev/null; then
+    t0="$(date +%s)"
+    BACKUP_STATUS_FILE=backup-status/last.json
+    # The check before the open passes for a pipe made after it; here the open itself meets the pipe.
+    timeout 20 bash -c '. "$1"; export WORKFORCE_CONTROLLER=1; BACKUP_STATUS_FILE=backup-status/last.json
+      backup_status_read; echo "rc=$?"' _ "$HERE/../lib/common.sh" > fifo.out 2>&1
+    check "status: a pipe is not waited on" "$(cat fifo.out)" "rc=2"
+    check "status: given up within seconds" "$( [ $(( $(date +%s) - t0 )) -le 10 ] && echo yes)" yes
+    rm -f backup-status/last.json fifo.out
+  fi
   echo "$PASS $FAILN" > "$WORK/counts"
 )
 read -r PASS FAILN < "$WORK/counts"

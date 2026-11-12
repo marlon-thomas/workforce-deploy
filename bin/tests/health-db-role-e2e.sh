@@ -93,7 +93,7 @@ SQL
 init() {
   docker run --rm --network "$N" --user 999:999 --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
     -v "$WORK/secrets:/run/secrets:ro" -e PGHOST=postgres -e PGDATABASE="$1" -e PGUSER=workforce_app -e SUPER_SECRET="$2" \
-    -e HEALTH_COLUMNS="$3" --entrypoint /bin/sh "$IMAGE" -c "$(cat "$WORK/init.sh")" 2>&1
+    -e HEALTH_COLUMNS="$3" -e HEALTH_DATABASES="workforce authentik" --entrypoint /bin/sh "$IMAGE" -c "$(cat "$WORK/init.sh")" 2>&1
 }
 out="$(init workforce db_password "$APP_COLS")"; check "the application database's one-shot" "$?:$out" "0:the health watch's database role is ready"
 out="$(init authentik db_password "$AK_COLS")"; check "the sign-in database's one-shot" "$?:$out" "0:the health watch's database role is ready"
@@ -154,7 +154,25 @@ ALTER ROLE workforce_health IN DATABASE workforce SET statement_timeout = 0;
 GRANT CREATE ON SCHEMA public TO workforce_health;
 CREATE TABLE owned_by_it (x int);
 ALTER TABLE owned_by_it OWNER TO workforce_health;
+-- A function it owns that runs as its owner: it must be dropped, never handed to the superuser.
+CREATE FUNCTION runs_as_owner() RETURNS int LANGUAGE sql SECURITY DEFINER AS 'select 1';
+ALTER FUNCTION runs_as_owner() OWNER TO workforce_health;
+-- A procedure, by another grantor (REVOKE … ON FUNCTION would fail on it).
+CREATE PROCEDURE a_procedure() LANGUAGE sql AS 'select 1';
+REVOKE ALL ON PROCEDURE a_procedure() FROM PUBLIC;
+GRANT EXECUTE ON PROCEDURE a_procedure() TO someone_else WITH GRANT OPTION;
+SET ROLE someone_else; GRANT EXECUTE ON PROCEDURE a_procedure() TO workforce_health; RESET ROLE;
 CREATE TABLE mail_send_alert (address text, kind text, first_at timestamptz, body text);
+SQL
+# And in another database of the server, which this one-shot makes no grants in.
+su_sql postgres <<'SQL' >/dev/null || exit 1
+CREATE DATABASE elsewhere;
+SQL
+su_sql elsewhere <<'SQL' >/dev/null || exit 1
+CREATE TABLE secrets_here (x text);
+GRANT SELECT ON secrets_here TO workforce_health;
+CREATE TABLE its_own (x int);
+ALTER TABLE its_own OWNER TO workforce_health;
 SQL
 ROLE_PW="fictitious$(od -An -tx1 -N12 /dev/urandom | tr -d ' \n')"; printf '%s' "$ROLE_PW" > "$WORK/secrets/health_db_password"
 out="$(init workforce db_password "$APP_COLS")"; check "again, on an existing install" "$?:$out" "0:the health watch's database role is ready"
@@ -164,6 +182,12 @@ check "again: nobody a member of it" "$(su_sql workforce <<< "select count(*) fr
 check "again: its own settings only, in no database apart" "$(su_sql workforce <<< "select setdatabase, array_to_string(setconfig, ',') from pg_db_role_setting where setrole = 'workforce_health'::regrole")" "0|default_transaction_read_only=on,statement_timeout=60s"
 check "again: no expiry" "$(su_sql workforce <<< "select coalesce(rolvaliduntil::text, 'none') from pg_roles where rolname = 'workforce_health'")" infinity
 check "again: owns nothing" "$(su_sql workforce <<< "select count(*) from pg_class where relowner = 'workforce_health'::regrole")" 0
+check "again: what it owned is gone, not the superuser's" "$(su_sql workforce <<< "select count(*) from pg_proc where proname = 'runs_as_owner'")" 0
+check "again: owns no routine anywhere here" "$(su_sql workforce <<< "select count(*) from pg_proc where proowner = 'workforce_health'::regrole")" 0
+refused "again: not another grantor's procedure" workforce "set default_transaction_read_only = off; call a_procedure()"
+refused "again: nothing in another database either" elsewhere "select x from secrets_here"
+check "again: owns nothing there" "$(su_sql elsewhere <<< "select count(*) from pg_class where relowner = 'workforce_health'::regrole")" 0
+check "again: the sign-in database's columns kept" "$(as_role authentik "select lower(email) from authentik_core_user where username = 'admin'")" admin@example.test
 refused "again: not another grantor's whole row" workforce "select * from mail_setting"
 refused "again: no server files" workforce "select pg_read_file('/etc/passwd')"
 refused "again: no table of its own" workforce "set default_transaction_read_only = off; create table mine (x int)"

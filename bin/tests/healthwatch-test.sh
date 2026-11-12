@@ -459,6 +459,35 @@ read -r PASS FAILN < "$WORK/route.counts"
   says gave-up; NOW=$((NOW + 900)); run
   check "controller: asked again after it was given up" "$( [ "$(sha256sum "$REQ")" != "$given" ] && echo yes)" yes
   contains "controller: and said" "$(tail -1 "$HW_LOG_FILE")" "did NOT send"
+  # Flapping, while the controller holds a request back (Workforce issue 447, round 3): what no longer applies is
+  # withdrawn, never sent late. Told: object storage failing (sent above, and again after it was given up).
+  says sent; NOW=$((NOW + 900)); run
+  check "flap: told failing" "$(sed -n 's/^fail=//p' "$HW_STATE_FILE")" "object storage"
+  doctor "OK|database|accepting" "OK|object storage|live"
+  NOW=$((NOW + 900)); run
+  check "flap: resolved asked for" "$(req kind)" resolved
+  resolved_hash="$(sha256sum "$REQ" | cut -d' ' -f1)"
+  says limited
+  doctor "OK|database|accepting" "FAIL|object storage|unreachable"
+  NOW=$((NOW + 900)); run
+  check "flap: the held-back resolved is withdrawn" "$( [ -e "$REQ" ] && echo there || echo gone)" gone
+  check "flap: nothing pending" "$(grep -c '^pending=' "$HW_STATE_FILE")" 0
+  check "flap: remembered as withdrawn" "$(sed -n 's/^withdrawn=//p' "$HW_STATE_FILE")" "$resolved_hash"
+  check "flap: still told failing" "$(sed -n 's/^fail=//p' "$HW_STATE_FILE")" "object storage"
+  contains "flap: said" "$(tail -1 "$HW_LOG_FILE")" "no longer applies: withdrawn"
+  # Had the controller sent it just then, its result says so (in "recent"): the watch corrects it with an alert.
+  printf '{"schema":1,"hash":"%064d","outcome":"waiting","at":2,"recent":[{"hash":"%s","outcome":"sent","at":1}]}\n' 0 "$resolved_hash" > "$HW_RESULT_DIR/result.json"
+  NOW=$((NOW + 900)); run
+  check "flap: a late resolved is corrected" "$(req kind)" alert
+  check "flap: told what the late email said" "$(grep -c '^fail=' "$HW_STATE_FILE")" 0
+  # The mirror: a held-back alert when the check clears again.
+  says limited
+  doctor "OK|database|accepting" "OK|object storage|live"
+  NOW=$((NOW + 900)); run
+  check "flap: the held-back alert is withdrawn" "$( [ -e "$REQ" ] && echo there || echo gone)" gone
+  check "flap: nothing to say" "$(grep -c '^pending=' "$HW_STATE_FILE")" 0
+  doctor "OK|database|accepting" "FAIL|object storage|unreachable"
+  NOW=$((NOW + 900)); run
   # A result for another request says nothing about this one.
   printf '{"schema":1,"hash":"%064d","outcome":"sent","at":1}\n' 0 > "$HW_RESULT_DIR/result.json"
   NOW=$((NOW + 900)); run
@@ -494,6 +523,9 @@ read -r PASS FAILN < "$WORK/route.counts"
   printf '{"schema":1,"lastAtEpoch":%s,"sizeBytes":1,"kept":1,"offsite":{"lastCopy":"OK"}}\n' "$(( $(date +%s) + 86400 ))" > "$BACKUP_STATUS_FILE"
   run
   check "controller: a time in the future is not used" "$(json_get 'd["backup"]["lastAt"]')" None
+  printf '{"schema":1,"lastAtEpoch":0999,"sizeBytes":007,"kept":0123,"offsite":{"lastCopy":"OK"}}\n' > "$BACKUP_STATUS_FILE"
+  run
+  check "controller: leading zeros: health.json still JSON, nothing taken" "$(json_get 'd["backup"]["lastAt"], d["backup"]["sizeBytes"], d["backup"]["kept"]')" "(None, None, 0)"
   rm -f "$BACKUP_STATUS_FILE"; run
   check "controller: no status yet" "$(json_get 'd["backup"]["lastAt"], d["backup"]["kept"]')" "(None, 0)"
   echo "$PASS $FAILN" > "$WORK/controller.counts"

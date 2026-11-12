@@ -203,12 +203,34 @@ fi
 # --- database + migrations
 DB_OK=$(docker compose exec -T postgres pg_isready -U "${DB_USER}" -d "${DB_NAME}" >/dev/null 2>&1 && echo yes || echo no)
 if [ "$DB_OK" = yes ]; then row "database" ok "accepting connections"; else row "database" fail "not accepting"; fi
+# role_refused <stderr> — psql said the health watch's role isn't there, or may not read (Workforce issue 447).
+role_refused() { printf '%s' "$1" | grep -Eq 'role "[^"]*" does not exist|permission denied|password authentication failed|no pg_hba.conf entry'; }
+DB_SKIP_WHY="database not answering"
+PSQL_ERR="$(mktemp)"
 FW=$(docker compose exec -T ${PSQL_ENV[@]+"${PSQL_ENV[@]}"} postgres psql -U "${PSQL_DB_USER}" -d "${DB_NAME}" -tAc \
-  "select coalesce((select version from flyway_schema_history where success and version is not null order by installed_rank desc limit 1),'none')" 2>/dev/null || echo "?")
-case "$FW" in
-  none|\?|"") row "schema migrations" fail "no successful migration history" ;;
-  *)          row "schema migrations" ok "at version $FW" ;;
-esac
+  "select coalesce((select version from flyway_schema_history where success and version is not null order by installed_rank desc limit 1),'none')" 2>"$PSQL_ERR" || echo "?")
+if [ "$DB_OK" = yes ] && under_controller && role_refused "$(head -c 2000 "$PSQL_ERR")"; then
+  # One clear row, not a misleading FAIL for each check that reads the database.
+  row "database access" fail "the health watch's database role (${HEALTH_DB_ROLE}) is missing or lacks access: check the health-db-init service"
+  DB_OK=no; DB_SKIP_WHY="not checked: the health watch's database role is missing or lacks access"
+  row "schema migrations" skip "$DB_SKIP_WHY"
+else
+  case "$FW" in
+    none|\?|"") row "schema migrations" fail "no successful migration history" ;;
+    *)          row "schema migrations" ok "at version $FW" ;;
+  esac
+fi
+
+# The sign-in database, the same way: what authentik holds as the admin's address (the recovery email below), and
+# whether the health watch's role may read it there.
+AK_ROLE_BAD=0
+AK_NOW="$(docker compose exec -T ${PSQL_ENV[@]+"${PSQL_ENV[@]}"} authentik-postgres psql -U "${PSQL_AK_USER}" -d "${AK_DB_NAME:-authentik}" -tAc \
+  "select lower(email) from authentik_core_user where username = 'admin'" 2>"$PSQL_ERR" | tr -d '[:space:]' || true)"
+if under_controller && role_refused "$(head -c 2000 "$PSQL_ERR")"; then
+  AK_ROLE_BAD=1; AK_NOW=""
+  row "sign-in database access" fail "the health watch's database role (${HEALTH_DB_ROLE}) is missing or lacks access on the sign-in database: check the ak-health-db-init service"
+fi
+rm -f "$PSQL_ERR"
 
 # db_value <sql> — one READ-ONLY query on the application database; prints the value.
 # Non-zero when the database or the query fails (callers degrade to WARN/SKIP). Each psql command here, word for
@@ -267,15 +289,14 @@ else
   # This server's names and their parent domains (only names with a dot: never a bare TLD).
   HOSTED="$(printf '%s\n' "${APP_HOSTNAME:-}" "${AUTH_HOSTNAME:-}" "${WEBMAIL_HOSTNAME:-}" \
     "${APP_HOSTNAME#*.}" "${AUTH_HOSTNAME#*.}" | tr '[:upper:]' '[:lower:]' | grep '\.' | sort -u || true)"
-  STAFF_DOMAINS="$(docker compose exec -T ${PSQL_ENV[@]+"${PSQL_ENV[@]}"} postgres psql -U "${PSQL_DB_USER}" -d "${DB_NAME}" -tAc \
+  STAFF_DOMAINS=""
+  [ "$DB_OK" = yes ] && STAFF_DOMAINS="$(docker compose exec -T ${PSQL_ENV[@]+"${PSQL_ENV[@]}"} postgres psql -U "${PSQL_DB_USER}" -d "${DB_NAME}" -tAc \
     "select staff_domain from mail_setting where staff_domain is not null" 2>/dev/null || true)"
   ON_HERE=""
   for d in $HOSTED $STAFF_DOMAINS; do
     case "$R_DOMAIN" in "$d"|*."$d") ON_HERE="$d"; break ;; esac
   done
-  # What authentik holds now (applied by the identity converge in ./bin/update.sh).
-  AK_NOW="$(docker compose exec -T ${PSQL_ENV[@]+"${PSQL_ENV[@]}"} authentik-postgres psql -U "${PSQL_AK_USER}" -d "${AK_DB_NAME:-authentik}" -tAc \
-    "select lower(email) from authentik_core_user where username = 'admin'" 2>/dev/null | tr -d '[:space:]' || true)"
+  # What authentik holds now (applied by the identity converge in ./bin/update.sh): AK_NOW, read above.
   MASKED="${RECOVERY:0:1}•••@${R_DOMAIN}"
   if [ -n "$ON_HERE" ]; then
     row "admin recovery email" warn "${MASKED} is on ${ON_HERE}, which this server may host: use an address outside this server"
@@ -435,6 +456,8 @@ fi
 #     and nobody can sign in. Yes or no only, never the keys.
 if ! command -v openssl >/dev/null 2>&1; then
   row "sign-in key" skip "openssl is not installed here"
+elif [ "$AK_ROLE_BAD" = 1 ]; then
+  row "sign-in key" skip "not checked: the health watch's database role is missing or lacks access on the sign-in database"
 else
   AK_PUB="$(oidc_signing_pub)" || AK_PUB=""
   case "$AK_PUB" in
@@ -469,7 +492,7 @@ esac
 # Sync between Workforce and the mail server (app DB, read-only). An organisation-level sync error
 # or every mailbox failing means the mail server is unreachable; single mailbox errors are a WARN.
 if [ "$DB_OK" != yes ]; then
-  row "mail sync" skip "database not answering"
+  row "mail sync" skip "$DB_SKIP_WHY"
 elif ! db_has_table mail_mailbox; then
   row "mail sync" skip "staff email is not in this version"
 else
@@ -499,7 +522,7 @@ fi
 # usual, in the last day (each is a line on Today for whoever manages email), and whether the mail server's reports are
 # reaching Workforce at all (without them neither can be noticed). App DB, read-only; counts only, no addresses.
 if [ "$DB_OK" != yes ]; then
-  row "mail volume" skip "database not answering"
+  row "mail volume" skip "$DB_SKIP_WHY"
 elif ! db_has_table mail_send_alert; then
   row "mail volume" skip "not in this version"
 else
@@ -526,7 +549,7 @@ fi
 # --- outbound notifications (expiry reminders, invitations, …) in the last 24 h, read-only.
 # Rows FAILED for want of an address (a person with no email) are not a mail fault — not counted.
 if [ "$DB_OK" != yes ]; then
-  row "notifications" skip "database not answering"
+  row "notifications" skip "$DB_SKIP_WHY"
 elif ! db_has_table notification_delivery; then
   row "notifications" skip "no notification ledger in this version"
 else
@@ -587,10 +610,11 @@ fi
 # --- backups: backup.sh only ever leaves a finished archive in backups/ (a failed run leaves none),
 #     so the newest archive's age is the age of the last successful backup. Under the controller the health
 #     job can't list backups/: the backup job's own record of it says (backup-status/last.json, common.sh).
-LAST_BACKUP=""; BACKUP_LOG="backups/cron.log"; OFFSITE_FAILED=0
+LAST_BACKUP=""; BACKUP_LOG="backups/cron.log"; OFFSITE_FAILED=0; BS_RC=0
 if under_controller; then
   BACKUP_LOG="the backup job's log (the controller's volume, jobs/backup)"
-  if backup_status_read; then
+  backup_status_read || BS_RC=$?
+  if [ "$BS_RC" -eq 0 ]; then
     LAST_BACKUP="$BS_LAST_EPOCH"
     [ "$BS_OFFSITE" != FAILED ] || OFFSITE_FAILED=1
   fi
@@ -601,14 +625,17 @@ else
   OFFSITE_FAILED="$( { tail -n 400 backups/cron.log 2>/dev/null || true; } \
     | awk '/^Dumping the application database|^Testing the off-site copy/ { f = 0 } /Off-site copy failed/ { f = 1 } END { print f + 0 }')" || OFFSITE_FAILED=0
 fi
-if is_count "$LAST_BACKUP"; then
-  AGE_S=$(( $(date +%s) - LAST_BACKUP )); AGE_H=$(( AGE_S / 3600 ))
+if [ "$BS_RC" -eq 2 ]; then
+  # Not what backup.sh writes, or it couldn't be read in time (a pipe where the file should be): said as that.
+  oprow "last backup" fail "the backup's status (backup-status/last.json) could not be read — see ${BACKUP_LOG}"
+elif is_count "$LAST_BACKUP"; then
+  AGE_S=$(( $(date +%s) - 10#$LAST_BACKUP )); AGE_H=$(( AGE_S / 3600 ))
   if [ "$AGE_S" -le $((26 * 3600)) ]; then row "last backup" ok "$AGE_H h ago"
   else oprow "last backup" fail "$AGE_H h old — the nightly backup is not succeeding: see ${BACKUP_LOG}, run ./bin/backup.sh"; fi
 else
   # Installed more than 26 h ago (the secrets are written once, at install) and never backed up.
   SINCE="$(stat -c %Y secrets/db_password 2>/dev/null)" || SINCE=""
-  if is_count "$SINCE" && [ $(( $(date +%s) - SINCE )) -gt $((26 * 3600)) ]; then
+  if is_count "$SINCE" && [ $(( $(date +%s) - 10#$SINCE )) -gt $((26 * 3600)) ]; then
     oprow "last backup" fail "none at all — see ${BACKUP_LOG}, run ./bin/backup.sh"
   else
     row "last backup" warn "none yet — ./bin/backup.sh after your first data entry"

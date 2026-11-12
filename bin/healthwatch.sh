@@ -95,7 +95,7 @@ decide() {
       [ -n "$l" ] || continue
       if ! printf '%s\n' "$prev" | grep -Fxq -- "$l"; then echo alert; return 0; fi
     done <<< "$cur"
-    if [ $(( now - last )) -ge "$HW_REMIND_SECS" ]; then echo reminder; else echo none; fi
+    if [ $(( 10#$now - 10#$last )) -ge "$HW_REMIND_SECS" ]; then echo reminder; else echo none; fi
   elif [ -n "$prev" ]; then
     echo resolved
   else
@@ -108,22 +108,28 @@ decide() {
 # handed to it and not yet known to be sent, with the fails it tells (Workforce issue 447).
 PREV_FAILS=""; LAST_SENT=0
 PENDING_HASH=""; PENDING_SUBJECT=""; PENDING_AT=0; PENDING_FAILS=""
+WITHDRAWN_HASH=""; WITHDRAWN_AT=0; WITHDRAWN_FAILS=""
 load_state() {
   PREV_FAILS=""; LAST_SENT=0; PENDING_HASH=""; PENDING_SUBJECT=""; PENDING_AT=0; PENDING_FAILS=""
+  WITHDRAWN_HASH=""; WITHDRAWN_AT=0; WITHDRAWN_FAILS=""
   [ -f "$HW_STATE_FILE" ] || return 0
   local line v
   while IFS= read -r line; do
     case "$line" in
-      last_sent=*) v="${line#*=}"; case "$v" in ''|*[!0-9]*) ;; *) LAST_SENT="$v" ;; esac ;;
+      last_sent=*) v="${line#*=}"; [[ "$v" =~ ^(0|[1-9][0-9]{0,11})$ ]] && LAST_SENT="$v" ;;
       fail=*)      PREV_FAILS="${PREV_FAILS}${line#fail=}"$'\n' ;;
       pending=*)   v="${line#*=}"; [[ "$v" =~ ^[0-9a-f]{64}$ ]] && PENDING_HASH="$v" ;;
       pending_subject=*) PENDING_SUBJECT="${line#*=}" ;;
-      pending_at=*) v="${line#*=}"; case "$v" in ''|*[!0-9]*) ;; *) PENDING_AT="$v" ;; esac ;;
+      pending_at=*) v="${line#*=}"; [[ "$v" =~ ^(0|[1-9][0-9]{0,11})$ ]] && PENDING_AT="$v" ;;
       pending_fail=*) PENDING_FAILS="${PENDING_FAILS}${line#pending_fail=}"$'\n' ;;
+      withdrawn=*) v="${line#*=}"; [[ "$v" =~ ^[0-9a-f]{64}$ ]] && WITHDRAWN_HASH="$v" ;;
+      withdrawn_at=*) v="${line#*=}"; [[ "$v" =~ ^(0|[1-9][0-9]{0,11})$ ]] && WITHDRAWN_AT="$v" ;;
+      withdrawn_fail=*) WITHDRAWN_FAILS="${WITHDRAWN_FAILS}${line#withdrawn_fail=}"$'\n' ;;
     esac
   done < "$HW_STATE_FILE"
   PREV_FAILS="${PREV_FAILS%$'\n'}"
   PENDING_FAILS="${PENDING_FAILS%$'\n'}"
+  WITHDRAWN_FAILS="${WITHDRAWN_FAILS%$'\n'}"
 }
 save_state() { # save_state <fails> <last email epoch> <run epoch> — with PENDING_* as they are
   local tmp="${HW_STATE_FILE}.tmp.$$" l
@@ -138,6 +144,11 @@ save_state() { # save_state <fails> <last email epoch> <run epoch> — with PEND
       echo "pending_subject=$PENDING_SUBJECT"
       echo "pending_at=$PENDING_AT"
       while IFS= read -r l; do [ -n "$l" ] && echo "pending_fail=$l"; done <<< "$PENDING_FAILS"
+    fi
+    if [ -n "$WITHDRAWN_HASH" ]; then
+      echo "withdrawn=$WITHDRAWN_HASH"
+      echo "withdrawn_at=$WITHDRAWN_AT"
+      while IFS= read -r l; do [ -n "$l" ] && echo "withdrawn_fail=$l"; done <<< "$WITHDRAWN_FAILS"
     fi
   } > "$tmp"
   mv -f "$tmp" "$HW_STATE_FILE"
@@ -328,12 +339,14 @@ request_alert() {
 # alert_result <hash> — what the controller says became of that request (alerts-status/result.json, which only
 # the controller writes): sent, repeat (the same went within the hour), gave-up, stale or refused (final), or
 # waiting, limited, unroutable, failed or blocked (it is still on it); nothing when it hasn't said.
+# The file names the latest request and the last few before it ("recent"), so a request withdrawn as it was being
+# sent is still found.
 alert_result() {
   local f="$HW_RESULT_DIR/result.json" j
+  [[ "$1" =~ ^[0-9a-f]{64}$ ]] || return 0
   { [ -f "$f" ] && [ ! -L "$f" ]; } || return 0
-  j="$(head -c 1024 "$f" 2>/dev/null | tr -d '\r\n')" || return 0
-  case "$j" in *"\"hash\":\"$1\""*) ;; *) return 0 ;; esac
-  printf '%s' "$j" | sed -nE 's/.*"outcome":"(sent|repeat|gave-up|stale|refused|waiting|limited|unroutable|failed|blocked)".*/\1/p' | head -n 1
+  j="$(timeout 2 head -c 4096 "$f" 2>/dev/null | tr -d '\r\n')" || return 0
+  printf '%s' "$j" | sed -nE "s/.*\"hash\":\"$1\",\"outcome\":\"(sent|repeat|gave-up|stale|refused|waiting|limited|unroutable|failed|blocked)\".*/\\1/p" | head -n 1
 }
 
 # deliver <subject> <bodyfile> [<kind>] — 0 when sent (or handed to the controller) or nobody to send to; 1 on a
@@ -580,37 +593,51 @@ watch_once() {
 # controller_round <action> <rows> <fails> <now> <summary> — the alert part of a run as the controller's health job
 # (Workforce issue 447). What the last email told (fail=) changes only once the controller says it sent it: a
 # handed-over alert stays pending until then, and isn't handed over again while the decision is the same. One the
-# controller gave up on (or refused, or found too old) is asked for again by this very run's decision. Returns 3
-# when it couldn't be handed over.
+# controller gave up on (or refused, or found too old) is asked for again by this very run's decision. One that no
+# longer applies (the decision is now another, or none: the check cleared, or failed again, while the controller
+# held it back) is withdrawn: the request is removed, so it is never sent late. Should the controller have been
+# sending it just then, its result says so, and what that email told becomes what the last email told, so the
+# next decision corrects it. Returns 3 when an alert couldn't be handed over.
 controller_round() {
-  local action="$1" rows="$2" cur="$3" now="$4" summary="$5" outcome note="" subject body out
+  local action="$1" rows="$2" cur="$3" now="$4" summary="$5" outcome note="" subject="" body out
+  if [ -n "$WITHDRAWN_HASH" ]; then
+    case "$(alert_result "$WITHDRAWN_HASH")" in
+      sent|repeat) PREV_FAILS="$WITHDRAWN_FAILS"; LAST_SENT="$WITHDRAWN_AT"; WITHDRAWN_HASH=""
+                   note="a withdrawn alert had gone already" ;;
+      gave-up|stale|refused) WITHDRAWN_HASH="" ;;
+    esac
+  fi
   if [ -n "$PENDING_HASH" ]; then
     outcome="$(alert_result "$PENDING_HASH")"
     case "$outcome" in
       sent|repeat)
         PREV_FAILS="$PENDING_FAILS"; LAST_SENT="$PENDING_AT"; PENDING_HASH=""
-        note="the controller sent \"${PENDING_SUBJECT}\"" ;;
+        note="${note:+$note; }the controller sent \"${PENDING_SUBJECT}\"" ;;
       gave-up|stale|refused)
         PENDING_HASH=""
-        note="the controller did NOT send \"${PENDING_SUBJECT}\" (${outcome}): asking again" ;;
-      *) note="\"${PENDING_SUBJECT}\" is with the controller (${outcome:-not looked at yet})" ;;
+        note="${note:+$note; }the controller did NOT send \"${PENDING_SUBJECT}\" (${outcome}): asking again" ;;
+      *) note="${note:+$note; }\"${PENDING_SUBJECT}\" is with the controller (${outcome:-not looked at yet})" ;;
     esac
-    # The decision again, from what the last email now known to be sent told.
-    action="$(decide "$PREV_FAILS" "$cur" "$now" "$LAST_SENT")"
+  fi
+  # The decision again, from what the last email known to be sent told.
+  action="$(decide "$PREV_FAILS" "$cur" "$now" "$LAST_SENT")"
+  [ "$action" = none ] || subject="$(subject_for "$action" "$cur")"
+  if [ -n "$PENDING_HASH" ] && [ "$PENDING_SUBJECT" != "$subject" ]; then
+    withdraw_alert
+    note="${note:+$note; }\"${PENDING_SUBJECT}\" no longer applies: withdrawn"
+    PENDING_HASH=""
   fi
   if [ "$action" = none ]; then
     save_state "$PREV_FAILS" "$LAST_SENT" "$now"
     hw_log "$summary${note:+ — $note}"
     return 0
   fi
-  subject="$(subject_for "$action" "$cur")"
-  if [ -n "$PENDING_HASH" ] && [ "$PENDING_SUBJECT" = "$subject" ]; then
+  if [ -n "$PENDING_HASH" ]; then
     save_state "$PREV_FAILS" "$LAST_SENT" "$now"
     hw_log "$summary — $action: waiting for the controller — $note"
     return 0
   fi
   if [ "${#RCPTS[@]}" -eq 0 ]; then
-    PENDING_HASH=""
     save_state "$cur" "$now" "$now"
     hw_log "$summary — $action: \"$subject\" — not emailed: OPS_ALERT_EMAIL is empty${note:+ — $note}"
     return 0
@@ -628,6 +655,13 @@ controller_round() {
   save_state "$PREV_FAILS" "$LAST_SENT" "$now"
   hw_log "$summary — $action: \"$subject\" — NOT handed to the controller: ${out:-no detail} (the next run tries again)${note:+ — $note}"
   return 3
+}
+
+# withdraw_alert — the pending request removed (when it is still that one), and remembered as withdrawn.
+withdraw_alert() {
+  local f="$HW_ALERT_DIR/request.json"
+  if [ -f "$f" ] && [ ! -L "$f" ] && [ "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" = "$PENDING_HASH" ]; then rm -f "$f"; fi
+  WITHDRAWN_HASH="$PENDING_HASH"; WITHDRAWN_AT="$PENDING_AT"; WITHDRAWN_FAILS="$PENDING_FAILS"
 }
 
 # heartbeat — "this server and its health watch are alive" to the outside uptime service. Never

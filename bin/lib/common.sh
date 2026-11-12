@@ -373,34 +373,40 @@ BACKUP_STATUS_FILE="${BACKUP_STATUS_FILE:-backup-status/last.json}"
 
 # backup_status_read — sets BS_LAST_EPOCH, BS_SIZE, BS_ARCHIVE, BS_KEPT, BS_OFFSITE (OK|FAILED|UNKNOWN) and
 # BS_OFFSITE_EPOCH from that file, each empty (BS_OFFSITE UNKNOWN) where it is missing or not what backup.sh
-# writes: it is another job's file, so nothing in it is used unchecked. Returns 1 when there is no file to read.
+# writes: it is another job's file, so nothing in it is used unchecked. Numbers are plain decimal with no
+# leading zero (bash would read 0123 as octal, and JSON doesn't allow it), at most 12 or 15 digits, and never a
+# time ahead of now. Returns 1 when there is no file, 2 when there is one but it can't be read as it should.
 backup_status_read() {
-  local j fd want now p
+  local j now
   BS_LAST_EPOCH=""; BS_SIZE=""; BS_ARCHIVE=""; BS_KEPT=""; BS_OFFSITE=UNKNOWN; BS_OFFSITE_EPOCH=""
-  { [ -f "$BACKUP_STATUS_FILE" ] && [ ! -L "$BACKUP_STATUS_FILE" ]; } || return 1
-  # One open, then checked through it (where /proc shows it): what is read is a plain file at that very name,
-  # not a link or anything else put there since the check above.
-  exec {fd}<"$BACKUP_STATUS_FILE" || return 1
-  p="/proc/$BASHPID/fd/$fd"
-  want="$(cd "$(dirname "$BACKUP_STATUS_FILE")" 2>/dev/null && pwd -P)/$(basename "$BACKUP_STATUS_FILE")"
-  if [ -L "$p" ] && { [ "$(readlink "$p")" != "$want" ] || [ ! -f "$p" ]; }; then exec {fd}<&-; return 1; fi
-  j="$(head -c 4096 <&"$fd" 2>/dev/null | tr -d '\r\n')"
-  exec {fd}<&-
-  case "$j" in '{"schema":1,'*) ;; *) return 1 ;; esac
-  BS_LAST_EPOCH="$(bs_field "$j" lastAtEpoch '[0-9]{1,12}')"
-  BS_SIZE="$(bs_field "$j" sizeBytes '[0-9]{1,15}')"
+  [ -e "$BACKUP_STATUS_FILE" ] || [ -L "$BACKUP_STATUS_FILE" ] || return 1
+  [ ! -L "$BACKUP_STATUS_FILE" ] || return 2
+  # The folder is another job's, so what is at that name may change at any moment, into a pipe that would
+  # block an open for ever: it is opened and read in a short-lived shell with a time limit, never here. There,
+  # one open, then checked through it (where /proc shows it): a plain file at that very name, not a link.
+  # shellcheck disable=SC2016  # expanded by the inner shell
+  j="$(timeout 3 bash -c '
+    exec 3<"$1" || exit 1
+    p=/proc/self/fd/3
+    want="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)/$(basename "$1")"
+    if [ -L "$p" ] && { [ "$(readlink "$p")" != "$want" ] || [ ! -f "$p" ]; }; then exit 1; fi
+    head -c 4096 <&3' _ "$BACKUP_STATUS_FILE" 2>/dev/null | tr -d '\r\n')" || return 2
+  case "$j" in '{"schema":1,'*) ;; *) return 2 ;; esac
+  BS_LAST_EPOCH="$(bs_field "$j" lastAtEpoch '0|[1-9][0-9]{0,11}')"
+  BS_SIZE="$(bs_field "$j" sizeBytes '0|[1-9][0-9]{0,14}')"
   BS_ARCHIVE="$(bs_field "$j" archive '"[A-Za-z0-9._-]{1,128}"' | tr -d '"')"
-  BS_KEPT="$(bs_field "$j" kept '[0-9]{1,6}')"
+  BS_KEPT="$(bs_field "$j" kept '0|[1-9][0-9]{0,5}')"
   BS_OFFSITE="$(bs_field "$j" lastCopy '"(OK|FAILED|UNKNOWN)"' | tr -d '"')"
   [ -n "$BS_OFFSITE" ] || BS_OFFSITE=UNKNOWN
-  BS_OFFSITE_EPOCH="$(bs_field "$j" atEpoch '[0-9]{1,12}')"
+  BS_OFFSITE_EPOCH="$(bs_field "$j" atEpoch '0|[1-9][0-9]{0,11}')"
   # Never a time ahead of now (five minutes for clocks): it would make an old backup look fresh.
   now="$(date +%s)"
-  if [ -n "$BS_LAST_EPOCH" ] && [ "$BS_LAST_EPOCH" -gt $((now + 300)) ]; then BS_LAST_EPOCH=""; fi
-  if [ -n "$BS_OFFSITE_EPOCH" ] && [ "$BS_OFFSITE_EPOCH" -gt $((now + 300)) ]; then BS_OFFSITE_EPOCH=""; fi
+  if [ -n "$BS_LAST_EPOCH" ] && [ "$((10#$BS_LAST_EPOCH))" -gt "$((10#$now + 300))" ]; then BS_LAST_EPOCH=""; fi
+  if [ -n "$BS_OFFSITE_EPOCH" ] && [ "$((10#$BS_OFFSITE_EPOCH))" -gt "$((10#$now + 300))" ]; then BS_OFFSITE_EPOCH=""; fi
   return 0
 }
-# bs_field <json> <key> <value pattern> — the value of "key", only when it is exactly the pattern.
+# bs_field <json> <key> <value pattern> — the value of "key", only when it is exactly the pattern (alternatives
+# are grouped, so `0|[1-9]…` holds for the whole value).
 bs_field() { printf '%s' "$1" | sed -nE "s/.*[{,]\"$2\":($3)[,}].*/\\1/p" | head -n 1; }
 
 # helper_args NETWORK — fills the array HELPER with what a helper container (`docker run` of the off-site

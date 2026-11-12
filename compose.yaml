@@ -47,9 +47,11 @@ x-logging: &default-logging
 # server files), and SELECT on exactly the columns bin/doctor.sh's queries read (HEALTH_COLUMNS), never a whole
 # table: authentik's password hashes, private keys and client secrets stay out of its reach. The appliance
 # controller's health job runs psql as this role. At every start, on a new install and on one made before it, all
-# of it is made again from nothing in one transaction: anything it owns goes to the superuser and every privilege
-# it was given here is taken away, whoever gave it (DROP OWNED, then each other grantor's grants on tables,
-# columns, schemas, functions and databases, revoked as that grantor, as PostgreSQL requires), every membership whoever granted it, every setting (RESET ALL, in every
+# of it is made again from nothing in one transaction: anything it owns is dropped (it should own nothing; nothing
+# it made is ever handed to the superuser) and every privilege it was given is taken away, whoever gave it (DROP
+# OWNED, then each other grantor's grants on tables, columns, schemas, routines and databases, revoked as that
+# grantor, as PostgreSQL requires, by names qualified in full under a fixed search_path), in every database of the
+# server (each in its own transaction first, then this one), every membership whoever granted it, every setting (RESET ALL, in every
 # database); then the password from the health_db_password secret, the attributes, and the grants anew.
 # So a change made by hand, or a column no longer read, doesn't stay. A table that isn't there yet is skipped
 # until the next start.
@@ -78,18 +80,38 @@ x-health-db-init: &health-db-init
     - |
       set -eu
       export PGPASSWORD="$$(cat "/run/secrets/$$SUPER_SECRET")"
+      # Names are read the same whoever this runs as: never through a search_path someone could put a schema on.
+      export PGOPTIONS='-c search_path=pg_catalog,pg_temp'
       until pg_isready -q; do sleep 2; done
-      psql -X -q -v ON_ERROR_STOP=1 -v cols="$$HEALTH_COLUMNS" <<'SQL'
-      \set pw `cat /run/secrets/health_db_password`
-      BEGIN;
-      SELECT 'CREATE ROLE workforce_health' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'workforce_health')\gexec
-      REASSIGN OWNED BY workforce_health TO CURRENT_USER;
+      # cleanup: in the database it runs in, everything the role owns dropped (it should own nothing, and nothing it
+      # made is ever handed on), then every privilege anyone gave it there revoked as that grantor, by names
+      # qualified in full.
+      cleanup() {
+      cat <<'SQL'
+      SELECT CAST('workforce_health owns the database ' || datname || ', which must be given to another owner first' AS int) FROM pg_database WHERE datdba = 'workforce_health'::regrole\gexec
       DROP OWNED BY workforce_health;
-      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON %s %s FROM workforce_health CASCADE; RESET ROLE', g.rolname, CASE c.relkind WHEN 'S' THEN 'SEQUENCE' ELSE 'TABLE' END, c.oid::regclass) FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
-      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL (%I) ON %s FROM workforce_health CASCADE; RESET ROLE', g.rolname, t.attname, t.attrelid::regclass) FROM pg_attribute t CROSS JOIN LATERAL aclexplode(t.attacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
+      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON %s %I.%I FROM workforce_health CASCADE; RESET ROLE', g.rolname, CASE c.relkind WHEN 'S' THEN 'SEQUENCE' ELSE 'TABLE' END, n.nspname, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace CROSS JOIN LATERAL aclexplode(c.relacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
+      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL (%I) ON %I.%I FROM workforce_health CASCADE; RESET ROLE', g.rolname, t.attname, n.nspname, c.relname) FROM pg_attribute t JOIN pg_class c ON c.oid = t.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace CROSS JOIN LATERAL aclexplode(t.attacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
       SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON SCHEMA %I FROM workforce_health CASCADE; RESET ROLE', g.rolname, n.nspname) FROM pg_namespace n CROSS JOIN LATERAL aclexplode(n.nspacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
-      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON FUNCTION %s FROM workforce_health CASCADE; RESET ROLE', g.rolname, f.oid::regprocedure) FROM pg_proc f CROSS JOIN LATERAL aclexplode(f.proacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
+      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON ROUTINE %I.%I(%s) FROM workforce_health CASCADE; RESET ROLE', g.rolname, n.nspname, f.proname, pg_get_function_identity_arguments(f.oid)) FROM pg_proc f JOIN pg_namespace n ON n.oid = f.pronamespace CROSS JOIN LATERAL aclexplode(f.proacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
       SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON DATABASE %I FROM workforce_health CASCADE; RESET ROLE', g.rolname, d.datname) FROM pg_database d CROSS JOIN LATERAL aclexplode(d.datacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
+      SQL
+      }
+      # Every other database of the server first (the role is the server's, so what it owns or was given anywhere
+      # is taken away too), each in a transaction of its own; then this one, where the role is made anew. Never the
+      # other database the watch reads (HEALTH_DATABASES), should both be on one server: its own one-shot sees to it.
+      if [ "$$(psql -X -At -c "SELECT 1 FROM pg_roles WHERE rolname = 'workforce_health'")" = 1 ]; then
+        psql -X -At -c "SELECT datname FROM pg_database WHERE datallowconn AND datname <> current_database()" |
+          while IFS= read -r db; do
+            case " $$HEALTH_DATABASES " in *" $$db "*) continue ;; esac
+            cleanup | PGDATABASE="$$db" psql -X -q -v ON_ERROR_STOP=1 -1
+          done
+      fi
+      {
+      printf '%s\n' '\set pw `cat /run/secrets/health_db_password`' 'BEGIN;' \
+        "SELECT 'CREATE ROLE workforce_health' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'workforce_health')\gexec"
+      cleanup
+      cat <<'SQL'
       SELECT format('REVOKE %I FROM workforce_health GRANTED BY %I', r.rolname, g.rolname) FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid JOIN pg_roles g ON g.oid = m.grantor WHERE m.member = 'workforce_health'::regrole\gexec
       SELECT format('REVOKE workforce_health FROM %I GRANTED BY %I', u.rolname, g.rolname) FROM pg_auth_members m JOIN pg_roles u ON u.oid = m.member JOIN pg_roles g ON g.oid = m.grantor WHERE m.roleid = 'workforce_health'::regrole\gexec
       SELECT format('ALTER ROLE workforce_health IN DATABASE %I RESET ALL', d.datname) FROM pg_db_role_setting x JOIN pg_database d ON d.oid = x.setdatabase WHERE x.setrole = 'workforce_health'::regrole\gexec
@@ -97,9 +119,10 @@ x-health-db-init: &health-db-init
       ALTER ROLE workforce_health WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 4 PASSWORD :'pw' VALID UNTIL 'infinity';
       ALTER ROLE workforce_health SET default_transaction_read_only = on;
       ALTER ROLE workforce_health SET statement_timeout = '60s';
-      SELECT format('GRANT SELECT (%I) ON public.%I TO workforce_health', a.attname, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relname || '.' || a.attname = ANY (string_to_array(:'cols', ' '))\gexec
+      SELECT format('GRANT SELECT (%I) ON %I.%I TO workforce_health', a.attname, n.nspname, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relname || '.' || a.attname = ANY (string_to_array(:'cols', ' '))\gexec
       COMMIT;
       SQL
+      } | psql -X -q -v ON_ERROR_STOP=1 -v cols="$$HEALTH_COLUMNS"
       echo "the health watch's database role is ready"
   logging: *default-logging
 
@@ -428,6 +451,7 @@ services:
       PGDATABASE: ${DB_NAME}
       PGUSER: ${DB_USER}
       SUPER_SECRET: db_password
+      HEALTH_DATABASES: ${DB_NAME} ${AK_DB_NAME}
       # table.column, as bin/doctor.sh's queries read them.
       HEALTH_COLUMNS: >-
         flyway_schema_history.version flyway_schema_history.success flyway_schema_history.installed_rank
@@ -456,6 +480,7 @@ services:
       PGDATABASE: ${AK_DB_NAME}
       PGUSER: ${AK_DB_USER}
       SUPER_SECRET: ak_db_password
+      HEALTH_DATABASES: ${DB_NAME} ${AK_DB_NAME}
       # The admin's address, and the Workforce sign-in's public certificate: never a password hash or a private key.
       HEALTH_COLUMNS: >-
         authentik_core_user.username authentik_core_user.email
