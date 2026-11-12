@@ -24,11 +24,16 @@ check "controller: no network" "${HELPER[*]: -1}" "none"
 
 # The ADR-0031 helper, under the controller, chowns nothing and needs the mailbox the controller made.
 grep -q 'if \[ "${WORKFORCE_CONTROLLER:-}" = 1 \]; then' "$HERE/../server-actions.sh"; check "server-actions: a controller branch in ensure_mailbox" "$?" 0
-# Every `docker run` in the backup's off-site copy passes the helper arguments.
+# Every `docker run` in the backup's off-site copy passes the helper arguments; the branding copy, the one
+# with no network, says its labels itself.
 runs="$(grep -c 'docker run --rm' "$HERE/../backup.sh")"
 with="$(grep -c 'docker run --rm[ -i]* "${HELPER\[@\]}"' "$HERE/../backup.sh")"
-check "backup.sh: every docker run has the helper arguments" "$with" "$runs"
-grep -q 'exec -T api tar -C /app/data/branding' "$HERE/../backup.sh"; check "backup.sh: branding by exec under the controller" "$?" 0
+check "backup.sh: every docker run but the branding copy's has the helper arguments" "$with" "$((runs - 1))"
+grep -q -- '--label com.docker.compose.oneoff=True --network none --log-driver none' "$HERE/../backup.sh"
+check "backup.sh: the branding copy is a one-off with no network, whose output Docker doesn't keep" "$?" 0
+# Nothing runs commands in the api under the controller (Workforce PR 438): the branding comes from its volume.
+! grep -q 'exec -T api' "$HERE/../backup.sh"; check "backup.sh: nothing exec'd in the api" "$?" 0
+grep -q 'source=${COMPOSE_PROJECT_NAME}_app_data,target=/d,readonly' "$HERE/../backup.sh"; check "backup.sh: the branding read from the api's volume, read-only" "$?" 0
 
 echo "controller-mode self-test: ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]

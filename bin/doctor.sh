@@ -144,8 +144,9 @@ else oprow "service backup" fail "not running ($state) — no nightly backup and
 # --- version identity (compare running vs configured)
 # The api port is NOT published (only gateway 80/443 are) — probe via the gateway
 # (TLS) and fall back to exec inside the api container.
+# Under the controller, nothing runs commands in the api (its folders include the server jobs' requests).
 RUNNING_META="$(curl -fsSk --max-time 5 "${CURL_PIN[@]}" "https://${APP_HOSTNAME}/api/v1/build-meta" 2>/dev/null \
-  || docker compose exec -T api curl -fsS --max-time 5 http://localhost:8080/api/v1/build-meta 2>/dev/null \
+  || { under_controller || docker compose exec -T api curl -fsS --max-time 5 http://localhost:8080/api/v1/build-meta 2>/dev/null; } \
   || true)"
 if [ -n "$RUNNING_META" ]; then
   RV="$(echo "$RUNNING_META" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)" || RV="?"
@@ -229,7 +230,11 @@ fi
 
 # --- the application can read its secrets (it runs unprivileged; a 0600 file silently switches a
 #     feature off: staff email, invitations, the assistant, push). Names only, never contents.
-if UNREADABLE=$(docker compose exec -T -u 999 api sh -c 'for f in /run/secrets/*; do [ -r "$f" ] || printf "%s " "$(basename "$f")"; done' 2>/dev/null); then
+if under_controller; then
+  # The controller writes each service's secrets with the modes it reads them by (Workforce ADR-0032), and
+  # nothing may run commands in the api, whose folders include the server jobs' requests.
+  row "app secrets" skip "given to the application by the controller"
+elif UNREADABLE=$(docker compose exec -T -u 999 api sh -c 'for f in /run/secrets/*; do [ -r "$f" ] || printf "%s " "$(basename "$f")"; done' 2>/dev/null); then
   if [ -z "$UNREADABLE" ]; then
     row "app secrets" ok "all readable by the application"
   else
@@ -288,17 +293,21 @@ else row "antivirus" warn "not answering (it can take minutes on first ever star
 # in_app <service> <script> [args…] — runs a bash snippet in that container; non-zero if it fails.
 in_app() { local svc="$1"; shift; docker compose exec -T "$svc" bash -c "$@" >/dev/null 2>&1; }
 TCP='exec 3<>"/dev/tcp/$1/$2"'
+# Under the controller, from the worker alone: it is the api's image on the same networks, and nothing may
+# run commands in the api itself (its folders include the server jobs' requests).
+APP_SVCS="api worker"; FROM_APP=api
+if under_controller; then APP_SVCS=worker; FROM_APP=worker; fi
 AV_BAD=""
-for svc in api worker; do
+for svc in $APP_SVCS; do
   in_app "$svc" "timeout 5 bash -c '$TCP' _ clamav 3310" || AV_BAD="${AV_BAD:+${AV_BAD}, }${svc}"
 done
-if [ -z "$AV_BAD" ]; then row "antivirus from app" ok "api and worker reach ClamAV"
+if [ -z "$AV_BAD" ]; then row "antivirus from app" ok "$(echo "$APP_SVCS" | sed 's/ / and /') reach ClamAV"
 else oprow "antivirus from app" fail "${AV_BAD} can't reach clamav:3310 — uploads stay unscanned and unreadable"; fi
 
-if in_app api 'curl -fsS --max-time 5 http://gotenberg:3000/health'; then
-  row "PDF service" ok "the api reaches Gotenberg"
+if in_app "$FROM_APP" 'curl -fsS --max-time 5 http://gotenberg:3000/health'; then
+  row "PDF service" ok "the ${FROM_APP} reaches Gotenberg"
 else
-  oprow "PDF service" fail "the api can't reach gotenberg:3000 — PDF reports and exports fail"
+  oprow "PDF service" fail "the ${FROM_APP} can't reach gotenberg:3000 — PDF reports and exports fail"
 fi
 
 # --- outgoing email (the app's notifications: invitations, password resets, reminders)
@@ -310,7 +319,10 @@ if [ -z "${SMTP_HOST:-}" ]; then
   fi
 else
   SMTP_TO="${SMTP_HOST}:${SMTP_PORT:-587}"
-  if ! in_app api "timeout 6 bash -c '$TCP' _ \"\$1\" \"\$2\"" _ "${SMTP_HOST}" "${SMTP_PORT:-587}"; then
+  if under_controller; then
+    # Only the api reaches the relay, and nothing may run commands in it under the controller.
+    row "outgoing email" skip "relay ${SMTP_TO}: send a test email from the app (Setup, Email) to check it"
+  elif ! in_app api "timeout 6 bash -c '$TCP' _ \"\$1\" \"\$2\"" _ "${SMTP_HOST}" "${SMTP_PORT:-587}"; then
     oprow "outgoing email" fail "the api can't reach the relay ${SMTP_TO} — emails stay queued"
   elif [ "${SMTP_STARTTLS:-false}" = true ] && ! in_app api 'timeout 12 openssl s_client -starttls smtp -connect "$1:$2" -servername "$1" -brief </dev/null' _ "${SMTP_HOST}" "${SMTP_PORT:-587}"; then
     oprow "outgoing email" fail "the relay ${SMTP_TO} answers but STARTTLS fails — check SMTP_PORT (587) and SMTP_STARTTLS"

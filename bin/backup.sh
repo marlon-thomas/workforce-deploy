@@ -296,11 +296,15 @@ evidence_export > "${TMP}/evidence.tar" \
 
 PARTS="MANIFEST database.dump authentik.dump evidence.tar"
 [ -s "${TMP}/mail.dump" ] && PARTS="${PARTS} mail.dump"
-# Under the controller, `compose cp` (Docker's archive calls) is refused by its proxy: the files come out of
-# the api as a tar stream instead, which the backup job's allow-list does give it (exec).
+# Under the controller, `compose cp` (Docker's archive calls) is refused by its proxy, and nothing may run
+# commands in the api: the files come out of the api's data volume, mounted read-only into a one-off helper
+# with no network, as a tar stream (--log-driver none: what it prints isn't kept by Docker).
 copy_branding() {
   if under_controller; then
-    mkdir -p "${TMP}/branding" && docker compose exec -T api tar -C /app/data/branding -cf - . | tar -C "${TMP}/branding" -xf -
+    mkdir -p "${TMP}/branding" && docker run --rm --label "com.docker.compose.project=${COMPOSE_PROJECT_NAME:?}" \
+      --label com.docker.compose.oneoff=True --network none --log-driver none \
+      --mount "type=volume,source=${COMPOSE_PROJECT_NAME}_app_data,target=/d,readonly" \
+      "$AGE_IMAGE" tar -C /d/branding -cf - . | tar -C "${TMP}/branding" -xf -
   else
     docker compose cp api:/app/data/branding "${TMP}/branding"
   fi
