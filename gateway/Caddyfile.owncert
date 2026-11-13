@@ -1,0 +1,75 @@
+# --- Production Caddyfile with the operator's own certificate (Workforce slice 5) ---
+# The production Caddyfile, routes, security headers and the controller's "being updated" page alike, with TLS
+# terminated on a certificate the operator supplies instead of one from Let's Encrypt: the appliance controller's
+# setup checks it covers both addresses and writes it, with its key, to the gateway's tls folder
+# (/etc/caddy/tls/tls.crt and tls.key). No ACME, so the operator renews it before it expires. For production only;
+# the TEST appliance's private CA uses Caddyfile.localca. Staff webmail, once switched on, needs its own address on
+# the same certificate.
+
+{$APP_HOSTNAME} {
+	tls /etc/caddy/tls/tls.crt /etc/caddy/tls/tls.key
+	# Asked only by the sign-in server on the private network (staff webmail); never from outside.
+	respond /api/public/mail/* 404
+	# While the appliance controller installs an update (Workforce slice 3b), users are kept out until the new
+	# version has passed its health check, so a rollback never undoes what they did: the controller puts a file
+	# `on` in this folder (its own, mounted read-only by compose.controller.yaml) and removes it once the update
+	# has succeeded or been rolled back. Read at each request, so no reload. The version endpoint stays open for
+	# the health check. On the host layout the folder isn't there, and nothing changes.
+	@updating {
+		file {
+			root /etc/caddy/maintenance
+			try_files /on
+		}
+		not path /api/v1/build-meta
+	}
+	header @updating Retry-After 120
+	respond @updating "Workforce is being updated. Please try again in a few minutes." 503
+	reverse_proxy api:8080 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src 'self' blob:; frame-ancestors 'none'"
+		-Server
+	}
+}
+
+{$AUTH_HOSTNAME} {
+	tls /etc/caddy/tls/tls.crt /etc/caddy/tls/tls.key
+	# Workforce ADR-0039 (security review): from outside, nobody removes or changes a sign-in code method through
+	# authentik's own pages or API (Workforce does that on the private network, after its own checks), and
+	# authentik's first-run page is never reachable.
+	@code_methods {
+		path /api/v3/authenticators/*
+		not method GET HEAD
+	}
+	respond @code_methods "Change how you get sign-in codes in Workforce: My record, then Signing in." 403
+	respond /setup* 404
+	respond /if/flow/initial-setup* 404
+	respond /api/v3/flows/executor/initial-setup* 404
+	reverse_proxy authentik-server:9000
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+}
+
+# Staff webmail (COMPOSE_PROFILES=staffmail; mail-calendar-spec §11). Its own host name, never a
+# path of the app: email is untrusted HTML, so webmail must not share the app's origin.
+# WEBMAIL_HOSTNAME unset = webmail.localhost, a local-only name with an internal certificate.
+{$WEBMAIL_HOSTNAME:webmail.localhost} {
+	tls /etc/caddy/tls/tls.crt /etc/caddy/tls/tls.key
+	reverse_proxy webmail:80 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+}
