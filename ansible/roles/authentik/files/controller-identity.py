@@ -133,15 +133,23 @@ def apply_blueprint(name):
 
 
 def workforce_provider_ok():
-    """The Workforce sign-in as the blueprint makes it: the application, its provider, a signing key and its flows."""
+    """The Workforce sign-in exactly as the blueprint makes it, or None: the application by its slug (unique, as the
+    blueprint identifies it; a name is not), its provider named Workforce with this installation's client id, a signing
+    key and its flows. The key pinned for the api is only ever this provider's: another application that happens to
+    be called Workforce, with a provider of its own, is never taken for it."""
     from authentik.core.models import Application
     from authentik.providers.oauth2.models import OAuth2Provider
 
-    app = Application.objects.filter(name="Workforce").first()
+    client_id = request.get("client_id")
+    if not isinstance(client_id, str) or not client_id:
+        fail("the controller's request names no client id")
+    app = Application.objects.filter(slug="workforce").first()
     if app is None or app.provider_id is None:
         return None
     provider = OAuth2Provider.objects.filter(pk=app.provider_id).first()
-    if provider is None or provider.signing_key is None or provider.authorization_flow_id is None:
+    if provider is None or provider.name != "Workforce" or provider.client_id != client_id:
+        return None
+    if provider.signing_key is None or provider.authorization_flow_id is None:
         return None
     return provider
 
@@ -182,7 +190,7 @@ if mode == "converge":
     for name in names:
         apply_blueprint(name)
     if workforce_provider_ok() is None:
-        fail("the Workforce sign-in is incomplete after its blueprint (no application, provider, signing key or flow)")
+        fail("the Workforce sign-in is not as its blueprint makes it (its application, its provider and client id, a signing key, a flow)")
     result["blueprints"] = names
 
     token = Path("/run/secrets/ak_invite_token").read_text(encoding="utf-8").strip()
@@ -204,7 +212,7 @@ if recovery.get("email"):
 
 provider = workforce_provider_ok()
 if provider is None:
-    fail("the Workforce sign-in has no signing key")
+    fail("the Workforce sign-in is not as its blueprint makes it, so no signing key was read")
 pem = provider.signing_key.certificate_data or ""
 if "BEGIN CERTIFICATE" not in pem:
     fail("the Workforce sign-in's signing key has no certificate")

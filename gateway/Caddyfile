@@ -50,6 +50,20 @@
 }
 
 {$AUTH_HOSTNAME} {
+	# While the appliance controller installs an update (Workforce issue 453), the sign-in pages are kept out too, from the
+	# moment the application stops until the update has succeeded or been rolled back: a rollback puts the sign-in
+	# server's database back, so a password changed or an account switched off here meanwhile would be silently undone.
+	# Open still: what the application, webmail's mail server and the health check read (discovery, the signing keys,
+	# authentik's own health), none of which changes anything. The same switch as the application's site.
+	@signin_updating {
+		file {
+			root /etc/caddy/maintenance
+			try_files /on
+		}
+		not path /application/o/workforce/.well-known/openid-configuration /application/o/workforce/jwks/ /application/o/webmail/.well-known/openid-configuration /application/o/webmail/jwks/ /-/health/ready/ /-/health/live/
+	}
+	header @signin_updating Retry-After 120
+	respond @signin_updating "Workforce is being updated. Please try again in a few minutes." 503
 	# Workforce ADR-0039 (security review): from outside, nobody removes or changes a sign-in code method through
 	# authentik's own pages or API (Workforce does that on the private network, after its own checks), and
 	# authentik's first-run page is never reachable.
