@@ -62,21 +62,30 @@ def run(script, stdin_text=""):
     """One of this role's scripts, as the role runs it with `ak shell`: its stdin given, its stdout returned."""
     if not plain_name(script):
         fail("a script was named strangely")
+    from django.db import DatabaseError
+
     path = HERE / script
     code = compile(path.read_text(encoding="utf-8"), str(path), "exec")
-    out = io.StringIO()
-    before = sys.stdin
-    sys.stdin = io.StringIO(stdin_text)
-    try:
-        with contextlib.redirect_stdout(out):
-            exec(code, {"__name__": "__workforce_identity__"})
-    except SystemExit:
-        fail(f"{script} refused")
-    except Exception as exc:  # noqa: BLE001 - said in our words; authentik's own message can quote values
-        fail(f"{script} failed ({type(exc).__name__})")
-    finally:
-        sys.stdin = before
-    return out.getvalue()
+    # Each script is idempotent: one the database refused for now (a deadlock with authentik-worker's own work) is
+    # run again, a few times.
+    for attempt in range(4):
+        out = io.StringIO()
+        before = sys.stdin
+        sys.stdin = io.StringIO(stdin_text)
+        try:
+            with contextlib.redirect_stdout(out):
+                exec(code, {"__name__": "__workforce_identity__"})
+            return out.getvalue()
+        except SystemExit:
+            fail(f"{script} refused")
+        except DatabaseError as exc:
+            if attempt == 3:
+                fail(f"{script} failed ({type(exc).__name__})")
+            time.sleep(5)
+        except Exception as exc:  # noqa: BLE001 - said in our words; authentik's own message can quote values
+            fail(f"{script} failed ({type(exc).__name__})")
+        finally:
+            sys.stdin = before
 
 
 # ------------------------------------------------------------------------------------------------- blueprints
@@ -104,6 +113,8 @@ def prerequisites_missing(content):
 
 def apply_blueprint(name):
     """As authentik's `apply_blueprint` command: validated first, applied in one transaction, for each tenant."""
+    from django.db import DatabaseError
+
     from authentik.blueprints.v1.importer import Importer
 
     if not plain_name(name):
@@ -115,18 +126,23 @@ def apply_blueprint(name):
         missing = prerequisites_missing(content) if tenants else "a ready tenant"
         problem = missing
         if not missing:
-            for tenant in tenants:
-                with tenant:
-                    importer = Importer.from_string(content)
-                    valid, _logs = importer.validate()
-                    if not valid:
-                        problem = "it isn't valid yet"
-                        break
-                    if not importer.apply():
-                        problem = "authentik didn't apply it"
-                        break
-            else:
-                return
+            try:
+                for tenant in tenants:
+                    with tenant:
+                        importer = Importer.from_string(content)
+                        valid, _logs = importer.validate()
+                        if not valid:
+                            problem = "it isn't valid yet"
+                            break
+                        if not importer.apply():
+                            problem = "authentik didn't apply it"
+                            break
+                else:
+                    return
+            except DatabaseError as exc:
+                # authentik-worker applies the same file by itself (its blueprint discovery), and two applications at
+                # once can deadlock or collide: PostgreSQL undoes one, and it is tried again.
+                problem = f"the database refused it for now ({type(exc).__name__})"
         if time.monotonic() >= deadline:
             fail(f"{name} could not be applied: {problem}")
         time.sleep(5)
@@ -165,9 +181,22 @@ def recovery_read(email):
     return {"admin": now.get("admin"), "akadmin": now.get("akadmin"), "others": int(now.get("others") or 0)}
 
 
+def wait_for_bootstrap():
+    """authentik's own superuser (akadmin) is made by its bootstrap blueprint, which its worker applies at its first
+    start: written before it exists, it would keep its default address. Waited for, as the blueprint's own objects."""
+    from authentik.core.models import User
+
+    deadline = time.monotonic() + WAIT_SECONDS
+    while not User.objects.filter(username="akadmin").exists():
+        if time.monotonic() >= deadline:
+            fail("authentik's own administrator (akadmin) was never made")
+        time.sleep(5)
+
+
 def recovery_write(recovery):
     email = recovery.get("email") or ""
     bootstrap = recovery.get("bootstrap_email") or ""
+    wait_for_bootstrap()
     before = recovery_read(email)
     # Checked again here, at the moment of writing: another account may have taken the address meanwhile.
     if before["others"]:
