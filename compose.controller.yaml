@@ -83,6 +83,46 @@ services:
       - { <<: *own, target: /templates, volume: { subpath: services/authentik-worker/branding/authentik-templates } }
     secrets: !reset []
 
+  # The sign-in server's own set-up under the controller (Workforce issue 453): what the authentik role's Ansible does on
+  # the host layout (the blueprints applied, the invitation service account, the sign-in hardening, the emergency
+  # administrator's recovery address, the signing certificate read). A one-shot of authentik's own image, run by the
+  # controller by name (`compose run --rm identity-setup`), never by `up` (its profile). It gets only its own folder:
+  # authentik's config.yml (secret key and database password), the invitation token, the blueprints the controller
+  # rendered from ansible/roles/authentik/templates, and that role's own scripts (ansible/roles/authentik/files). Only
+  # the data network: it talks to authentik-postgres and nothing else. bin/check-controller-compose.py keeps its image
+  # authentik-server's.
+  identity-setup:
+    image: ghcr.io/goauthentik/server:2026.8.5@sha256:602227a86455d6772e3d16b7d852713c4f864f40df5df894abd1285bb53979a5
+    profiles: [controller-identity]
+    restart: "no"
+    command: ["shell", "-c", "exec(open('/workforce-identity/controller-identity.py').read())"]
+    user: "1000:1000"   # the image's own user, as authentik-server
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 1g, pids: 128 }
+    networks: [data]
+    environment:
+      TZ: Europe/London
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__USER: ${AK_DB_USER}
+      AUTHENTIK_POSTGRESQL__NAME: ${AK_DB_NAME}
+      AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+    volumes:
+      - { <<: *own, target: /etc/authentik/config.yml, volume: { subpath: services/identity-setup/config.yml } }
+      - { <<: *own, target: /workforce-identity, volume: { subpath: services/identity-setup/identity } }
+      # Inside authentik's own blueprints folder, as the role's are; nothing in this container discovers them.
+      - { <<: *own, target: /blueprints/workforce, volume: { subpath: services/identity-setup/blueprints } }
+      # The Workforce blueprint's `!File [/branding/authentik-custom.css, …]`, as authentik-server has it.
+      - { <<: *own, target: /branding, volume: { subpath: services/identity-setup/branding } }
+      - { <<: *own, target: /run/secrets, volume: { subpath: services/identity-setup/secrets } }
+    depends_on:
+      authentik-postgres:
+        condition: service_healthy
+
   object-storage:
     volumes: !override
       # nocopy, as compose.yaml has it: Docker's copy-up would hand the volume back to root, undoing volume-owners.

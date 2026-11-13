@@ -34,6 +34,22 @@ for f in bin/*.py; do
     || bad "python: $f"
 done
 
+# Workforce issue 453: the role's Python files are run by the controller's one-shot too (identity-setup).
+for f in ansible/roles/authentik/files/*.py; do
+  [ -e "$f" ] || continue
+  python3 -I -c 'import sys; compile(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1], "exec")' "$f" \
+    || bad "python: $f"
+done
+
+echo "== sign-in templates the controller renders"
+# Workforce issue 453: under the appliance controller nothing runs Ansible; the controller renders these templates
+# itself, and knows only a few plain forms (bin/check-identity-templates.py says which).
+if python3 -I bin/check-identity-templates.py ansible/roles/authentik/templates; then
+  echo "ok   ansible/roles/authentik/templates: only forms the controller renders"
+else
+  bad "a sign-in template the controller can't render (above)"
+fi
+
 echo "== docker compose config"
 if docker compose version >/dev/null 2>&1; then
   TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

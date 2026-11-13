@@ -105,6 +105,14 @@ def problems_in(config, base=None):
                 out.append(f"{svc}: gets {sub}, which is not its own services/{svc}/ folder")
             elif not m.get("read_only"):
                 out.append(f"{svc}: {sub} must be read-only")
+    # Workforce issue 453: the sign-in server's one-shot set-up runs authentik's own code against its database, so it
+    # must be the very image authentik-server runs (a different version could migrate or misread that database).
+    services = config.get("services") or {}
+    if "identity-setup" in services:
+        if services["identity-setup"].get("image") != (services.get("authentik-server") or {}).get("image"):
+            out.append("identity-setup: its image is not authentik-server's")
+        if "controller-identity" not in (services["identity-setup"].get("profiles") or []):
+            out.append("identity-setup: it must have its own profile, so `up` never starts it")
     if base is not None:
         have = nocopy_mounts(config)
         services = config.get("services") or {}
