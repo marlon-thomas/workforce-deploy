@@ -49,9 +49,11 @@ x-logging: &default-logging
 # controller's health job runs psql as this role. At every start, on a new install and on one made before it, all
 # of it is made again from nothing in one transaction: anything it owns is dropped (it should own nothing; nothing
 # it made is ever handed to the superuser) and every privilege it was given is taken away, whoever gave it (DROP
-# OWNED, then each other grantor's grants on tables, columns, schemas, routines and databases, revoked as that
-# grantor, as PostgreSQL requires, by names qualified in full under a fixed search_path), in every database of the
-# server (each in its own transaction first, then this one), every membership whoever granted it, every setting (RESET ALL, in every
+# OWNED, then each other grantor's grants on tables, sequences, columns, schemas, routines (aggregates too),
+# types, languages, large objects, foreign-data wrappers and servers, databases, tablespaces and parameters,
+# revoked as that grantor, as PostgreSQL requires, by names qualified in full under a fixed search_path), in every
+# database of the server that can be connected to (each in its own transaction first, then this one; one dropped
+# meanwhile is passed over), every membership whoever granted it, every setting (RESET ALL, in every
 # database); then the password from the health_db_password secret, the attributes, and the grants anew.
 # So a change made by hand, or a column no longer read, doesn't stay. A table that isn't there yet is skipped
 # until the next start.
@@ -93,18 +95,29 @@ x-health-db-init: &health-db-init
       SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON %s %I.%I FROM workforce_health CASCADE; RESET ROLE', g.rolname, CASE c.relkind WHEN 'S' THEN 'SEQUENCE' ELSE 'TABLE' END, n.nspname, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace CROSS JOIN LATERAL aclexplode(c.relacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
       SELECT DISTINCT format('SET ROLE %I; REVOKE ALL (%I) ON %I.%I FROM workforce_health CASCADE; RESET ROLE', g.rolname, t.attname, n.nspname, c.relname) FROM pg_attribute t JOIN pg_class c ON c.oid = t.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace CROSS JOIN LATERAL aclexplode(t.attacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
       SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON SCHEMA %I FROM workforce_health CASCADE; RESET ROLE', g.rolname, n.nspname) FROM pg_namespace n CROSS JOIN LATERAL aclexplode(n.nspacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
-      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON ROUTINE %I.%I(%s) FROM workforce_health CASCADE; RESET ROLE', g.rolname, n.nspname, f.proname, pg_get_function_identity_arguments(f.oid)) FROM pg_proc f JOIN pg_namespace n ON n.oid = f.pronamespace CROSS JOIN LATERAL aclexplode(f.proacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
+      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON ROUTINE %I.%I(%s) FROM workforce_health CASCADE; RESET ROLE', g.rolname, n.nspname, f.proname, oidvectortypes(f.proargtypes)) FROM pg_proc f JOIN pg_namespace n ON n.oid = f.pronamespace CROSS JOIN LATERAL aclexplode(f.proacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
       SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON DATABASE %I FROM workforce_health CASCADE; RESET ROLE', g.rolname, d.datname) FROM pg_database d CROSS JOIN LATERAL aclexplode(d.datacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
+      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON TYPE %I.%I FROM workforce_health CASCADE; RESET ROLE', g.rolname, n.nspname, t.typname) FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace CROSS JOIN LATERAL aclexplode(t.typacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
+      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON LANGUAGE %I FROM workforce_health CASCADE; RESET ROLE', g.rolname, l.lanname) FROM pg_language l CROSS JOIN LATERAL aclexplode(l.lanacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
+      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON LARGE OBJECT %s FROM workforce_health CASCADE; RESET ROLE', g.rolname, o.oid) FROM pg_largeobject_metadata o CROSS JOIN LATERAL aclexplode(o.lomacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
+      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON FOREIGN DATA WRAPPER %I FROM workforce_health CASCADE; RESET ROLE', g.rolname, w.fdwname) FROM pg_foreign_data_wrapper w CROSS JOIN LATERAL aclexplode(w.fdwacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
+      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON FOREIGN SERVER %I FROM workforce_health CASCADE; RESET ROLE', g.rolname, v.srvname) FROM pg_foreign_server v CROSS JOIN LATERAL aclexplode(v.srvacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
+      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON TABLESPACE %I FROM workforce_health CASCADE; RESET ROLE', g.rolname, t.spcname) FROM pg_tablespace t CROSS JOIN LATERAL aclexplode(t.spcacl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
+      SELECT DISTINCT format('SET ROLE %I; REVOKE ALL ON PARAMETER %s FROM workforce_health CASCADE; RESET ROLE', g.rolname, x.parname) FROM pg_parameter_acl x CROSS JOIN LATERAL aclexplode(x.paracl) a JOIN pg_roles g ON g.oid = a.grantor WHERE a.grantee = 'workforce_health'::regrole\gexec
       SQL
       }
       # Every other database of the server first (the role is the server's, so what it owns or was given anywhere
       # is taken away too), each in a transaction of its own; then this one, where the role is made anew. Never the
       # other database the watch reads (HEALTH_DATABASES), should both be on one server: its own one-shot sees to it.
       if [ "$$(psql -X -At -c "SELECT 1 FROM pg_roles WHERE rolname = 'workforce_health'")" = 1 ]; then
-        psql -X -At -c "SELECT datname FROM pg_database WHERE datallowconn AND datname <> current_database()" |
+        psql -X -At -c "SELECT datname FROM pg_database WHERE datallowconn AND datconnlimit <> -2 AND datname <> current_database()" |
           while IFS= read -r db; do
             case " $$HEALTH_DATABASES " in *" $$db "*) continue ;; esac
-            cleanup | PGDATABASE="$$db" psql -X -q -v ON_ERROR_STOP=1 -1
+            # One dropped meanwhile is passed over, said; any other failure stops the one-shot.
+            if ! cleanup | PGDATABASE="$$db" psql -X -q -v ON_ERROR_STOP=1 -1; then
+              if [ "$$(printf '%s\n' "SELECT 1 FROM pg_database WHERE datname = :'d'" | psql -X -At -v d="$$db")" = 1 ]; then exit 1; fi
+              echo "the database $$db went away meanwhile; passed over"
+            fi
           done
       fi
       {

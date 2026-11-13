@@ -109,6 +109,17 @@ eval "$(sed -n '/^backup_status_write() {/,/^}/p; /^backup_status_offsite() {/,/
   check "status: empty is not taken" "[$BS_LAST_EPOCH][$BS_SIZE][$BS_KEPT][$BS_OFFSITE]" "[][][][UNKNOWN]"
   w '{"schema":1,"lastAtEpoch":1700000000,"sizeBytes":0,"kept":0,"offsite":{"lastCopy":"OK"}}'
   check "status: plain numbers are" "[$BS_LAST_EPOCH][$BS_SIZE][$BS_KEPT]" "[1700000000][0][0]"
+  # backup.sh replacing the file by a rename, again and again, while it is read: never "unreadable".
+  w '{"schema":1,"lastAtEpoch":1700000000,"sizeBytes":1,"kept":1,"offsite":{"lastCopy":"OK"}}'
+  ( for _ in $(seq 40); do
+      printf '%s\n' '{"schema":1,"lastAtEpoch":1700000000,"sizeBytes":1,"kept":1,"offsite":{"lastCopy":"OK"}}' > backup-status/.t
+      mv -f backup-status/.t backup-status/last.json; sleep 0.05
+    done ) &
+  writer=$!
+  unreadable=0
+  for _ in $(seq 60); do backup_status_read || unreadable=$((unreadable + 1)); done
+  wait "$writer"
+  check "status: a rename meanwhile is read again, not unreadable" "$unreadable" 0
   # A pipe where the file should be (another job's folder: it could be swapped in at any moment): the read gives
   # up within seconds and says it couldn't read it, rather than hold the health watch until its time limit.
   rm -f backup-status/last.json

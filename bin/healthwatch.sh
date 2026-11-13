@@ -107,11 +107,14 @@ decide() {
 # fail= is what the last email told (what was failing then); under the controller, pending* is the alert
 # handed to it and not yet known to be sent, with the fails it tells (Workforce issue 447).
 PREV_FAILS=""; LAST_SENT=0
-PENDING_HASH=""; PENDING_SUBJECT=""; PENDING_AT=0; PENDING_FAILS=""
-WITHDRAWN_HASH=""; WITHDRAWN_AT=0; WITHDRAWN_FAILS=""
+PENDING_HASH=""; PENDING_SUBJECT=""; PENDING_STATE=""; PENDING_AT=0; PENDING_FAILS=""
+# Alerts withdrawn while the controller held them (at most HW_WITHDRAWN_MAX, newest last): hash, time, and the
+# fails each told (newline-separated), by index.
+HW_WITHDRAWN_MAX=4
+W_HASH=(); W_AT=(); W_FAILS=()
 load_state() {
-  PREV_FAILS=""; LAST_SENT=0; PENDING_HASH=""; PENDING_SUBJECT=""; PENDING_AT=0; PENDING_FAILS=""
-  WITHDRAWN_HASH=""; WITHDRAWN_AT=0; WITHDRAWN_FAILS=""
+  PREV_FAILS=""; LAST_SENT=0; PENDING_HASH=""; PENDING_SUBJECT=""; PENDING_STATE=""; PENDING_AT=0; PENDING_FAILS=""
+  W_HASH=(); W_AT=(); W_FAILS=()
   [ -f "$HW_STATE_FILE" ] || return 0
   local line v
   while IFS= read -r line; do
@@ -120,16 +123,21 @@ load_state() {
       fail=*)      PREV_FAILS="${PREV_FAILS}${line#fail=}"$'\n' ;;
       pending=*)   v="${line#*=}"; [[ "$v" =~ ^[0-9a-f]{64}$ ]] && PENDING_HASH="$v" ;;
       pending_subject=*) PENDING_SUBJECT="${line#*=}" ;;
+      pending_state=*) v="${line#*=}"; [[ "$v" =~ ^[0-9a-f]{64}$ ]] && PENDING_STATE="$v" ;;
       pending_at=*) v="${line#*=}"; [[ "$v" =~ ^(0|[1-9][0-9]{0,11})$ ]] && PENDING_AT="$v" ;;
       pending_fail=*) PENDING_FAILS="${PENDING_FAILS}${line#pending_fail=}"$'\n' ;;
-      withdrawn=*) v="${line#*=}"; [[ "$v" =~ ^[0-9a-f]{64}$ ]] && WITHDRAWN_HASH="$v" ;;
-      withdrawn_at=*) v="${line#*=}"; [[ "$v" =~ ^(0|[1-9][0-9]{0,11})$ ]] && WITHDRAWN_AT="$v" ;;
-      withdrawn_fail=*) WITHDRAWN_FAILS="${WITHDRAWN_FAILS}${line#withdrawn_fail=}"$'\n' ;;
+      withdrawn=*)  # withdrawn=<hash> <time>
+        v="${line#*=}"
+        if [[ "$v" =~ ^([0-9a-f]{64})\ (0|[1-9][0-9]{0,11})$ ]]; then
+          W_HASH+=("${BASH_REMATCH[1]}"); W_AT+=("${BASH_REMATCH[2]}"); W_FAILS+=("")
+        fi ;;
+      withdrawn_fail=*)  # withdrawn_fail=<check>, for the withdrawn= line before it
+        [ "${#W_HASH[@]}" -eq 0 ] || W_FAILS[-1]="${W_FAILS[-1]}${line#withdrawn_fail=}"$'\n' ;;
     esac
   done < "$HW_STATE_FILE"
   PREV_FAILS="${PREV_FAILS%$'\n'}"
   PENDING_FAILS="${PENDING_FAILS%$'\n'}"
-  WITHDRAWN_FAILS="${WITHDRAWN_FAILS%$'\n'}"
+  local i; for i in "${!W_FAILS[@]}"; do W_FAILS[i]="${W_FAILS[i]%$'\n'}"; done
 }
 save_state() { # save_state <fails> <last email epoch> <run epoch> — with PENDING_* as they are
   local tmp="${HW_STATE_FILE}.tmp.$$" l
@@ -142,14 +150,15 @@ save_state() { # save_state <fails> <last email epoch> <run epoch> — with PEND
     if [ -n "$PENDING_HASH" ]; then
       echo "pending=$PENDING_HASH"
       echo "pending_subject=$PENDING_SUBJECT"
+      echo "pending_state=$PENDING_STATE"
       echo "pending_at=$PENDING_AT"
       while IFS= read -r l; do [ -n "$l" ] && echo "pending_fail=$l"; done <<< "$PENDING_FAILS"
     fi
-    if [ -n "$WITHDRAWN_HASH" ]; then
-      echo "withdrawn=$WITHDRAWN_HASH"
-      echo "withdrawn_at=$WITHDRAWN_AT"
-      while IFS= read -r l; do [ -n "$l" ] && echo "withdrawn_fail=$l"; done <<< "$WITHDRAWN_FAILS"
-    fi
+    local i
+    for i in "${!W_HASH[@]}"; do
+      echo "withdrawn=${W_HASH[i]} ${W_AT[i]}"
+      while IFS= read -r l; do [ -n "$l" ] && echo "withdrawn_fail=$l"; done <<< "${W_FAILS[i]}"
+    done
   } > "$tmp"
   mv -f "$tmp" "$HW_STATE_FILE"
 }
@@ -321,11 +330,12 @@ sender() { printf '%s' "${OPS_ALERT_FROM:-${SMTP_FROM:-healthwatch@${APP_HOSTNAM
 # many are left here. Prints the request's hash (how the controller's result names it), or why it couldn't be
 # left, returning 1.
 request_alert() {
-  local kind="$1" subject="$2" body="$3" tmp hash
+  local kind="$1" subject="$2" body="$3" state="${4:-}" tmp hash
   [ -d "$HW_ALERT_DIR" ] || { echo "the controller's alert folder ($HW_ALERT_DIR) is not there"; return 1; }
   tmp="$HW_ALERT_DIR/.request.json.tmp.$$"
-  if { printf '{"schema":1,"kind":"%s","at":%s,"subject":%s,"body":%s}\n' "$kind" "$(now_epoch)" \
-         "$(json_str "${subject:0:200}")" "$(json_str "$(head -c 7000 "$body")")" > "$tmp"; } 2>/dev/null \
+  if { printf '{"schema":1,"kind":"%s","at":%s,"subject":%s,"body":%s%s}\n' "$kind" "$(now_epoch)" \
+         "$(json_str "${subject:0:200}")" "$(json_str "$(head -c 7000 "$body")")" \
+         "$([[ "$state" =~ ^[0-9a-f]{64}$ ]] && printf ',"state":"%s"' "$state")" > "$tmp"; } 2>/dev/null \
      && hash="$(sha256sum "$tmp" | cut -d' ' -f1)" && [[ "$hash" =~ ^[0-9a-f]{64}$ ]] \
      && chmod 644 "$tmp" && mv -f "$tmp" "$HW_ALERT_DIR/request.json"; then
     printf '%s\n' "$hash"
@@ -600,13 +610,22 @@ watch_once() {
 # next decision corrects it. Returns 3 when an alert couldn't be handed over.
 controller_round() {
   local action="$1" rows="$2" cur="$3" now="$4" summary="$5" outcome note="" subject="" body out
-  if [ -n "$WITHDRAWN_HASH" ]; then
-    case "$(alert_result "$WITHDRAWN_HASH")" in
-      sent|repeat) PREV_FAILS="$WITHDRAWN_FAILS"; LAST_SENT="$WITHDRAWN_AT"; WITHDRAWN_HASH=""
-                   note="a withdrawn alert had gone already" ;;
-      gave-up|stale|refused) WITHDRAWN_HASH="" ;;
-    esac
+  # Withdrawn ones the controller says went after all: the newest such is what was told; it and those before it
+  # are done with, as are any the controller says are final.
+  local i went=-1 keep_h=() keep_a=() keep_f=()
+  for i in "${!W_HASH[@]}"; do
+    case "$(alert_result "${W_HASH[i]}")" in sent|repeat) went=$i ;; esac
+  done
+  if [ "$went" -ge 0 ]; then
+    PREV_FAILS="${W_FAILS[went]}"; LAST_SENT="${W_AT[went]}"
+    note="a withdrawn alert had gone already"
   fi
+  for i in "${!W_HASH[@]}"; do
+    [ "$i" -gt "$went" ] || continue
+    case "$(alert_result "${W_HASH[i]}")" in gave-up|stale|refused) continue ;; esac
+    keep_h+=("${W_HASH[i]}"); keep_a+=("${W_AT[i]}"); keep_f+=("${W_FAILS[i]}")
+  done
+  W_HASH=("${keep_h[@]}"); W_AT=("${keep_a[@]}"); W_FAILS=("${keep_f[@]}")
   if [ -n "$PENDING_HASH" ]; then
     outcome="$(alert_result "$PENDING_HASH")"
     case "$outcome" in
@@ -622,7 +641,10 @@ controller_round() {
   # The decision again, from what the last email known to be sent told.
   action="$(decide "$PREV_FAILS" "$cur" "$now" "$LAST_SENT")"
   [ "$action" = none ] || subject="$(subject_for "$action" "$cur")"
-  if [ -n "$PENDING_HASH" ] && [ "$PENDING_SUBJECT" != "$subject" ]; then
+  # Told apart by the decision and the whole failing set, not the subject, which is cut.
+  local state=""
+  [ "$action" = none ] || state="$(alert_state "$action" "$cur")"
+  if [ -n "$PENDING_HASH" ] && [ "$PENDING_STATE" != "$state" ]; then
     withdraw_alert
     note="${note:+$note; }\"${PENDING_SUBJECT}\" no longer applies: withdrawn"
     PENDING_HASH=""
@@ -644,8 +666,8 @@ controller_round() {
   fi
   body="$(mktemp)"
   body_for "$action" "$rows" "$PREV_FAILS" "$LAST_SENT" > "$body"
-  if out="$(request_alert "$action" "$subject" "$body")"; then
-    PENDING_HASH="$out"; PENDING_SUBJECT="$subject"; PENDING_AT="$now"; PENDING_FAILS="$cur"
+  if out="$(request_alert "$action" "$subject" "$body" "$state")"; then
+    PENDING_HASH="$out"; PENDING_SUBJECT="$subject"; PENDING_STATE="$state"; PENDING_AT="$now"; PENDING_FAILS="$cur"
     save_state "$PREV_FAILS" "$LAST_SENT" "$now"
     rm -f "$body"
     hw_log "$summary — $action: \"$subject\" — handed to the controller to email ${#RCPTS[@]} address(es)${note:+ — $note}"
@@ -661,7 +683,14 @@ controller_round() {
 withdraw_alert() {
   local f="$HW_ALERT_DIR/request.json"
   if [ -f "$f" ] && [ ! -L "$f" ] && [ "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" = "$PENDING_HASH" ]; then rm -f "$f"; fi
-  WITHDRAWN_HASH="$PENDING_HASH"; WITHDRAWN_AT="$PENDING_AT"; WITHDRAWN_FAILS="$PENDING_FAILS"
+  W_HASH+=("$PENDING_HASH"); W_AT+=("$PENDING_AT"); W_FAILS+=("$PENDING_FAILS")
+  while [ "${#W_HASH[@]}" -gt "$HW_WITHDRAWN_MAX" ]; do W_HASH=("${W_HASH[@]:1}"); W_AT=("${W_AT[@]:1}"); W_FAILS=("${W_FAILS[@]:1}"); done
+}
+
+# alert_state <action> <fails> — the decision and the whole set of failing checks, as one hash: what tells two
+# alerts apart (here, and for the controller's same-alert hold), as a subject cut to length can't.
+alert_state() {
+  printf '%s\n%s\n' "$1" "$(printf '%s\n' "$2" | awk 'NF' | LC_ALL=C sort -u)" | sha256sum | cut -d' ' -f1
 }
 
 # heartbeat — "this server and its health watch are alive" to the outside uptime service. Never

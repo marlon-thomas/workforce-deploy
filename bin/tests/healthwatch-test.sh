@@ -425,7 +425,7 @@ read -r PASS FAILN < "$WORK/route.counts"
   check "controller: the request is there, 0644" "$(stat -c %a "$REQ" 2>/dev/null)" 644
   check "controller: no temporary file left" "$(find "$HW_ALERT_DIR" -name '.*' | wc -l | tr -d ' ')" 0
   check "controller: the request's fields, and only those" \
-    "$(python3 -I -c 'import json,sys; print(sorted(json.load(open(sys.argv[1]))))' "$REQ")" "['at', 'body', 'kind', 'schema', 'subject']"
+    "$(python3 -I -c 'import json,sys; print(sorted(json.load(open(sys.argv[1]))))' "$REQ")" "['at', 'body', 'kind', 'schema', 'state', 'subject']"
   check "controller: kind" "$(req kind)" alert
   contains "controller: subject" "$(req subject)" "1 check failing: object storage"
   contains "controller: text" "$(req body)" 'FAIL  object storage: unreachable "quoted"\ and a tab'
@@ -472,7 +472,7 @@ read -r PASS FAILN < "$WORK/route.counts"
   NOW=$((NOW + 900)); run
   check "flap: the held-back resolved is withdrawn" "$( [ -e "$REQ" ] && echo there || echo gone)" gone
   check "flap: nothing pending" "$(grep -c '^pending=' "$HW_STATE_FILE")" 0
-  check "flap: remembered as withdrawn" "$(sed -n 's/^withdrawn=//p' "$HW_STATE_FILE")" "$resolved_hash"
+  check "flap: remembered as withdrawn" "$(sed -n 's/^withdrawn=\([0-9a-f]*\) .*/\1/p' "$HW_STATE_FILE")" "$resolved_hash"
   check "flap: still told failing" "$(sed -n 's/^fail=//p' "$HW_STATE_FILE")" "object storage"
   contains "flap: said" "$(tail -1 "$HW_LOG_FILE")" "no longer applies: withdrawn"
   # Had the controller sent it just then, its result says so (in "recent"): the watch corrects it with an alert.
@@ -488,6 +488,20 @@ read -r PASS FAILN < "$WORK/route.counts"
   check "flap: nothing to say" "$(grep -c '^pending=' "$HW_STATE_FILE")" 0
   doctor "OK|database|accepting" "FAIL|object storage|unreachable"
   NOW=$((NOW + 900)); run
+  # Two failing sets under one cut subject (Workforce issue 447, round 4): told apart by their state, so a new
+  # failure isn't taken for the alert already pending.
+  says limited
+  long_a="check-with-a-rather-long-name-number-one-$(printf "%0160d" 0)aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  long_b="check-with-a-rather-long-name-number-one-$(printf "%0160d" 0)aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaz"
+  doctor "OK|database|accepting" "FAIL|object storage|unreachable" "FAIL|${long_a}|x"
+  NOW=$((NOW + 900)); run
+  subject_a="$(req subject)"; state_a="$(req state)"
+  says limited
+  doctor "OK|database|accepting" "FAIL|object storage|unreachable" "FAIL|${long_b}|x"
+  NOW=$((NOW + 900)); run
+  check "same cut subject" "$(req subject)" "$subject_a"
+  check "but another state, so another request" "$( [ "$(req state)" != "$state_a" ] && echo yes)" yes
+  check "and the first withdrawn, kept with those before" "$( [ "$(grep -c '^withdrawn=' "$HW_STATE_FILE")" -ge 2 ] && echo yes)" yes
   # A result for another request says nothing about this one.
   printf '{"schema":1,"hash":"%064d","outcome":"sent","at":1}\n' 0 > "$HW_RESULT_DIR/result.json"
   NOW=$((NOW + 900)); run

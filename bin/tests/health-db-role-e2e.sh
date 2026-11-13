@@ -14,7 +14,8 @@ REPO="$(cd "$HERE/../.." && pwd)"
 WORK="$(mktemp -d)"
 N="wfc-health-role-$$"
 PG="${N}-pg"
-cleanup() { docker rm -f "$PG" >/dev/null 2>&1; docker network rm "$N" >/dev/null 2>&1; rm -rf "$WORK"; }
+PG2="${N}-fresh"
+cleanup() { docker rm -f "$PG" "$PG2" >/dev/null 2>&1; docker network rm "$N" >/dev/null 2>&1; rm -rf "$WORK"; }
 trap cleanup EXIT
 
 PASS=0; FAILN=0
@@ -162,6 +163,15 @@ CREATE PROCEDURE a_procedure() LANGUAGE sql AS 'select 1';
 REVOKE ALL ON PROCEDURE a_procedure() FROM PUBLIC;
 GRANT EXECUTE ON PROCEDURE a_procedure() TO someone_else WITH GRANT OPTION;
 SET ROLE someone_else; GRANT EXECUTE ON PROCEDURE a_procedure() TO workforce_health; RESET ROLE;
+-- An ordered-set aggregate (its identity arguments read 'x ORDER BY y') and a type, by another grantor.
+CREATE TYPE a_mood AS ENUM ('ok');
+REVOKE ALL ON TYPE a_mood FROM PUBLIC;
+GRANT USAGE ON TYPE a_mood TO someone_else WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION pg_catalog.percentile_disc(double precision, anyelement) TO someone_else WITH GRANT OPTION;
+SET ROLE someone_else;
+GRANT USAGE ON TYPE a_mood TO workforce_health;
+GRANT EXECUTE ON FUNCTION pg_catalog.percentile_disc(double precision, anyelement) TO workforce_health;
+RESET ROLE;
 CREATE TABLE mail_send_alert (address text, kind text, first_at timestamptz, body text);
 SQL
 # And in another database of the server, which this one-shot makes no grants in.
@@ -185,6 +195,8 @@ check "again: owns nothing" "$(su_sql workforce <<< "select count(*) from pg_cla
 check "again: what it owned is gone, not the superuser's" "$(su_sql workforce <<< "select count(*) from pg_proc where proname = 'runs_as_owner'")" 0
 check "again: owns no routine anywhere here" "$(su_sql workforce <<< "select count(*) from pg_proc where proowner = 'workforce_health'::regrole")" 0
 refused "again: not another grantor's procedure" workforce "set default_transaction_read_only = off; call a_procedure()"
+check "again: no grant on any routine (an ordered-set aggregate too)" "$(su_sql workforce <<< "select count(*) from pg_proc p cross join lateral aclexplode(p.proacl) a where a.grantee = 'workforce_health'::regrole")" 0
+check "again: no grant on any type" "$(su_sql workforce <<< "select count(*) from pg_type t cross join lateral aclexplode(t.typacl) a where a.grantee = 'workforce_health'::regrole")" 0
 refused "again: nothing in another database either" elsewhere "select x from secrets_here"
 check "again: owns nothing there" "$(su_sql elsewhere <<< "select count(*) from pg_class where relowner = 'workforce_health'::regrole")" 0
 check "again: the sign-in database's columns kept" "$(as_role authentik "select lower(email) from authentik_core_user where username = 'admin'")" admin@example.test
@@ -198,6 +210,43 @@ refused "again: not its other columns" workforce "select body from mail_send_ale
 check "again: the new password" "$(net_login "$ROLE_PW")" 1
 # And a third time, with nothing changed: the same, and no error.
 out="$(init workforce db_password "$APP_COLS")"; check "a third time" "$?:$out" "0:the health watch's database role is ready"
+
+# ------------------------------------------------------------------ a backup restored where the role isn't
+# Dumps now carry the role's column grants. A backup taken here, restored onto a fresh server (a recovery, the
+# restore drill), must verify and restore all the same, with every other grant as it was (Workforce issue 447).
+su_sql workforce <<'SQL' >/dev/null || exit 1
+CREATE ROLE app_reader NOLOGIN;
+GRANT SELECT ON flyway_schema_history TO app_reader;
+SQL
+docker exec "$PG" pg_dump -U workforce_app -d workforce -Fc > "$WORK/database.dump" || exit 1
+echo "  the dump's grants: $(docker exec -i "$PG" pg_restore -l < "$WORK/database.dump" | grep -c ' ACL ') ACL entries"
+docker run -d --name "$PG2" --network "$N" -e POSTGRES_USER=workforce_app -e POSTGRES_DB=workforce \
+  -e POSTGRES_PASSWORD=fictitious-superuser "$IMAGE" >/dev/null || exit 1
+for _ in $(seq 60); do docker exec "$PG2" pg_isready -q -U workforce_app -d workforce 2>/dev/null && break; sleep 1; done
+sleep 2
+for _ in $(seq 30); do docker exec "$PG2" pg_isready -q -U workforce_app -d workforce 2>/dev/null && break; sleep 1; done
+# The roles the server's own setup makes (as before this change, a role the dump grants to must be there).
+docker exec -i "$PG2" psql -X -q -U workforce_app -d postgres -c 'CREATE ROLE app_reader NOLOGIN' -c 'CREATE ROLE someone_else NOLOGIN' >/dev/null
+# What it did before: pg_restore stops at the grant to a role that isn't there.
+docker exec -i "$PG2" psql -X -q -U workforce_app -d postgres -c 'CREATE DATABASE before_fix' >/dev/null
+out="$(docker exec -i "$PG2" pg_restore -U workforce_app -d before_fix --no-owner --exit-on-error < "$WORK/database.dump" 2>&1)"
+case "$out" in *'role "workforce_health" does not exist'*) PASS=$((PASS+1)) ;; *) FAILN=$((FAILN+1)); echo "FAIL: without the fix it should stop at the role: $out" ;; esac
+# The scripts' own functions, with `docker compose exec -T <service>` pointed at the fresh container.
+(
+  # shellcheck source=../lib/common.sh
+  . "$REPO/bin/lib/common.sh"
+  docker() { if [ "$1 $2 $3" = "compose exec -T" ]; then shift 3; local c="$1"; shift; command docker exec -i "$c" "$@"; else command docker "$@"; fi; }
+  pg_verify_dump "$PG2" workforce_app "$WORK/database.dump"; check "a newer backup verifies where the role isn't" "$?" 0
+  docker exec -i "$PG2" psql -X -q -U workforce_app -d postgres -c 'DROP ROLE workforce_health' >/dev/null
+  pg_replace_db "$PG2" workforce_app workforce "$WORK/database.dump" >/dev/null 2>&1; check "and restores" "$?" 0
+  echo "$PASS $FAILN" > "$WORK/restore.counts"
+)
+read -r PASS FAILN < "$WORK/restore.counts"
+pg2() { docker exec -i "$PG2" psql -X -q -U workforce_app -d workforce -tA -c "$1"; }
+check "restored: the data" "$(pg2 "select staff_domain from mail_setting")" staff.example.test
+check "restored: every other grant as it was" "$(pg2 "select has_table_privilege('app_reader', 'flyway_schema_history', 'SELECT')")" t
+check "restored: the role, with no login and nothing more" "$(pg2 "select rolcanlogin, rolsuper, (select count(*) from pg_auth_members where member = oid) from pg_roles where rolname = 'workforce_health'")" "f|f|0"
+check "restored: its column grants, for health-db-init to make afresh" "$(pg2 "select has_column_privilege('workforce_health', 'mail_setting', 'staff_domain', 'SELECT')")" t
 
 echo "health-db-role e2e: ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]

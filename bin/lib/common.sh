@@ -61,10 +61,21 @@ use_docker_socket() {
 # stdout: no host-path bind mounts, so they behave the same on the host and
 # inside the nightly backup container.
 
+# pg_health_role SERVICE USER — the health watch's role (Workforce issue 447; health-db-init in compose.yaml)
+# made on SERVICE if it isn't there, with no login and nothing else, before a dump is restored into it. Dumps
+# made since then carry its column grants, and pg_restore stops at a grant to a role that doesn't exist (a fresh
+# server, the restore drill), so without it no newer backup would restore. Every other grant in the dump restores
+# exactly as before; health-db-init makes the role properly (login, password, its grants afresh) at the next start.
+pg_health_role() {
+  printf '%s\n' "SELECT 'CREATE ROLE ${HEALTH_DB_ROLE} NOLOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${HEALTH_DB_ROLE}')\\gexec" \
+    | docker compose exec -T "$1" psql -X -q -v ON_ERROR_STOP=1 -U "$2" -d postgres >/dev/null
+}
+
 # pg_verify_dump SERVICE USER DUMP — restore a custom-format dump into a
 # scratch database on SERVICE, then drop it. Non-zero = the dump is unusable.
 pg_verify_dump() {
   local svc="$1" user="$2" dump="$3" rc=0
+  pg_health_role "$svc" "$user"
   docker compose exec -T "$svc" psql -v ON_ERROR_STOP=1 -q -U "$user" -d postgres \
     -c "DROP DATABASE IF EXISTS restore_check" -c "CREATE DATABASE restore_check" >/dev/null
   docker compose exec -T "$svc" pg_restore -U "$user" -d restore_check \
@@ -82,6 +93,7 @@ pg_replace_db() {
     -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${db}' AND pid <> pg_backend_pid()" >/dev/null
   docker compose exec -T "$svc" dropdb -U "$user" --if-exists "$db"
   docker compose exec -T "$svc" createdb -U "$user" "$db"
+  pg_health_role "$svc" "$user"
   docker compose exec -T "$svc" pg_restore -U "$user" -d "$db" --no-owner --exit-on-error < "$dump"
 }
 
@@ -383,14 +395,22 @@ backup_status_read() {
   [ ! -L "$BACKUP_STATUS_FILE" ] || return 2
   # The folder is another job's, so what is at that name may change at any moment, into a pipe that would
   # block an open for ever: it is opened and read in a short-lived shell with a time limit, never here. There,
-  # one open, then checked through it (where /proc shows it): a plain file at that very name, not a link.
-  # shellcheck disable=SC2016  # expanded by the inner shell
-  j="$(timeout 3 bash -c '
-    exec 3<"$1" || exit 1
-    p=/proc/self/fd/3
-    want="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)/$(basename "$1")"
-    if [ -L "$p" ] && { [ "$(readlink "$p")" != "$want" ] || [ ! -f "$p" ]; }; then exit 1; fi
-    head -c 4096 <&3' _ "$BACKUP_STATUS_FILE" 2>/dev/null | tr -d '\r\n')" || return 2
+  # one open, then checked through it (where /proc shows it): a plain file, the very one at that name (the same
+  # device and inode as the name itself, not followed), so not a link. backup.sh replaces the file by a rename,
+  # which can fall between the open and the check: then it is read again (twice at most).
+  local try
+  for try in 1 2 3; do
+    # shellcheck disable=SC2016  # expanded by the inner shell
+    j="$(timeout 3 bash -c '
+      exec 3<"$1" || exit 1
+      if [ -e /proc/self/fd/3 ]; then
+        [ -f /proc/self/fd/3 ] || exit 1
+        [ "$(stat -L -c "%d:%i" /proc/self/fd/3 2>/dev/null)" = "$(stat -c "%d:%i" "$1" 2>/dev/null)" ] || exit 3
+      fi
+      head -c 4096 <&3' _ "$BACKUP_STATUS_FILE" 2>/dev/null)" && break
+    [ "$?" -eq 3 ] && [ "$try" -lt 3 ] || return 2
+  done
+  j="$(printf '%s' "$j" | tr -d '\r\n')"
   case "$j" in '{"schema":1,'*) ;; *) return 2 ;; esac
   BS_LAST_EPOCH="$(bs_field "$j" lastAtEpoch '0|[1-9][0-9]{0,11}')"
   BS_SIZE="$(bs_field "$j" sizeBytes '0|[1-9][0-9]{0,14}')"
