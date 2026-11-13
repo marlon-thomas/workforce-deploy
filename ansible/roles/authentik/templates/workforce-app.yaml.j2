@@ -632,10 +632,19 @@ entries:
       expression: |
         ak_message("Add an authenticator app from Workforce: My record, then Signing in.")
         return False
+  # Each page is named here by `!KeyOf` (state: created, so authentik's own settings for it are left alone), because a
+  # policy binding's target is the flow's binding model, not the flow: `!Find` gives the flow's own id, which finds no
+  # binding once there is one, so applying the blueprint again tried to make a second and failed ("policy, target, order
+  # must make a unique set"; Workforce issue 453, found on a fresh authentik 2026.8.5).
 {% for slug in ['default-authenticator-totp-setup', 'default-authenticator-static-setup', 'default-authenticator-webauthn-setup'] %}
+  - model: authentik_flows.flow
+    id: wf-locked-{{ slug }}
+    identifiers: { slug: {{ slug }} }
+    state: created
+    attrs: { name: {{ slug }}, slug: {{ slug }}, title: {{ slug }}, designation: stage_configuration, authentication: require_authenticated }
   - model: authentik_policies.policybinding
     identifiers:
-      target: !Find [authentik_flows.flow, [slug, {{ slug }}]]
+      target: !KeyOf wf-locked-{{ slug }}
       policy: !KeyOf wf-nobody
     attrs: { order: 0, enabled: true }
 {% endfor %}
