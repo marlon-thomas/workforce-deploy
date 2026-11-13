@@ -9,6 +9,20 @@
 	tls /etc/caddy/tls/tls.crt /etc/caddy/tls/tls.key
 	# Asked only by the sign-in server on the private network (staff webmail); never from outside.
 	respond /api/public/mail/* 404
+	# While the appliance controller installs an update (Workforce slice 3b), users are kept out until the new
+	# version has passed its health check, so a rollback never undoes what they did: the controller puts a file
+	# `on` in this folder (its own, mounted read-only by compose.controller.yaml) and removes it once the update
+	# has succeeded or been rolled back. Read at each request, so no reload. The version endpoint stays open for
+	# the health check. On the host layout the folder isn't there, and nothing changes.
+	@updating {
+		file {
+			root /etc/caddy/maintenance
+			try_files /on
+		}
+		not path /api/v1/build-meta
+	}
+	header @updating Retry-After 120
+	respond @updating "Workforce is being updated. Please try again in a few minutes." 503
 	reverse_proxy api:8080 {
 		header_up X-Forwarded-Proto {scheme}
 	}

@@ -132,6 +132,8 @@ services:
     volumes: !override
       - { <<: *own, target: /etc/caddy/gateway, volume: { subpath: services/gateway/caddy } }
       - { <<: *own, target: /etc/caddy/tls, volume: { subpath: services/gateway/tls } }
+      # The update's maintenance switch (Workforce slice 3b; the Caddyfiles' @updating): the controller's alone.
+      - { <<: *own, target: /etc/caddy/maintenance, volume: { subpath: services/gateway/maintenance } }
       - { type: volume, source: caddy_data, target: /data, volume: { nocopy: true } }
       - { type: volume, source: caddy_config, target: /config, volume: { nocopy: true } }
 
