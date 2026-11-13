@@ -309,7 +309,7 @@ B="$WORK/server"; make_server "$B" "" ""
 doctor_row() { ( cd "$B" && bash ./bin/doctor-real.sh --plain --smoke 2>/dev/null ) | awk -F'\t' '$2 == "sign-in key" { print $1 "|" $3 }'; }
 cp "$SENT/backup-cert" "$SENT/ak-cert"
 contains "doctor: the keys match" "$(doctor_row)" "OK|the application trusts"
-contains "doctor: exact name, not Workforce webmail" "$(grep -m1 certificate_data "$FAKE_CALLS")" "a.name = 'Workforce'"
+contains "doctor: by the application's slug, not a name (Workforce webmail, or a decoy)" "$(grep -m1 certificate_data "$FAKE_CALLS")" "a.slug = 'workforce' AND p.client_id = 'fictitious-oidc_client_id-"
 lacks "doctor: not a pattern" "$(grep -m1 certificate_data "$FAKE_CALLS")" "LIKE"
 cp "$SENT/fresh-cert" "$SENT/ak-cert"
 ROW="$(doctor_row)"

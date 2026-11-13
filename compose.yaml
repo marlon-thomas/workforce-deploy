@@ -494,11 +494,13 @@ services:
       PGUSER: ${AK_DB_USER}
       SUPER_SECRET: ak_db_password
       HEALTH_DATABASES: ${DB_NAME} ${AK_DB_NAME}
-      # The admin's address, and the Workforce sign-in's public certificate: never a password hash or a private key.
+      # The admin's address, and the Workforce sign-in's public certificate (found by the application's slug and the
+      # provider's client id, which isn't secret): never a password hash, a client secret or a private key.
       HEALTH_COLUMNS: >-
         authentik_core_user.username authentik_core_user.email
-        authentik_core_application.name authentik_core_application.provider_id
+        authentik_core_application.slug authentik_core_application.provider_id
         authentik_providers_oauth2_oauth2provider.provider_ptr_id authentik_providers_oauth2_oauth2provider.signing_key_id
+        authentik_providers_oauth2_oauth2provider.client_id
         authentik_crypto_certificatekeypair.kp_uuid authentik_crypto_certificatekeypair.certificate_data
     secrets:
       - source: ak_db_password

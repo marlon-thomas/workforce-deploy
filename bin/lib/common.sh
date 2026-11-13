@@ -166,15 +166,21 @@ secret_modes() {
 # messages still say only yes or no.
 
 # oidc_signing_pub — the public key of the Workforce sign-in, as authentik holds it now, or nothing
-# when it can't be read. The exact name: this database also has "Workforce webmail". As the health watch's
-# role when doctor.sh has called health_db_client under the controller (its exec, word for word, is one of
-# the controller's EXEC_RULES), else as the database's own user.
+# when it can't be read. The application by its slug, which is unique (a name is not: this database also has
+# "Workforce webmail", and anyone could name another application Workforce), and its provider by this
+# installation's client id (secrets/oidc_client_id, which isn't secret: browsers carry it), as the blueprint makes
+# them (Workforce issue 453). The id is checked to be plain before it goes in. As the health watch's role when
+# doctor.sh has called health_db_client under the controller (its exec, word for word but the id, is one of the
+# controller's EXEC_RULES), else as the database's own user.
 oidc_signing_pub() {
+  local cid
+  cid="$(tr -d '[:space:]' < secrets/oidc_client_id 2>/dev/null)" || cid=""
+  [[ "$cid" =~ ^[A-Za-z][A-Za-z0-9._-]{2,127}$ ]] || return 1
   docker compose exec -T ${PSQL_ENV[@]+"${PSQL_ENV[@]}"} authentik-postgres psql -X -U "${PSQL_AK_USER:-${AK_DB_USER:-authentik}}" -d "${AK_DB_NAME:-authentik}" -t -A -c \
     "SELECT c.certificate_data FROM authentik_core_application a \
        JOIN authentik_providers_oauth2_oauth2provider p ON p.provider_ptr_id = a.provider_id \
        JOIN authentik_crypto_certificatekeypair c ON c.kp_uuid = p.signing_key_id \
-      WHERE a.name = 'Workforce'" 2>/dev/null \
+      WHERE a.slug = 'workforce' AND p.client_id = '${cid}'" 2>/dev/null \
     | openssl x509 -pubkey -noout 2>/dev/null
 }
 

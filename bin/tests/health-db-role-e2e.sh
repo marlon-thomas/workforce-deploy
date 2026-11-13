@@ -82,10 +82,10 @@ SQL
 su_sql authentik <<'SQL' || exit 1
 CREATE TABLE authentik_core_user (id int, username text, email text, password text);
 INSERT INTO authentik_core_user VALUES (1, 'admin', 'Admin@example.test', 'pbkdf2_sha256$fictitious');
-CREATE TABLE authentik_core_application (name text, provider_id int);
-INSERT INTO authentik_core_application VALUES ('Workforce', 1);
-CREATE TABLE authentik_providers_oauth2_oauth2provider (provider_ptr_id int, signing_key_id uuid, client_secret text);
-INSERT INTO authentik_providers_oauth2_oauth2provider VALUES (1, '00000000-0000-0000-0000-000000000001', 'fictitious-client-secret');
+CREATE TABLE authentik_core_application (name text, slug text, provider_id int);
+INSERT INTO authentik_core_application VALUES ('Workforce', 'workforce', 1);
+CREATE TABLE authentik_providers_oauth2_oauth2provider (provider_ptr_id int, signing_key_id uuid, client_id text, client_secret text);
+INSERT INTO authentik_providers_oauth2_oauth2provider VALUES (1, '00000000-0000-0000-0000-000000000001', 'workforce-0a1b2c3d', 'fictitious-client-secret');
 CREATE TABLE authentik_crypto_certificatekeypair (kp_uuid uuid, certificate_data text, key_data text);
 INSERT INTO authentik_crypto_certificatekeypair VALUES ('00000000-0000-0000-0000-000000000001', 'fictitious-certificate', 'fictitious-private-key');
 SQL
@@ -111,7 +111,7 @@ check "a table that is there" "$(as_role workforce "select to_regclass('mail_mai
 check "mail sync" "$(as_role workforce "select (select count(*) from mail_setting where enabled) || '|' || (select count(*) from mail_setting where enabled and last_sync_error is not null) || '|' || (select count(*) from mail_mailbox where sync_error is not null) || '|' || (select count(*) from mail_mailbox where kind = 'BUILT_IN' and suspended_at is null) || '|' || (select count(*) from mail_mailbox where kind = 'BUILT_IN' and suspended_at is null and sync_error is not null)")" "1|0|0|0|0"
 check "notifications" "$(as_role workforce "select count(*) filter (where state = 'FAILED' and created_at > now() - interval '24 hours' and coalesce(error_message, '') not like 'no deliverable address%' and coalesce(error_message, '') not like 'pre-#6 row%') || '|' || count(*) filter (where state = 'SENT' and sent_at > now() - interval '24 hours') || '|' || count(*) filter (where state = 'QUEUED' and created_at < now() - interval '1 hour') from notification_delivery")" "0|0|0"
 check "the admin's address" "$(as_role authentik "select lower(email) from authentik_core_user where username = 'admin'")" admin@example.test
-check "the sign-in certificate" "$(as_role authentik "SELECT c.certificate_data FROM authentik_core_application a JOIN authentik_providers_oauth2_oauth2provider p ON p.provider_ptr_id = a.provider_id JOIN authentik_crypto_certificatekeypair c ON c.kp_uuid = p.signing_key_id WHERE a.name = 'Workforce'")" fictitious-certificate
+check "the sign-in certificate" "$(as_role authentik "SELECT c.certificate_data FROM authentik_core_application a JOIN authentik_providers_oauth2_oauth2provider p ON p.provider_ptr_id = a.provider_id JOIN authentik_crypto_certificatekeypair c ON c.kp_uuid = p.signing_key_id WHERE a.slug = 'workforce' AND p.client_id = 'workforce-0a1b2c3d'")" fictitious-certificate
 
 # What it can't do.
 refused "COPY … TO PROGRAM" workforce "copy (select 1) to program 'id'"
@@ -128,6 +128,7 @@ refused "a recipient" workforce "select recipient from notification_delivery"
 refused "a password hash" authentik "select password from authentik_core_user"
 refused "a private key" authentik "select key_data from authentik_crypto_certificatekeypair"
 refused "a client secret" authentik "select client_secret from authentik_providers_oauth2_oauth2provider"
+refused "an application's name (only its slug is read)" authentik "select name from authentik_core_application"
 
 # Its password: a login over the network needs it.
 net_login() { docker run --rm --network "$N" -e PGPASSWORD="$1" "$IMAGE" psql -X -h postgres -U workforce_health -d workforce -tAc 'select 1' 2>/dev/null; }
