@@ -103,6 +103,16 @@ check("the lock again after the code", after_code and 30 < order(after_code) < 1
 check("with the same lock", any("target: !KeyOf wf-too-many-tries-after-code-binding" in e
                                 and "policy: !KeyOf wf-too-many-tries" in e for e in entries))
 
+# Review of the controller bundle, finding 1: the emergency administrator's name is public, so its lock is by
+# account and address (someone else's wrong tries can't lock it); everyone else's is by account, as before.
+lock_policy = next((e for e in entries if "id: wf-too-many-tries\n" in e), "")
+check("the lock counts the account's wrong tries", 'Reputation.objects.filter(identifier=user.username)' in lock_policy)
+check("the emergency administrator's only from this address",
+      "if emergency:" in lock_policy and "tries.filter(ip=ClientIPMiddleware.get_client_ip(request.http_request))" in lock_policy)
+check("at the same threshold", lock_policy.rstrip().endswith("<= -5"))
+check("the old lock by account alone is removed", any("reputationpolicy" in e and "name: workforce-too-many-tries }" in e
+                                                      and "state: absent" in e for e in entries))
+
 print("blueprint self-test: %d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
 PY
@@ -122,6 +132,10 @@ check "and moves the score's floor below the lock" "$(grep -c 'reputation_lower_
 check "the converge runs it" "$(grep -c "ak shell -c \"exec(open(./tmp/sign-in-hardening.py.)" "$REPO/ansible/roles/authentik/tasks/main.yml")" 1
 check "the operator's recovery removes the emergency administrator's app (new problem 6)" \
   "$(grep -c 'TOTPDevice.objects.filter(user=u).delete()' "$REPO/bin/reset-admin.sh")" 1
+check "and lifts its wrong-tries lock (controller bundle review, finding 1)" \
+  "$(grep -c 'Reputation.objects.filter(identifier="admin").delete()' "$REPO/bin/reset-admin.sh")" 1
+check "a typed emergency password is at least 16 characters (finding 1)" \
+  "$(grep -c '"${#ADMIN_PASSWORD}" -lt 16' "$REPO/bin/install.sh")" 1
 check "the staff relay's password reaches authentik only without a sign-in route (new problem 8)" \
   "$(grep -c 'SMTP_PASSWORD: ${SIGNIN_SMTP_HOST:-${SMTP_PASSWORD:-}}' "$REPO/compose.yaml")" 1
 # Issue 299: ending a person's sessions at the sign-in server revokes all their tokens only while no app is given a

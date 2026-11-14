@@ -406,8 +406,9 @@ entries:
   # first-time setup there is no email yet, and the account that gets everyone back in when email or codes are
   # broken mustn't depend on them. It is the account ADR-0026 names: exactly "admin", internal, not a superuser,
   # not in "authentik Admins". The code step is skipped for it alone (decided when the step is reached, once the
-  # password has identified the account); the wrong-tries lock (order 26) still applies to it. Workforce audits
-  # every sign-in to it and emails the installation's contact and the registered managers and directors.
+  # password has identified the account); the wrong-tries lock (order 15) still applies to it, by account and
+  # address. Workforce audits every sign-in to it and emails the installation's contact and the registered managers
+  # and directors.
   - model: authentik_policies_expression.expressionpolicy
     id: wf-not-emergency
     identifiers: { name: workforce-not-the-emergency-administrator }
@@ -511,14 +512,32 @@ entries:
   # sign-in stops here for 15 minutes (AUTHENTIK_REPUTATION__EXPIRY in compose.yaml); after that a new code is
   # sent. Each code also slows down after every wrong try, and lasts 10 minutes. By account, not by address: one
   # office's shared connection mustn't lock everyone out.
+  # Review of the controller bundle (finding 1): the emergency administrator is always called "admin" and this
+  # file is public, so a lock by account alone let anyone on the internet keep the last-resort account locked
+  # (five wrong passwords every 15 minutes, from anywhere). For that account alone the wrong tries count by
+  # account AND address: someone else's wrong tries lock only their own address. Its password is long and random
+  # (the installer's, or ./bin/reset-admin.sh's), which is what makes guessing from many addresses hopeless.
+  # authentik's reputation policy can only add the two up (account OR address), so this is an expression with
+  # the same sum and the same threshold as before.
   - model: authentik_policies_reputation.reputationpolicy
-    id: wf-too-many-tries
     identifiers: { name: workforce-too-many-tries }
+    state: absent
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-too-many-tries
+    identifiers: { name: workforce-too-many-tries-by-account }
     attrs:
-      name: workforce-too-many-tries
-      check_ip: false
-      check_username: true
-      threshold: -5
+      name: workforce-too-many-tries-by-account
+      expression: |
+        from django.db.models import Sum
+        from authentik.policies.reputation.models import Reputation
+        from authentik.root.middleware import ClientIPMiddleware
+        user = request.user
+        tries = Reputation.objects.filter(identifier=user.username)
+        emergency = (user.username == "admin" and getattr(user, "type", "") == "internal" and not user.is_superuser
+                     and not ak_is_group_member(user, name="authentik Admins"))
+        if emergency:
+            tries = tries.filter(ip=ClientIPMiddleware.get_client_ip(request.http_request))
+        return (tries.aggregate(score=Sum("score"))["score"] or 0) <= -5
   - model: authentik_stages_deny.denystage
     id: wf-too-many-tries-stage
     identifiers: { name: workforce-too-many-tries }

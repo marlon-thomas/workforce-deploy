@@ -60,6 +60,10 @@ u.save()
 # server step is the only way to remove it (a lost phone mustn't lose the last-resort account).
 from authentik.stages.authenticator_totp.models import TOTPDevice
 TOTPDevice.objects.filter(user=u).delete()
+# The wrong-tries lock on it is lifted too (review of the controller bundle, finding 1): the new password can be
+# used at once, from the address that was locked.
+from authentik.policies.reputation.models import Reputation
+Reputation.objects.filter(identifier="admin").delete()
 print("OK")
 PYEOF' 2>&1 | tail -1)"
 
@@ -68,7 +72,8 @@ PYEOF' 2>&1 | tail -1)"
 cat <<EOF
 
 Done. Any authenticator app on the account has been removed too (add one again from
-Workforce if you want it). The administrator password is now:
+Workforce if you want it), and any wrong-tries lock on it lifted. The administrator
+password is now:
 
   ${NEW_PW}
 

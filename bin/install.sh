@@ -935,6 +935,14 @@ fi
 printf '3/6  Pick a password for the first administrator (Enter = generate a strong one): '
 read -rs ADMIN_PASSWORD
 echo ""
+# Review of the controller bundle (finding 1): wrong tries at this account lock only the address they come from
+# (its name is public, so a lock by account alone let anyone keep it locked). Its password must therefore be too
+# long to guess from many addresses: at least 16 characters.
+while [ -n "${ADMIN_PASSWORD}" ] && [ "${#ADMIN_PASSWORD}" -lt 16 ]; do
+  printf '     At least 16 characters, please (Enter = generate one): '
+  read -rs ADMIN_PASSWORD
+  echo ""
+done
 if [ -z "${ADMIN_PASSWORD}" ]; then
   ADMIN_PASSWORD="$(openssl rand -base64 18)"
   GENERATED_ADMIN=1

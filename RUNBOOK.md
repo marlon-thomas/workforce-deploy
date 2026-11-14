@@ -154,6 +154,14 @@ install that same unsigned version.
   emergency administrator and its recovery email"). On a server installed before releases
   were signed, update to a signed release first ("Release signatures" above).
 
+### Wrong tries and the lock
+
+Five wrong passwords or codes for one account in 15 minutes stop its sign-in for 15 minutes ("That was wrong too
+many times"); then it works again, and a new code is sent. For staff accounts the lock is by account, from
+wherever the tries came. For the emergency administrator (`admin`, whose name is public) it is by account **and**
+address: wrong tries from somewhere else don't lock you out. If you are locked out of `admin` and can't wait, or
+think someone else has the password, `./bin/reset-admin.sh` sets a new one and lifts the lock.
+
 ## 6a. Jobs from the app
 
 **Start here, not with a shell.** The registered manager or a director can run the routine jobs from
