@@ -69,13 +69,13 @@ render_webmail_blueprint() {
 apply_webmail_blueprint() {
   local tries=0 out
   # A mount left pointing at an old copy can only be fixed by recreating the sign-in containers.
-  if ! docker exec -w / workforce-deploy-authentik-server-1 cat /blueprints/webmail-app.yaml 2>/dev/null | cmp -s - blueprints/webmail-app.yaml; then
+  if ! docker compose exec -T -w / authentik-server cat /blueprints/webmail-app.yaml 2>/dev/null | cmp -s - blueprints/webmail-app.yaml; then
     say "Restarting the sign-in server so it sees the webmail settings…"
     docker compose up -d --no-deps --force-recreate authentik-server authentik-worker
   fi
   while [ "$tries" -lt 30 ]; do
     tries=$((tries + 1))
-    if out="$(docker exec -w / workforce-deploy-authentik-server-1 python /manage.py apply_blueprint /blueprints/webmail-app.yaml 2>&1)"; then
+    if out="$(docker compose exec -T -w / authentik-server python /manage.py apply_blueprint /blueprints/webmail-app.yaml 2>&1)"; then
       case "$out" in *"Blueprint invalid"*) ;; *) return 0 ;; esac
     fi
     sleep "${STAFF_MAIL_RETRY_SECS:-10}"

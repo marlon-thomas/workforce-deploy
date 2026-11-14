@@ -128,9 +128,12 @@ evidence_import() {
 }
 
 # authentik_version — the version the running authentik server reports, or nothing when it is
-# not answering. 2026.8 dropped authentik.__version__ for authentik.VERSION; ask for either.
+# not answering. 2026.8 dropped authentik.__version__ for authentik.VERSION; ask for either. By the Compose
+# service, not a container name (review of the controller bundle, finding 4): under the controller the project
+# is "workforce", and a fixed workforce-deploy-… name put authentik_version=unknown in every backup's MANIFEST,
+# so a recovery couldn't tell which authentik wrote the sign-in database.
 authentik_version() {
-  docker exec -w / workforce-deploy-authentik-server-1 python -c \
+  docker compose exec -T -w / authentik-server python -c \
     'import authentik as a; print(getattr(a, "VERSION", None) or a.__version__)' 2>/dev/null || true
 }
 
