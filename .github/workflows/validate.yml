@@ -37,3 +37,10 @@ jobs:
           docker run --rm -v "$PWD:/w:ro" -v "$RUNNER_TEMP:/s:ro" alpine:3.20.10@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc sh /s/alpine-recovery.sh
       - name: Off-site encryption end to end (real age, real rsync over ssh to a write-only key, helper container)
         run: ./bin/tests/backup-encrypt-e2e.sh
+      # Review of the controller bundle (finding 7): the health watch's own database role against a real PostgreSQL
+      # (Workforce issue 447: SELECT on the columns doctor.sh reads and nothing else), and image signatures checked
+      # against a real registry with the pinned cosign. Neither is in ci-validate.sh, which needs no Docker.
+      - name: The health watch's database role end to end (real PostgreSQL)
+        run: ./bin/tests/health-db-role-e2e.sh
+      - name: Release signatures end to end (a local registry, the pinned cosign)
+        run: ./bin/tests/verify-image-e2e.sh
