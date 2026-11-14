@@ -98,5 +98,32 @@ check "staff email still on" "$(sourced "$TMP/again.env" MAIL_SERVER_URL)" http:
 check "feedback still filed" "$(sourced "$TMP/again.env" FEEDBACK_GITHUB_APP_ID)" 12345
 check "a model with spaces survives" "$(sourced "$TMP/again.env" AI_MODEL)" "fictional model 7b"
 
+# Second review of the controller bundle, findings 5 and 7: an old .env's SIGNIN_SMTP_STARTTLS=false with no sign-in
+# route was only the old default. The installer reads it as true, and update.sh sets it to true; next to a route it
+# is kept (the test appliance's mail catcher has one).
+again_with() { # again_with OUT HOST STARTTLS — the installer's second run, with that sign-in route in .env
+  (
+    set +u
+    cd "$TMP" || exit 1
+    . ./again.env
+    SIGNIN_SMTP_HOST="$2" SIGNIN_SMTP_STARTTLS="$3"
+    RECOVERING=0 GW_CADDYFILE="${GATEWAY_CADDYFILE:-}" GW_IMAGE="${GATEWAY_IMAGE:-}" ANSIBLE_SOCK="${DOCKER_SOCK}"
+    . "$TMP/wfv.sh"
+    render "$1"
+  ) || { echo "FAIL: the render for $2/$3"; exit 1; }
+}
+again_with "$TMP/old.env" "" false
+check "the installer reads an old default false, with no route, as true" "$(env_get SIGNIN_SMTP_STARTTLS "$TMP/old.env")" true
+again_with "$TMP/route.env" mailpit false
+check "the installer keeps a route's own false (the test appliance's mail catcher)" "$(env_get SIGNIN_SMTP_STARTTLS "$TMP/route.env")" false
+printf 'SMTP_HOST=smtp.relay.example\nSIGNIN_SMTP_HOST=\nSIGNIN_SMTP_STARTTLS=false\n' > "$TMP/old-default.env"
+signin_starttls_old_default "$TMP/old-default.env"; check "update.sh's fix: it changed" "$?" 0
+check "update.sh's fix: true now" "$(env_get SIGNIN_SMTP_STARTTLS "$TMP/old-default.env")" true
+check "update.sh's fix: nothing else touched" "$(grep -c . "$TMP/old-default.env")" 3
+signin_starttls_old_default "$TMP/old-default.env"; check "update.sh's fix: once only" "$?" 1
+printf 'SIGNIN_SMTP_HOST=relay.example\nSIGNIN_SMTP_STARTTLS=false\n' > "$TMP/chosen.env"
+signin_starttls_old_default "$TMP/chosen.env"; check "update.sh's fix: a false next to a route is kept" "$(env_get SIGNIN_SMTP_STARTTLS "$TMP/chosen.env")" false
+check "update.sh runs it" "$(grep -c '^if signin_starttls_old_default .env; then' "$ROOT/bin/update.sh")" 1
+
 echo "env rerun self-test: ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]

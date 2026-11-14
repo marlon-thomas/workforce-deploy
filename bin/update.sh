@@ -44,6 +44,13 @@ if [ -n "$SOCK_NOW" ] && [ "${DOCKER_SOCK:-}" != "$SOCK_NOW" ]; then
   DOCKER_SOCK="$SOCK_NOW"
 fi
 
+# Second review of the controller bundle, findings 5 and 7: an old .env's SIGNIN_SMTP_STARTTLS=false, with no
+# sign-in route, was only the old default (bin/lib/common.sh).
+if signin_starttls_old_default .env; then
+  SIGNIN_SMTP_STARTTLS=true
+  echo "Set SIGNIN_SMTP_STARTTLS=true in .env: false was only the old default (there is no sign-in route yet)"
+fi
+
 TARGET="${1:-}"
 if [ -z "$TARGET" ]; then
   echo "Usage: ./bin/update.sh <version>     (e.g. ./bin/update.sh 0.2.0)"

@@ -392,6 +392,8 @@ INV
   # Every setting env.j2 writes into .env comes in here, from environments/<env>.env on a first
   # install and from .env itself when the installer runs again. One that doesn't is written as its
   # default, and a value set in .env is lost (Workforce issue 376). bin/ci-validate.sh checks it.
+  # One exception: SIGNIN_SMTP_STARTTLS=false with no sign-in route was only the old default, so it is read as true
+  # (second review of the controller bundle, findings 5 and 7; signin_starttls_old_default in bin/lib/common.sh).
   WFV_app_hostname="${APP_HOSTNAME}" \
   WFV_auth_hostname="${AUTH_HOSTNAME}" \
   WFV_env_name="${ENV_NAME:-prod}" \
@@ -414,7 +416,7 @@ INV
   WFV_signin_smtp_port="${SIGNIN_SMTP_PORT:-587}" \
   WFV_signin_smtp_username="${SIGNIN_SMTP_USERNAME:-}" \
   WFV_signin_smtp_password="${SIGNIN_SMTP_PASSWORD:-}" \
-  WFV_signin_smtp_starttls="${SIGNIN_SMTP_STARTTLS:-true}" \
+  WFV_signin_smtp_starttls="$([ -n "${SIGNIN_SMTP_HOST:-}" ] && printf '%s' "${SIGNIN_SMTP_STARTTLS:-true}" || printf true)" \
   WFV_signin_smtp_from="${SIGNIN_SMTP_FROM:-}" \
   WFV_compose_profiles="${COMPOSE_PROFILES:-}" \
   WFV_ops_alert_email="${OPS_ALERT_EMAIL}" \

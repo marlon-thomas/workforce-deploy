@@ -257,6 +257,18 @@ env_set() {
   mv -f "$tmp" "$file"
 }
 
+# signin_starttls_old_default [FILE] — a SIGNIN_SMTP_STARTTLS=false that was only the old default, and is put right
+# (second review of the controller bundle, findings 5 and 7). Before STARTTLS became the sign-in route's default,
+# the installer wrote SIGNIN_SMTP_STARTTLS=false into every .env, with a sign-in route or not, and update.sh never
+# re-renders .env. With no route (SIGNIN_SMTP_HOST empty) the false is set to true, so a route added later
+# (README, "Outbound email") sends the codes and the relay's password over STARTTLS. A false next to a route was
+# chosen and is kept (doctor.sh flags it, except for the test appliance's mail catcher). Returns 0 when it changed.
+signin_starttls_old_default() {
+  local file="${1:-.env}"
+  [ -z "$(env_get SIGNIN_SMTP_HOST "$file")" ] && [ "$(env_get SIGNIN_SMTP_STARTTLS "$file")" = false ] || return 1
+  env_set SIGNIN_SMTP_STARTTLS true "$file"
+}
+
 # env_single_quote VALUE — VALUE as .env must hold anything that isn't a plain word. compose and bash
 # both read single quotes literally, so $, #, spaces and double quotes are safe. Two things can't be
 # held: a single quote, and a backslash (compose takes \' as not closing the quote, so a value ending

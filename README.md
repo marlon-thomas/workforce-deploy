@@ -205,7 +205,10 @@ contract & onboarding magic links) go through a durable ledger: rows are only
   links remain copyable in the UI, and the Settings → Notifications run says so.
 - **Sign-in codes and alerts** (Workforce ADR-0039): set `SIGNIN_SMTP_*` to a relay account of
   their own, apart from `SMTP_*`, so staff mail or a busy notification relay can't stop people signing
-  in. Unset, they use `SMTP_*` and `doctor.sh` says so. The sign-in page's "Send a new code" button is
+  in. Unset, they use `SMTP_*` and `doctor.sh` says so. They go over STARTTLS (`SIGNIN_SMTP_STARTTLS=true`, the
+  default; or port 465). An older installer wrote `SIGNIN_SMTP_STARTTLS=false` into every `.env`: `update.sh` and
+  the installer set it to true while there is no sign-in route, but if you add the route by hand before the next
+  update, check that line too (`doctor.sh` fails a route without encryption). The sign-in page's "Send a new code" button is
   `branding/authentik-templates/if/flow.html` (authentik's own page, extended), next to the code email's words.
 - **Staff email sending alerts** (Workforce issue 290): the mail server reports what staff send to the api
   (`MAIL_EVENTS_URL`, set in `compose.yaml`; private network only). A mailbox that reaches its sending limit or
