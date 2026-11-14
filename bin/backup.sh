@@ -200,13 +200,15 @@ trap 'rm -rf "$SEND_DIR" "$CONFIG_STAGE"' EXIT
 # config_manifest — the checksum of every file in the settings and secrets, so that a recovery can tell
 # it has all of them: an install would quietly regenerate a missing secret, and what it protected would
 # be lost. In a closed folder, and only for as long as the copy takes to pack. (An older version's
-# secrets/.config-manifest, if one was left behind, is neither counted nor packed.)
+# secrets/.config-manifest, if one was left behind, is neither counted nor packed.) `find -L`, as config_stream's
+# `tar -h`: a secret that is a link is packed as the file it points to, so it is counted as one (second review of
+# the controller bundle, finding 10); a link to nothing makes the pack fail, and the copy is reported failed.
 config_manifest() {
   local here f
   here="$(pwd -P)"
   rm -rf "$CONFIG_STAGE"
   ( umask 077; mkdir -p "$CONFIG_STAGE/secrets" \
-      && find .env secrets -type f ! -name .config-manifest ! -path 'secrets/.recover*' -exec sha256sum {} + > "$CONFIG_MANIFEST" ) || return 1
+      && find -L .env secrets -type f ! -name .config-manifest ! -path 'secrets/.recover*' -exec sha256sum {} + > "$CONFIG_MANIFEST" ) || return 1
   ln -s "$here/.env" "$CONFIG_STAGE/.env" || return 1
   for f in secrets/* secrets/.[!.]* secrets/..?*; do
     [ -e "$f" ] || [ -L "$f" ] || continue

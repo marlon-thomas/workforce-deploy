@@ -233,15 +233,27 @@ else
   contains "rsync: the copy holds the manifest" "$CONFIG_NAMES" "secrets/.config-manifest"
   # Under the appliance controller secrets/ can be read, not written (review of the controller bundle,
   # finding 3): the manifest is made in the backup's own folder, and the copy still holds it and the secrets.
-  chmod 0550 "$B/secrets"
+  # Root ignores the folder's mode (CI runs this as root), so the folders' times are set back first: a name made
+  # in one and removed again moves its time, whoever made it (second review, finding 9).
+  # A secret that is a link (second review, finding 10): packed as its file, and counted in the manifest.
+  printf 'fictitious certificate' > "$WORK/linked-cert"; ln -s "$WORK/linked-cert" "$B/secrets/tls/tls.crt"
+  chmod 0550 "$B/secrets" "$B/secrets/tls"
+  touch -t 200101010000 "$B/secrets" "$B/secrets/tls"
+  SECRETS_TIMES="$(stat -c %Y "$B/secrets" "$B/secrets/tls" | tr '\n' ' ')"
   find "$SENT" -name 'rsync-*' -delete
   run_backup --offsite-only; check "secrets/ read-only: the test copy works" "$?" 0
+  check "secrets/ read-only: nothing was made in it, even for a moment" "$(stat -c %Y "$B/secrets" "$B/secrets/tls" | tr '\n' ' ')" "$SECRETS_TIMES"
   mkdir -p "$WORK/cfg-ro"; decrypt "$SENT_FILE" | config_part | tar -xzf - -C "$WORK/cfg-ro"
   check "secrets/ read-only: the secret is in there" "$(cat "$WORK/cfg-ro/secrets/db_password")" "$SECRET_MARK"
   check "secrets/ read-only: the manifest checks out" \
     "$(cd "$WORK/cfg-ro" && sha256sum -c secrets/.config-manifest >/dev/null 2>&1 && echo ok)" ok
+  check "a linked secret: packed as its file" "$(cat "$WORK/cfg-ro/secrets/tls/tls.crt" 2>/dev/null)" "fictitious certificate"
+  check "a linked secret: every file in the copy is in its manifest, and no other" \
+    "$(cd "$WORK/cfg-ro" && find .env secrets -type f ! -name .config-manifest | sort | tr '\n' ' ')" \
+    "$(sed 's/^[0-9a-f]*  //' "$WORK/cfg-ro/secrets/.config-manifest" | sort | tr '\n' ' ')"
   check "secrets/ read-only: nothing left behind" "$(find "$B/backups" "$B/secrets" -maxdepth 1 -name '.config-*' | wc -l | tr -d ' ')" 0
-  chmod 0755 "$B/secrets"
+  chmod 0755 "$B/secrets" "$B/secrets/tls"
+  rm -f "$B/secrets/tls/tls.crt"
   check "rsync: no secret readable in the file" "$(grep -c "$SECRET_MARK" "$SENT_FILE")" 0
   check "rsync: only the right key opens it" "$("$REAL_AGE" -d -i "$WORK/other-key.txt" "$SENT_FILE" 2>/dev/null | wc -c | tr -d ' ')" 0
   check "rsync: the local archive still holds none" "$(gzip -dc "$LOCAL" | grep -c "$SECRET_MARK")" 0
