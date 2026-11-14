@@ -22,7 +22,7 @@ lacks() { case "$2" in *"$3"*) bad "$1: [$3] must not be in: $2" ;; *) ok ;; esa
 B="$WORK/bundle"
 mkdir -p "$B/bin/lib" "$B/backups" "$B/logs" "$B/secrets" "$B/blueprints" "$B/ansible/roles/authentik/templates" "$WORK/fake"
 cp "$HERE/../server-actions.sh" "$HERE/../healthwatch.sh" "$HERE/../backup.sh" "$HERE/../staff-mail.sh" "$B/bin/"
-cp "$HERE/../lib/common.sh" "$B/bin/lib/"
+cp "$HERE/../lib/common.sh" "$HERE/../lib/env-file.sh" "$B/bin/lib/"
 cp "$HERE/../../ansible/roles/authentik/templates/webmail-app.yaml.j2" "$B/ansible/roles/authentik/templates/"
 chmod +x "$B"/bin/*.sh
 printf 'compose stand-in\n' > "$B/compose.yaml"
