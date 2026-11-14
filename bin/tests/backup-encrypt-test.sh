@@ -230,6 +230,18 @@ else
   contains "rsync: and the folders under them" "$CONFIG_NAMES" "secrets/tls/tls.key"
   lacks "rsync: not what an interrupted recovery left" "$CONFIG_NAMES" ".recover"
   check "rsync: the secret is in there" "$(decrypt "$SENT_FILE" | config_part | tar -xzOf - secrets/db_password)" "$SECRET_MARK"
+  contains "rsync: the copy holds the manifest" "$CONFIG_NAMES" "secrets/.config-manifest"
+  # Under the appliance controller secrets/ can be read, not written (review of the controller bundle,
+  # finding 3): the manifest is made in the backup's own folder, and the copy still holds it and the secrets.
+  chmod 0550 "$B/secrets"
+  find "$SENT" -name 'rsync-*' -delete
+  run_backup --offsite-only; check "secrets/ read-only: the test copy works" "$?" 0
+  mkdir -p "$WORK/cfg-ro"; decrypt "$SENT_FILE" | config_part | tar -xzf - -C "$WORK/cfg-ro"
+  check "secrets/ read-only: the secret is in there" "$(cat "$WORK/cfg-ro/secrets/db_password")" "$SECRET_MARK"
+  check "secrets/ read-only: the manifest checks out" \
+    "$(cd "$WORK/cfg-ro" && sha256sum -c secrets/.config-manifest >/dev/null 2>&1 && echo ok)" ok
+  check "secrets/ read-only: nothing left behind" "$(find "$B/backups" "$B/secrets" -maxdepth 1 -name '.config-*' | wc -l | tr -d ' ')" 0
+  chmod 0755 "$B/secrets"
   check "rsync: no secret readable in the file" "$(grep -c "$SECRET_MARK" "$SENT_FILE")" 0
   check "rsync: only the right key opens it" "$("$REAL_AGE" -d -i "$WORK/other-key.txt" "$SENT_FILE" 2>/dev/null | wc -c | tr -d ' ')" 0
   check "rsync: the local archive still holds none" "$(gzip -dc "$LOCAL" | grep -c "$SECRET_MARK")" 0

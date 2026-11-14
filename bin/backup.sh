@@ -187,20 +187,38 @@ if { exec 8>>backups/.backup.lock; } 2>/dev/null && command -v flock >/dev/null 
     echo "Another backup is already running."; exit 75
   fi
 fi
-CONFIG_MANIFEST=secrets/.config-manifest
-trap 'rm -rf "$SEND_DIR" "$CONFIG_MANIFEST"' EXIT
+# The manifest is written in a folder of the backup's own, not in secrets/ (review of the controller bundle,
+# finding 3): under the appliance controller, secrets/ is the controller's copy, which the job may read but not
+# write, so every off-site copy left the settings out. The settings are packed from a stand-in folder there:
+# the manifest at secrets/.config-manifest, and links to .env and to everything in secrets/, which tar follows
+# (-h), so a recovery finds the same names as before. Busybox's tar (the controller's) can't rename or change
+# folder part-way, which is why it's links.
+CONFIG_STAGE="backups/.config-stage"
+CONFIG_MANIFEST="$CONFIG_STAGE/secrets/.config-manifest"
+trap 'rm -rf "$SEND_DIR" "$CONFIG_STAGE"' EXIT
 
 # config_manifest — the checksum of every file in the settings and secrets, so that a recovery can tell
 # it has all of them: an install would quietly regenerate a missing secret, and what it protected would
-# be lost. Inside the closed folder, and only for as long as the copy takes to pack.
+# be lost. In a closed folder, and only for as long as the copy takes to pack. (An older version's
+# secrets/.config-manifest, if one was left behind, is neither counted nor packed.)
 config_manifest() {
-  ( umask 077; find .env secrets -type f ! -name .config-manifest ! -path 'secrets/.recover*' -exec sha256sum {} + > "$CONFIG_MANIFEST" )
+  local here f
+  here="$(pwd -P)"
+  rm -rf "$CONFIG_STAGE"
+  ( umask 077; mkdir -p "$CONFIG_STAGE/secrets" \
+      && find .env secrets -type f ! -name .config-manifest ! -path 'secrets/.recover*' -exec sha256sum {} + > "$CONFIG_MANIFEST" ) || return 1
+  ln -s "$here/.env" "$CONFIG_STAGE/.env" || return 1
+  for f in secrets/* secrets/.[!.]* secrets/..?*; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    [ "${f#secrets/}" != .config-manifest ] || continue
+    ln -s "$here/$f" "$CONFIG_STAGE/$f" || return 1
+  done
 }
 
 # config_stream — this server's settings and secrets as a gzipped tar, on stdout only, so they're never
 # in a plaintext file. The names a recovery leaves behind if it's interrupted stay out. The manifest
 # comes first (and again with the folder, which does no harm), so no cut can lose it and keep the rest.
-config_stream() { tar -czf - --exclude='secrets/.recover*' "$CONFIG_MANIFEST" .env secrets; }
+config_stream() { ( cd "$CONFIG_STAGE" && tar -czhf - --exclude='secrets/.recover*' secrets/.config-manifest .env secrets ); }
 
 # offsite_stream ARCHIVE — what goes off-site: the archive as it is, then the settings and secrets as
 # a second gzip member. A gzip file may hold several and gunzip joins them, so an older copy (one
@@ -211,10 +229,10 @@ offsite_stream() {
   cat "$1" || return 1
   [ "$CONFIG_READABLE" -eq 1 ] || return 0
   if ! { config_manifest && config_stream; }; then
-    rm -f "$CONFIG_MANIFEST"
+    rm -rf "$CONFIG_STAGE"
     return 2
   fi
-  rm -f "$CONFIG_MANIFEST"
+  rm -rf "$CONFIG_STAGE"
 }
 
 # offsite_copy ARCHIVE — encrypt it and the server's settings, and send them as <name>.tar.gz.age. Says
@@ -237,7 +255,7 @@ offsite_copy() {
   # the data still goes, and the copy is reported as failed because it can't rebuild the server.
   CONFIG_READABLE=1
   if ! { config_manifest && config_stream 2>/dev/null | cat >/dev/null; }; then CONFIG_READABLE=0; fi
-  rm -f "$CONFIG_MANIFEST"
+  rm -rf "$CONFIG_STAGE"
   case "$BACKUP_TARGET" in
     s3://*)
       echo "Copying off-site to ${BACKUP_TARGET}…"
