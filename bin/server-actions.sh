@@ -143,6 +143,18 @@ finish_unrun() { # finish_unrun <id> <action> <REFUSED|EXPIRED> <code> <message>
 
 helper_enabled() { [ "$(env_get SERVER_ACTIONS)" != off ]; }
 
+# Not yet under the appliance controller (review of the controller bundle, finding 5; the controller plan's "Still
+# to do"): there, a job may not write the shared settings (.env is the run's copy, replaced by the next run),
+# secrets/, or the backup's folder, and "Backup now" would run backup.sh as this job's user. Until the controller
+# applies these (the helper proposing, the controller checking and applying), the heartbeat names them, so Setup
+# can hide them, and a request for one is refused with words that say why, before anything runs.
+CONTROLLER_NOT_YET="backup-now offsite-test staff-mail-on staff-mail-off relay-apply alerts-set"
+not_yet_here() { # not_yet_here <action>
+  [ "${WORKFORCE_CONTROLLER:-}" = 1 ] || return 1
+  case " $CONTROLLER_NOT_YET " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
 # What the screens need to show, from .env, never a secret: not the relay's user name or password, not
 # the uptime URL, not the off-site target. The alert address is shown, because it's what gets edited.
 write_heartbeat() { # write_heartbeat <busy true|false>
@@ -166,7 +178,9 @@ write_heartbeat() { # write_heartbeat <busy true|false>
         --argjson mailOn "$mail_on" --arg webmail "$(env_get WEBMAIL_HOSTNAME)" --arg mailHost "$mail_host" \
         --arg mailRelay "$(env_get MAIL_RELAY_HOST)" --argjson privateCa "$private_ca" \
         --argjson offConfigured "$off_configured" --arg offKind "$kind" --argjson offEncrypted "$off_encrypted" \
+        --arg notYet "$([ "${WORKFORCE_CONTROLLER:-}" = 1 ] && echo "$CONTROLLER_NOT_YET")" \
     '{ schema: 1, at: $at, enabled: $enabled, busy: $busy,
+       unavailable: ($notYet | split(" ") | map(select(. != ""))),
        settings: {
          relay: { host: $host, port: $port, signsIn: $signsIn, from: $from, starttls: ($starttls == "true") },
          alerts: { address: $alerts, heartbeatSet: $hb },
@@ -406,6 +420,10 @@ handle_request() {
   fi
   if [ $((created - now)) -gt 60 ] || [ "$age" -lt -60 ]; then
     finish_unrun "$id" "$action" REFUSED BAD_SHAPE "That request wasn't in the right form, so nothing was done."
+    forget_request; return 0
+  fi
+  if not_yet_here "$action"; then
+    finish_unrun "$id" "$action" REFUSED NOT_YET_AVAILABLE "This server is run by the Workforce controller, which doesn't do this from Setup yet, so nothing was done."
     forget_request; return 0
   fi
   if ! helper_enabled; then

@@ -326,6 +326,26 @@ check "switched off: a password doesn't stay" "$([ -e "$REQ/$id.json" ] && echo 
 no_commands "switched off"; env_unchanged "switched off"
 reset_env
 
+# --- 8a. under the appliance controller (review of the controller bundle, finding 5): the jobs it doesn't do yet
+#     are refused before anything runs, and the heartbeat names them, so Setup can hide them
+clear_calls; remember_env
+ctl_once() { NOW="$(date +%s)"; WORKFORCE_CONTROLLER=1 bash "$SA" --once > "$WORK/out" 2>&1; RC=$?; }
+for a in backup-now offsite-test staff-mail-off; do
+  id="$(new_id)"; request "$id" "$a" '{}'; ctl_once
+  check "controller: $a refused" "$(state_of "$id")/$(code_of "$id")" REFUSED/NOT_YET_AVAILABLE
+done
+id="$(new_id)"; request "$id" relay-apply "$(relay_params "$SECRET_PW")"; ctl_once
+check "controller: relay-apply refused" "$(state_of "$id")/$(code_of "$id")" REFUSED/NOT_YET_AVAILABLE
+check "controller: its password doesn't stay" "$([ -e "$REQ/$id.json" ] && echo yes || echo no)" no
+id="$(new_id)"; request "$id" alerts-set "$(alert_params "ops@outside.example.net")"; ctl_once
+check "controller: alerts-set refused" "$(state_of "$id")/$(code_of "$id")" REFUSED/NOT_YET_AVAILABLE
+contains "controller: in words" "$(message_of "$id")" "doesn't do this from Setup yet"
+check "controller: the heartbeat names them" "$(jq -r '.unavailable | join(" ")' "$RES/helper.json")" \
+  "backup-now offsite-test staff-mail-on staff-mail-off relay-apply alerts-set"
+no_commands "controller"; env_unchanged "controller"
+once
+check "not under the controller: nothing unavailable" "$(jq -r '.unavailable | length' "$RES/helper.json")" 0
+
 # --- 9. hostile values in each job's parameters: refused, and they reach no command
 hostile_relay() { # hostile_relay <label> <params json>
   local id; id="$(new_id)"
