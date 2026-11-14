@@ -44,3 +44,7 @@ jobs:
         run: ./bin/tests/health-db-role-e2e.sh
       - name: Release signatures end to end (a local registry, the pinned cosign)
         run: ./bin/tests/verify-image-e2e.sh
+      # Second review of the controller bundle (findings 2, 4 and 6): the sign-in policies that use authentik's own
+      # code, and reset-admin.sh's program, run on the pinned authentik image (an error in the lock refuses everyone).
+      - name: The sign-in policies and reset-admin.sh on the pinned authentik
+        run: ./bin/tests/authentik-policies-e2e.sh

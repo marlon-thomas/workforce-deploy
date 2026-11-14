@@ -89,7 +89,8 @@ logs the service user in. The questions:
    `workforce.<domain>` (staff) and `auth.<domain>` (sign-in), shows both, and
    verifies both point at this machine (waiting if not)
 2. Email for certificate notices
-3. Administrator password (Enter = generate one and show it once), then the emergency
+3. Administrator password (Enter = generate one and show it once; one you type needs at least 16
+   characters, see "Wrong tries and the lock"), then the emergency
    administrator's **recovery email**: an address you control that is not hosted on this server
 4. Off-site backup target (Enter = local only — fine for the test). With a target, it then asks for
    the public key off-site copies are encrypted to, or generates a key pair and shows the private key
@@ -157,10 +158,22 @@ install that same unsigned version.
 ### Wrong tries and the lock
 
 Five wrong passwords or codes for one account in 15 minutes stop its sign-in for 15 minutes ("That was wrong too
-many times"); then it works again, and a new code is sent. For staff accounts the lock is by account, from
+many times"); then it works again, and staff are sent a new code (`admin` gets no codes: it signs in with its
+password alone, or its authenticator app if it has one). For staff accounts the lock is by account, from
 wherever the tries came. For the emergency administrator (`admin`, whose name is public) it is by account **and**
 address: wrong tries from somewhere else don't lock you out. If you are locked out of `admin` and can't wait, or
 think someone else has the password, `./bin/reset-admin.sh` sets a new one and lifts the lock.
+
+Because guesses at `admin` from many addresses are not added up, its password is what stops them. The
+installer's and `reset-admin.sh`'s are 24 random characters; one you type into the installer needs at least 16;
+one chosen later ("Forgot your password?", or Change password in Workforce's account menu) needs at least 16
+that aren't easy to guess. authentik's own change-password page refuses `admin`. **On a server installed or
+updated before this rule:** if `admin`'s password is shorter than 16 characters, or easy to guess, change it now
+(Workforce's account menu, or `./bin/reset-admin.sh`).
+
+The lock by address needs authentik to see each client's real address (§7a). Where every client reaches it with
+one address, someone else's wrong tries lock `admin` for you too, as before this rule; `reset-admin.sh` still
+lifts the lock.
 
 ## 6a. Jobs from the app
 
@@ -234,6 +247,21 @@ notifications, alerting) then report at most WARN, so they never fail an install
 back a good update. Run it by hand without `--gate` to see them as FAILs.
 
 ## 7a. Client addresses
+
+The sign-in server's wrong-tries lock for `admin` (§6) counts by address, and the audit and signature
+certificates record it, so each client must reach the server with its own address. These don't:
+
+- Rootless Docker with its default port driver (below; `doctor.sh` warns).
+- IPv6 clients on system Docker with the userland proxy, when the Compose networks have no IPv6: every IPv6
+  client arrives as the bridge's IPv4 gateway (`172.x.0.1`). Give the networks IPv6, or publish the gateway
+  only on IPv4 (no AAAA record for the two names).
+- A load balancer, CDN or NAT in front of the gateway: every client arrives as its address. The gateway
+  ignores an incoming `X-Forwarded-For` (it trusts no proxy), so put nothing in front of it, or accept that
+  the lock and the audit see that one address.
+
+The sign-in server takes the address from `X-Forwarded-For` sent by any private address
+(`AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS` in `compose.yaml`); only the gateway, which sets it, reaches it from
+outside. Any container on its networks could name the address it is counted under, so run nothing else there.
 
 Rootless Docker's default port driver shows every client as the Docker gateway (`172.x`), which puts a
 meaningless address on signature certificates, in the audit and in the mail server's filtering. New installs
@@ -472,7 +500,10 @@ is `restore.sh` on the box (see "Upgrading authentik" for the sign-in database).
 authentik cannot skip versions or go back. `compose.yaml` pins the version to end on, and
 `bin/upgrade-authentik.sh` walks every minor line in between, one healthy step at a time, after
 taking a backup. `update.sh` runs it automatically when a new bundle pins a newer authentik.
-To move the pin, append the new version to `LADDER` in that script.
+To move the pin, append the new version to `LADDER` in that script, then run
+`./bin/tests/authentik-policies-e2e.sh` (the sign-in policies that use authentik's own code, and
+`reset-admin.sh`, on the new image) and set its `VERIFIED_AUTHENTIK` to the new version once it passes:
+`bin/tests/blueprint-test.sh` fails until you do. An error in the wrong-tries lock would refuse every sign-in.
 
 If a step fails, fix the cause and re-run the script: it resumes from the version that is running.
 To go back instead, read `authentik_version` from the `pre-authentik-upgrade` backup's `MANIFEST`,

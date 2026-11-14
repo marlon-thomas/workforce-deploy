@@ -65,7 +65,12 @@ on the target machine (service user's `~/.docker/config.json`,
 ### The first administrator password (fresh installs)
 
 Installer prompt **3/4** asks you to pick the `admin` password; pressing Enter
-means *generate a strong one*. The prompt itself never echoes it — that would
+means *generate a strong one*. A password you type needs at least 16 characters
+(the installer asks again if it is shorter); a new one chosen later, with "Forgot
+your password?" or Workforce's account menu, needs 16 characters that aren't easy to
+guess (four or five unrelated words work well). Wrong tries at `admin` lock only the
+address they came from (RUNBOOK §6), so its password is what stops guessing. The
+prompt itself never echoes it — that would
 defeat `-rs`. The password then surfaces in exactly three places, in order:
 
 1. **End of the installer** — in the closing `---` banner, after the health

@@ -446,7 +446,7 @@ fi
 AH=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 6 "${CURL_PIN[@]}" "https://${AUTH_HOSTNAME}/-/health/ready/" 2>/dev/null) || AH=000
 case "$AH" in
   2*|3*) AH=ok ;;
-  *) AH=$(docker compose exec -T authentik-server /ak-root/venv/bin/python -c 'import urllib.request; urllib.request.urlopen("http://localhost:9000/-/health/ready/", timeout=3)' >/dev/null 2>&1 && echo ok || echo no) ;;
+  *) AH=$(docker compose exec -T authentik-server python -c 'import urllib.request; urllib.request.urlopen("http://localhost:9000/-/health/ready/", timeout=3)' >/dev/null 2>&1 && echo ok || echo no) ;;
 esac
 if [ "$AH" = ok ]; then row "sign-in server" ok "healthy"; else row "sign-in server" fail "not healthy"; fi
 

@@ -108,10 +108,26 @@ check("with the same lock", any("target: !KeyOf wf-too-many-tries-after-code-bin
 lock_policy = next((e for e in entries if "id: wf-too-many-tries\n" in e), "")
 check("the lock counts the account's wrong tries", 'Reputation.objects.filter(identifier=user.username)' in lock_policy)
 check("the emergency administrator's only from this address",
-      "if emergency:" in lock_policy and "tries.filter(ip=ClientIPMiddleware.get_client_ip(request.http_request))" in lock_policy)
+      "if emergency:" in lock_policy and "tries.filter(ip=str(ak_client_ip))" in lock_policy)
+check("not by authentik's internal ClientIPMiddleware (second review, finding 4)", "ClientIPMiddleware" not in lock_policy)
 check("at the same threshold", lock_policy.rstrip().endswith("<= -5"))
 check("the old lock by account alone is removed", any("reputationpolicy" in e and "name: workforce-too-many-tries }" in e
                                                       and "state: absent" in e for e in entries))
+
+# Second review of the controller bundle, findings 1 and 6: whoever chooses the emergency administrator's password
+# (a reset link, the change-password page) needs at least 16 characters zxcvbn rates hard to guess; authentik's own
+# change-password page, with authentik's 8-character rule, refuses that account.
+strong = next((e for e in entries if "id: wf-emergency-password\n" in e), "")
+check("the emergency password rule: at least 16 characters", "len(password) < 16" in strong)
+check("and zxcvbn's score of 3 or more", '["score"] < 3' in strong)
+prompt = next((e for e in entries if "id: wf-new-password-prompt" in e), "")
+check("on the reset and change-password pages", "- !KeyOf wf-emergency-password" in prompt
+      and any("id: wf-recovery-flow" in e for e in entries) and binding("wf-recovery-flow", "wf-new-password-prompt")
+      and binding("wf-password-change-flow", "wf-new-password-prompt"))
+check("authentik's own change-password page refuses it", any("policybinding" in e and "target: !KeyOf wf-default-password-change" in e
+                                                           and "policy: !KeyOf wf-emergency-not-here" in e for e in entries)
+      and any("id: wf-default-password-change\n" in e and "slug: default-password-change }" in e and "state: created" in e
+              for e in entries))
 
 print("blueprint self-test: %d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
@@ -134,6 +150,13 @@ check "the operator's recovery removes the emergency administrator's app (new pr
   "$(grep -c 'TOTPDevice.objects.filter(user=u).delete()' "$REPO/bin/reset-admin.sh")" 1
 check "and lifts its wrong-tries lock (controller bundle review, finding 1)" \
   "$(grep -c 'Reputation.objects.filter(identifier="admin").delete()' "$REPO/bin/reset-admin.sh")" 1
+# Second review of the controller bundle, finding 4: the lock's policy reads authentik's own models, so a new authentik
+# pin needs bin/tests/authentik-policies-e2e.sh run against it (it also runs reset-admin.sh's program there).
+VERIFIED="$(sed -n 's/^VERIFIED_AUTHENTIK=//p' "$HERE/authentik-policies-e2e.sh")"
+check "authentik-policies-e2e.sh was run on the pinned authentik (set VERIFIED_AUTHENTIK once it passes)" \
+  "$(grep -c "image: ghcr.io/goauthentik/server:${VERIFIED}@sha256:" "$REPO/compose.yaml")" 2
+check "reset-admin.sh and doctor.sh find authentik's python on its PATH, not by a fixed venv path (finding 2)" \
+  "$(grep -c '/ak-root/' "$REPO/bin/reset-admin.sh" "$REPO/bin/doctor.sh" | awk -F: '{s+=$2} END {print s}')" 0
 check "a typed emergency password is at least 16 characters (finding 1)" \
   "$(grep -c '"${#ADMIN_PASSWORD}" -lt 16' "$REPO/bin/install.sh")" 1
 check "the staff relay's password reaches authentik only without a sign-in route (new problem 8)" \

@@ -248,6 +248,33 @@ entries:
         user = request.user
         return (getattr(user, "type", "") == "internal" and not user.is_superuser
                 and not ak_is_group_member(user, name="authentik Admins"))
+  # Second review of the controller bundle (findings 1 and 6): wrong tries at the emergency administrator lock only
+  # the address they come from (see wf-too-many-tries), so its password must be too strong to guess from many
+  # addresses at once. Whoever chooses it (a reset link, which is how it gets its first password under the
+  # appliance controller, or the change-password page) needs at least 16 characters that zxcvbn doesn't call easy
+  # to guess (a score of 3 or 4). Everyone else keeps the rule above. The installer's and reset-admin.sh's
+  # passwords are 24 random characters; authentik's own change-password page refuses this account
+  # (wf-emergency-not-here, below).
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-emergency-password
+    identifiers: { name: workforce-emergency-password }
+    attrs:
+      name: workforce-emergency-password
+      expression: |
+        user = request.user
+        emergency = (user.username == "admin" and getattr(user, "type", "") == "internal" and not user.is_superuser
+                     and not ak_is_group_member(user, name="authentik Admins"))
+        if not emergency:
+            return True
+        password = str((request.context.get("prompt_data") or {}).get("password") or "")
+        if len(password) < 16:
+            ak_message("The emergency administrator's password needs at least 16 characters: four or five unrelated words work well.")
+            return False
+        from zxcvbn import zxcvbn
+        if zxcvbn(password[:72], ["admin", "workforce", "administrator"])["score"] < 3:
+            ak_message("That password is too easy to guess. Try four or five unrelated words.")
+            return False
+        return True
   - model: authentik_stages_prompt.promptstage
     id: wf-new-password-prompt
     identifiers: { name: workforce-new-password }
@@ -258,6 +285,7 @@ entries:
         - !KeyOf wf-prompt-password-repeat
       validation_policies:
         - !KeyOf wf-password-policy
+        - !KeyOf wf-emergency-password
   - model: authentik_stages_user_write.userwritestage
     id: wf-password-write
     identifiers: { name: workforce-password-write }
@@ -515,10 +543,16 @@ entries:
   # Review of the controller bundle (finding 1): the emergency administrator is always called "admin" and this
   # file is public, so a lock by account alone let anyone on the internet keep the last-resort account locked
   # (five wrong passwords every 15 minutes, from anywhere). For that account alone the wrong tries count by
-  # account AND address: someone else's wrong tries lock only their own address. Its password is long and random
-  # (the installer's, or ./bin/reset-admin.sh's), which is what makes guessing from many addresses hopeless.
+  # account AND address: someone else's wrong tries lock only their own address. What makes guessing from many
+  # addresses hopeless is its password: 24 random characters from the installer or ./bin/reset-admin.sh, and at
+  # least 16 that zxcvbn rates hard to guess wherever it is chosen (wf-emergency-password; authentik's own
+  # change-password page refuses it). No total across addresses: any such limit would let anyone keep it locked.
+  # The address is the one authentik records the wrong tries under (ak_client_ip, from the same function). Where
+  # every client reaches authentik with one address (RUNBOOK 7a), this is a lock by account again, as before.
   # authentik's reputation policy can only add the two up (account OR address), so this is an expression with
-  # the same sum and the same threshold as before.
+  # the same sum and the same threshold as before. It reads authentik's own Reputation model: an error here
+  # refuses every sign-in, so bin/tests/authentik-policies-e2e.sh runs it on the pinned authentik, and
+  # blueprint-test.sh fails when the pin moves until that has been run again.
   - model: authentik_policies_reputation.reputationpolicy
     identifiers: { name: workforce-too-many-tries }
     state: absent
@@ -530,13 +564,12 @@ entries:
       expression: |
         from django.db.models import Sum
         from authentik.policies.reputation.models import Reputation
-        from authentik.root.middleware import ClientIPMiddleware
         user = request.user
         tries = Reputation.objects.filter(identifier=user.username)
         emergency = (user.username == "admin" and getattr(user, "type", "") == "internal" and not user.is_superuser
                      and not ak_is_group_member(user, name="authentik Admins"))
         if emergency:
-            tries = tries.filter(ip=ClientIPMiddleware.get_client_ip(request.http_request))
+            tries = tries.filter(ip=str(ak_client_ip))
         return (tries.aggregate(score=Sum("score"))["score"] or 0) <= -5
   - model: authentik_stages_deny.denystage
     id: wf-too-many-tries-stage
@@ -667,6 +700,32 @@ entries:
       policy: !KeyOf wf-nobody
     attrs: { order: 0, enabled: true }
 {% endfor %}
+  # Second review of the controller bundle (finding 6): authentik's own change-password page (its account page's
+  # "Change password", and the password stage's configure_flow above) has authentik's rule, 8 characters, so it
+  # would bypass wf-emergency-password. It refuses the emergency administrator, which changes its password from
+  # Workforce's account menu (workforce-password-change) instead; everyone else may still use it.
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-emergency-not-here
+    identifiers: { name: workforce-emergency-password-not-here }
+    attrs:
+      name: workforce-emergency-password-not-here
+      expression: |
+        user = request.user
+        emergency = (user.username == "admin" and getattr(user, "type", "") == "internal" and not user.is_superuser
+                     and not ak_is_group_member(user, name="authentik Admins"))
+        if emergency:
+            ak_message("Change this account's password from Workforce's account menu: Change password.")
+        return not emergency
+  - model: authentik_flows.flow
+    id: wf-default-password-change
+    identifiers: { slug: default-password-change }
+    state: created
+    attrs: { name: Change Password, slug: default-password-change, title: Change password, designation: stage_configuration, authentication: require_authenticated }
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf wf-default-password-change
+      policy: !KeyOf wf-emergency-not-here
+    attrs: { order: 0, enabled: true }
   - model: authentik_stages_authenticator_totp.authenticatortotpstage
     identifiers: { name: default-authenticator-totp-setup }
     attrs:

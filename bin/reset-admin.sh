@@ -45,8 +45,11 @@ esac
 
 NEW_PW="$(openssl rand -base64 18)"
 echo "Setting a new administrator password…"
+# `python` as the image's PATH finds it (its venv): a fixed path broke when authentik moved its
+# venv (second review of the controller bundle, finding 2). bin/tests/authentik-policies-e2e.sh runs this
+# program on the pinned authentik.
 RESULT="$(docker compose exec -T -e WF_NEW_PW="$NEW_PW" authentik-server sh -c \
-  'cd / && /ak-root/venv/bin/python - <<PYEOF
+  'cd / && python - <<PYEOF
 import os, sys
 sys.path.insert(0, "/authentik")
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "authentik.root.settings")
