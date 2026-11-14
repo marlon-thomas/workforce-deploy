@@ -374,6 +374,11 @@ entries:
       # Workforce issue 462: a name nobody has goes on to the password step like a real one (authentik's default,
       # restated): the same answers, the same pause after five, and nothing says which names exist.
       pretend_user_exists: true
+      # And the password step shows the name as it was typed, for every name (review finding 1): authentik's default
+      # showed a real account's own username (another case, or the username behind an email), which a name nobody
+      # has can't show. It also keeps the typed name in the flow plan for every name (pending_user_identifier), by
+      # which the pause counts.
+      show_matched_user: false
     state: present
 
   # ---------- Review R5: the sign-in page is ours, not authentik's ----------
@@ -648,7 +653,7 @@ entries:
             return decision["paused"] or decision["throttled"]
         with transaction.atomic(using="default"):
             with connections["default"].cursor() as cursor:
-                wf_ak_lock(cursor, (WF_LOCK_CONN, "conn:" + conn), (WF_LOCK_PAIR, "pair:" + account + "|" + conn))
+                wf_ak_lock(cursor, *wf_ak_try_locks(account, conn))
             now = timezone.now().timestamp()
             events, markers = wf_ak_events(conn, account, person, now, True)
             decision = wf_decide(events, account, conn, markers, now)
@@ -659,7 +664,7 @@ entries:
                          wf_user_pk=pk)
             if plan is not None:
                 plan.context[WF_PLAN_TRY] = tid
-            after = events + [{"at": now, "kind": "try", "try": tid, "account": account, "conn": conn}]
+            after = events + [{"at": now, "kind": "try", "try": tid, "account": account, "conn": conn, "pk": pk}]
             for alert in wf_spread(after, account, conn, pk, now, before=events):
                 field, value = wf_alert_key(alert)
                 if not wf_ak_rows(WF_ALERT, datetime.fromtimestamp(now - WF_ALERT_GAP, tz.utc),

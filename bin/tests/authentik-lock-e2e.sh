@@ -18,10 +18,15 @@
 #     (time moved by shifting the records back); the throttle holds strangers on a connection, not people known
 #     there; alerts are written; an unlock (the application's attribute, written through the API by its own service
 #     account) and ./bin/reset-admin.sh lift a pause; the service account may read the records and nothing more new;
+#   - (review of 14 November 2026) every spelling of a name counts as authentik's lookup finds it, real or unknown
+#     alike, a real account's email counts apart like any name, and the password step shows names as typed; tries
+#     from many /64s of one /48 at one moment are counted one at a time against its thirty (25, then eight at once:
+#     exactly 30 recorded; 33 without the /48's lock);
 #   - wrong codes have their own count, by account, and don't touch passwords;
 #   - the emergency administrator's password rule (wf-emergency-password) fires in the real reset-link flow and the
 #     account-menu change flow, and authentik's own change-password page refuses that account.
-# Needs Docker (pulls the pinned images) and python3 with jinja2 (Ansible's). About five minutes. Every container and
+# Needs Docker (pulls the pinned images) and python3 with jinja2 (Ansible's). Five to thirty minutes (the blueprint's
+# two applies take most of it on a busy machine). Every container and
 # network it makes is removed at the end. Exit 0 = all pass.
 #   ./bin/tests/authentik-lock-e2e.sh
 VERIFIED_AUTHENTIK=2026.8.5
@@ -229,6 +234,37 @@ r="$(fc c "$OUT" signin nobody-here wrong-6 | result)"
 has "unknown name, sixth: the same refusal" "$r" "denied:ak-stage-access-denied:$PAUSED"
 check "an unknown name's tries carry no user" "$(sql "select distinct \"user\"::text from authentik_events_event where action = 'custom_workforce_password_try' and context->>'wf_account' like 'n:%'")" "{}"
 check "the typed name is never stored" "$(sql "select count(*) from authentik_events_event where action like 'custom_workforce_%' and (context::text like '%nobody-here%' or \"user\"::text like '%nobody-here%')")" 0
+# ---- 3b. review finding 1: every spelling of a name counts as authentik's lookup finds it, for real names and unknown
+# ones alike, and a real account's other name (its email) counts apart like any name. A container inside the trusted
+# range stands in for the gateway (section 1), so each pair below has a connection of its own.
+akshell "
+from authentik.core.models import User
+u, _ = User.objects.update_or_create(username='kit', defaults={'email': 'kit.work@example.org', 'type': 'internal'})
+u.set_password('$PW_KIM'); u.save()
+print('kit ready')" >/dev/null
+KIT_PK="$(sql "select id from authentik_core_user where username = 'kit'")"
+via() { local at="$1"; shift; fc s "$IN" signin --headers "{\"X-Forwarded-For\": \"$at\"}" "$@" | result; }
+pause_then() { # pause_then <connection> <name> <then typed> → the answer to <then typed> after five wrong for <name>
+  local i; for i in 1 2 3 4 5; do via "$1" "$2" "wrong-$i" >/dev/null; done
+  via "$1" "$3" wrong-6
+}
+KELVIN=$'\u212a'; LONG_S=$'\u017f'
+REAL="$(pause_then 192.0.2.101 kit "${KELVIN}it")"; UNKNOWN="$(pause_then 192.0.2.102 kate "${KELVIN}ate")"
+check "Kelvin sign after five for a real name: the same answer as for an unknown name" "$REAL" "$UNKNOWN"
+check "(which is: checked, not paused; authentik's lookup doesn't match it)" "${REAL%%:*}" error
+REAL="$(pause_then 192.0.2.103 sam "${LONG_S}am")"; UNKNOWN="$(pause_then 192.0.2.104 sue "${LONG_S}ue")"
+check "long s after five for a real name: the same answer as for an unknown name" "$REAL" "$UNKNOWN"
+REAL="$(pause_then 192.0.2.105 KIT kit)"; UNKNOWN="$(pause_then 192.0.2.106 KATE kate)"
+has "another case after five: paused for a real name" "$REAL" "denied:ak-stage-access-denied:$PAUSED"
+check "and the same for an unknown name" "$UNKNOWN" "$REAL"
+REAL="$(pause_then 192.0.2.107 kit kit.work@example.org)"; UNKNOWN="$(pause_then 192.0.2.108 kate kate.work@example.org)"
+check "a real account's email after five for its username: the same answer as for an unknown name's" "$REAL" "$UNKNOWN"
+check "(which is: checked, not paused)" "${REAL%%:*}" error
+check "its email's tries still carry the person" "$(sql "select count(*) from authentik_events_event where action = 'custom_workforce_password_try' and context->>'wf_account' like 'n:%' and (context->>'wf_user_pk')::int = $KIT_PK and \"user\"->>'username' = 'kit'")" 1
+check "the password step shows the name as typed, for a real name" "$(fc s "$IN" shown KIT | j 'd["pending_user"]')" KIT
+check "and for an unknown one" "$(fc s "$IN" shown KATE | j 'd["pending_user"]')" KATE
+check "no typed name is stored" "$(sql "select count(*) from authentik_events_event where action like 'custom_workforce_%' and (context::text ~* 'kate|kit.work' or \"user\"::text ~* 'kate|kit.work')")" 0
+
 r="$(fc c "$OUT" raw pat '{"component": "ak-stage-password", "password": ""}' | result)"
 check "an empty password isn't checked, and isn't counted" "$(tries "u:$PAT_PK" "$C")" 0
 
@@ -309,10 +345,21 @@ for i in $(seq 1 30); do fc s "$IN" signin --headers "{\"X-Forwarded-For\": \"20
 has "a 31st /64 of that /48: throttled" "$(fc s "$IN" signin --headers '{"X-Forwarded-For": "2001:db8:5:ff::1"}' kim "$PW_KIM" | result)" "$THROTTLED"
 has "another /48: not" "$(fc s "$IN" signin --headers '{"X-Forwarded-For": "2001:db8:6::1"}' kim "$PW_KIM" | result)" "next:ak-stage-authenticator-"
 has "a spread alert for the /48" "$(sql "select context->>'wf_conn' from authentik_events_event where action = 'custom_workforce_password_alert' and context->>'wf_kind' = 'connection-spread'")" "2001:db8:5::/48"
+# Review finding 4: another /48 has 25 wrong from as many /64s, then eight more /64s try at one moment. The /48's lock
+# counts them one at a time, so exactly five more are checked (thirty in all) and three get the throttle's words.
+# (Without it, each could read the count before the others had written theirs. Few at once: each recorded try holds
+# the lock for its whole transaction, and a wait past lock_timeout refuses the password unchecked, which is safe but
+# isn't what this measures.)
+fc s "$IN" spray 25 8 2001:db8:7 wrong > "$WORK/spray.json"
+check "25, then eight at once from one /48's /64s: exactly thirty recorded" "$(sql "select count(*) from authentik_events_event where action = 'custom_workforce_password_try' and client_ip <<= '2001:db8:7::/48'")" 30
+check "and three held, with the throttle's words" \
+  "$(THROTTLED="$THROTTLED" j 'sum(1 for x in d if x and x["result"] == "denied" and x["message"].startswith(__import__("os").environ["THROTTLED"]))' < "$WORK/spray.json")" 3
+j '[(x or {}).get("result", "") + ":" + (x or {}).get("message", "")[:40] for x in d]' < "$WORK/spray.json"
 
 # ---- 7b. doctor.sh's "where sign-ins came from" (contract 2.3 b): its program, word for word, in the live authentik
 CA_PROGRAM="$(bash -c '. "$1/bin/lib/client-address.sh"; printf "%s" "$CLIENT_ADDRESS_AK"' _ "$REPO")"
-CA_LIVE="$(docker exec -i "$P-server" ak shell -c "$CA_PROGRAM" 2>/dev/null | grep -E '^WF(CONN|SIGNINS|FWD|ALERTS) ')"
+CA_LIVE="$(docker exec -i "$P-server" ak shell -c "$CA_PROGRAM" 2>/dev/null | grep -E '^WF(CONN|SIGNINS|INSUM|FWD|ALERTS) ')"
+check "its summaries first (review finding 9)" "$(printf '%s\n' "$CA_LIVE" | head -n 4 | cut -d' ' -f1 | paste -sd' ' -)" "WFSIGNINS WFINSUM WFFWD WFALERTS"
 has "doctor.sh's program: sign-ins from A, by connection key" "$CA_LIVE" "WFCONN $A in "
 has "the IPv6 tries by /64" "$CA_LIVE" "WFCONN 2001:db8:5:1::/64 try "
 has "the forwarded sign-in counted" "$CA_LIVE" "WFFWD 1 $A"

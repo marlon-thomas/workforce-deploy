@@ -83,12 +83,21 @@ check("attributes not a dict", wm(None, "x", now), None)
 
 # ---- names nobody has: a keyed digest, never the name
 nk = g("wf_name_key")
-k1 = nk("server-secret", "  Pat.Smith@Example.org ")
-check("a name's key ignores case and spaces", k1, nk("server-secret", "pat.smith@example.org"))
+ak = g("wf_account_key")
+k1 = nk("server-secret", "PAT.SMITH@EXAMPLE.ORG")
 check("it is a digest", bool(re.fullmatch(r"n:[0-9a-f]{32}", k1)), True)
-check("keyed by the server's secret", k1 != nk("another-secret", "pat.smith@example.org"), True)
-check("a real account is its number", g("wf_account_key")(7, "pat", "s"), "u:7")
-check("an unknown one its name's key", g("wf_account_key")(None, "pat", "s"), nk("s", "pat"))
+check("keyed by the server's secret", k1 != nk("another-secret", "PAT.SMITH@EXAMPLE.ORG"), True)
+# Review finding 1: the name is folded by the database exactly as authentik's lookup folds it (UPPER, in
+# wf_ak_subject), never by Python here: Python's lower() joined spellings (the Kelvin sign K, U+212A, and k) that
+# authentik's lookup keeps apart, so they shared a count only for a name nobody has.
+check("the key takes the folded name as it is", nk("s", "KIM") != nk("s", "\u212aIM"), True)
+check("a real account found by its username: its number", ak(7, "PAT", "PAT", "s"), "u:7")
+check("with no typed name kept: its number", ak(7, None, "PAT", "s"), "u:7")
+check("an unknown name: its name's key", ak(None, "PAT", "PAT", "s"), nk("s", "PAT"))
+check("a real account found by its email: that name's key, as for a name nobody has",
+      ak(7, "PAT@EXAMPLE.ORG", "PAT", "s"), nk("s", "PAT@EXAMPLE.ORG"))
+check("so its email and an unknown email count alike", ak(7, "PAT@EXAMPLE.ORG", "PAT", "s"),
+      ak(None, "PAT@EXAMPLE.ORG", "PAT@EXAMPLE.ORG", "s"))
 
 # ---- refused requests are never recorded: a pause doesn't move while it is attacked
 def tries(account, conn, *minutes, base="2026-11-14T10:00:00Z"):
@@ -120,6 +129,15 @@ ev = tries("u:3", "203.0.113.1", 0) + tries("u:3", "203.0.113.2", 1) + tries("u:
 alerts = sp(ev, "u:3", "203.0.113.3", 3, base + 200)
 check("one account from three connections in an hour: account-spread", [a["wf_kind"] for a in alerts], ["account-spread"])
 check("about that account", (alerts[0]["wf_user_pk"], alerts[0]["wf_connections"]), (3, 3))
+# A person typed under their username and their email: one account for alerts (the records' wf_user_pk).
+ev = tries("u:3", "203.0.113.1", 0) + tries("n:e3", "203.0.113.2", 1)
+for e in ev:
+    e["pk"] = 3
+ev += [dict(x, pk=3) for x in tries("n:e3", "203.0.113.3", 2)]
+check("one person tried under two names from three connections: account-spread",
+      [a["wf_kind"] for a in sp(ev, "n:e3", "203.0.113.3", 3, base + 200)], ["account-spread"])
+check("but each name keeps its own pause", (g("wf_decide")(tries("u:3", "203.0.113.1", 0, 1, 2) + tries("n:e3", "203.0.113.1", 3, 4),
+      "u:3", "203.0.113.1", {}, base + 300)["paused"]), False)
 check("an unknown name never raises an account alert", sp(tries("n:aa", "203.0.113.1", 0) + tries("n:aa", "203.0.113.2", 1)
       + tries("n:aa", "203.0.113.3", 2), "n:aa", "203.0.113.3", None, base + 200, {}), [])
 ev = []
@@ -136,6 +154,26 @@ check("the throttle is announced once, when it starts",
       [a["wf_kind"] for a in sp(more, "n:%032x" % 11, "192.0.2.9", None, base + 12, before=after) if a["wf_kind"] == "throttled"], [])
 check("alert keys", (g("wf_alert_key")({"wf_kind": "account-spread", "wf_user_pk": 4}),
                      g("wf_alert_key")({"wf_kind": "throttled", "wf_conn": "192.0.2.9"})), (("wf_user_pk", 4), ("wf_conn", "192.0.2.9")))
+
+# ---- a workplace /48 is still bounded (review finding 3): the pause counts by /64, so it bounds nothing there
+def rights(accounts, prefix, when="2026-11-11T09:00:00Z"):
+    out = []
+    for i, a in enumerate(accounts):
+        out += [{"at": T(when), "kind": k, "try": "ok-" + a, "account": a, "conn": "%s:%x::/64" % (prefix, 0xa0 + i)}
+                for k in ("try", "right")]
+    return out
+office = rights(["u:20", "u:21", "u:22"], "2001:db8:9")
+spray = lambda n: [{"at": base + i, "kind": "try", "try": "w%d" % i, "account": "u:7",
+                    "conn": "2001:db8:9:%x::/64" % (i + 1)} for i in range(n)]
+dec = g("wf_decide")
+check("a workplace /48: 299 wrong from as many /64s, not held", dec(office + spray(299), "u:7", "2001:db8:9:ffff::1", {}, base + 400)["throttled"], False)
+check("the 300th holds it", dec(office + spray(300), "u:7", "2001:db8:9:ffff::1", {}, base + 400)["throttled"], True)
+check("until 15 minutes after the 300th", dec(office + spray(300), "u:7", "2001:db8:9:ffff::1", {}, base + 400)["until"], base + 299 + 900)
+check("a /48 that isn't a workplace: after 30, as before", dec(spray(30), "u:7", "2001:db8:9:ffff::1", {}, base + 400)["throttled"], True)
+check("a workplace connection itself is still never throttled", dec(rights(["u:20", "u:21", "u:22"], "2001:db8:9")[:2]
+      + [dict(e, conn="2001:db8:9:a0::/64") for e in rights(["u:21", "u:22"], "2001:db8:9")]
+      + [{"at": base + i, "kind": "try", "try": "x%d" % i, "account": "n:%032x" % i, "conn": "2001:db8:9:a0::/64"} for i in range(29)],
+      "u:7", "2001:db8:9:a0::5", {}, base + 400)["throttled"], False)
 
 # ---- the throttle never depends on the name: a real account, a known one and an unknown name get the same answer
 ev = [{"at": base + i, "kind": "try", "try": "w%d" % i, "account": "n:%032x" % i, "conn": "192.0.2.50"} for i in range(10)]

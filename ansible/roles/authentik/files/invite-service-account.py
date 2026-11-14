@@ -65,6 +65,12 @@ for perm in (
     # Workforce issue 462: read the sign-in server's records of wrong passwords (custom_workforce_password_try,
     # _right, _alert), to show a manager whether someone is paused and to raise attack alerts. Read-only: no record
     # can be changed or deleted, and the unlock itself is an attribute change_user above already covers.
+    # Known exposure (Workforce issue 462 review, finding 5): authentik's view_event is global, not per action, and
+    # authentik 2026.8.5 keeps the whole body of every email it sends in its email_sent event (stages/email/tasks.py),
+    # so this token can also read live sign-in codes and password-reset links, for every organisation, until the
+    # events expire. change_user above already lets this token take an account over (by redirecting its code email),
+    # so a leak of it was already a takeover; this widens what a read-only leak exposes. Keep the token where it is
+    # (secrets/ak_invite_token, the app's memory) and never log it. RUNBOOK, "Hardening notes".
     "authentik_events.view_event",
 ):
     assign(perm)

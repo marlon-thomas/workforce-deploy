@@ -18,10 +18,18 @@
 # days) is never throttled. The throttle never depends on the typed name (an exemption by name would tell anyone on a
 # throttled connection which names exist), and an unlock or a new password never touches it. A refused request is
 # never recorded, so it can't move either end. Times are seconds since the epoch, UTC.
+#
+# Review of 14 November 2026: an IPv6 /48 workplace is still throttled, after WF_WORKPLACE_NETWORK_THROTTLE_AFTER
+# (finding 3: the pause counts by /64, so without it one /48 that held three staff phones could try one account five
+# times from each of its 65,536 /64s every 15 minutes). And the pause's count is by the name as typed, folded as
+# authentik's lookup folds it (finding 1): every spelling of one name shares a count, whether or not anyone has it,
+# and a real account's other name (its email) counts apart like any other name, so the pause never tells anyone
+# which names exist.
 
 WF_PAUSE_AFTER = 5                 # wrong passwords for one pair within WF_WINDOW
 WF_THROTTLE_AFTER = 10             # wrong passwords from one connection, any names, within WF_WINDOW
 WF_NETWORK_THROTTLE_AFTER = 30     # and from one IPv6 /48
+WF_WORKPLACE_NETWORK_THROTTLE_AFTER = 300   # and from one IPv6 /48 that is a workplace (never unbounded: finding 3)
 WF_WORKPLACE_ACCOUNTS = 3          # real accounts with a right password from a connection (or /48) make it a workplace
 WF_WINDOW = 15 * 60                # both are counted over this, and last this long after the last one counted
 WF_LOOK_BACK = 30 * 60             # how far back tries are read for a decision (a window plus its wait)
@@ -51,7 +59,9 @@ WF_ALERT = "workforce_password_alert"
 WF_PLAN_TRY = "wf_password_try"    # the flow plan's key for this sign-in's newest try
 WF_FORWARDED_HEADER = "HTTP_X_WORKFORCE_FORWARDED"   # the gateway's mark: forwarding headers from a peer nobody named
 WF_LOCK_CONN = 1464225601          # first key of the PostgreSQL advisory lock per connection (always taken first)
-WF_LOCK_PAIR = 1464225602          # and per pair (account and connection), taken second
+WF_LOCK_NET = 1464225604           # then per IPv6 /48, when a try is recorded (review finding 4)
+WF_LOCK_PAIR = 1464225602          # and per pair (account and connection), taken last
+WF_PLAN_IDENTIFIER = "pending_user_identifier"   # authentik's flow plan key for the name as typed (show_matched_user off)
 WF_UNLOCK_ATTRIBUTE = "password_unlocked_at"   # attributes.workforce.<this>, written by the application
 WF_CODE_CLASSES = ("totp", "static", "sms", "email")
 
@@ -92,20 +102,27 @@ def wf_network_key(address):
         return key
 
 
-def wf_name_key(secret, typed):
-    """An unknown name's account key: never the name itself, an HMAC of it under the server's own secret."""
+def wf_name_key(secret, folded):
+    """A name's account key: never the name itself, an HMAC of it under the server's own secret. `folded` is the name
+    as typed, folded exactly as authentik's lookup folds it (PostgreSQL's UPPER, which its case-insensitive match
+    compares: wf_ak_subject asks the database), so two spellings share a key exactly when they find the same
+    account."""
     import hashlib
     import hmac
-    name = str(typed if typed is not None else "").strip().lower()
+    name = str(folded if folded is not None else "")
     digest = hmac.new(str(secret).encode("utf-8"), ("wf-name:" + name).encode("utf-8"), hashlib.sha256).hexdigest()
     return "n:" + digest[:32]
 
 
-def wf_account_key(pk, typed, secret):
-    """u:<pk> for a real account; for authentik's pretend user (a name nobody has, no pk) the name's key."""
-    if pk is not None:
+def wf_account_key(pk, typed, username, secret):
+    """The pause's account key for a name as typed (`typed` and the account's `username` both folded, see
+    wf_name_key): u:<pk> when a real account was found by its username; otherwise the typed name's key, for a name
+    nobody has (authentik's pretend user, no pk) and for a real account found by another name (its email). So the
+    count follows the typed name alike for every name, real or not, and the pause can't tell anyone which exist
+    (review finding 1); u:<pk> is kept where it is the same thing, which the application reads."""
+    if pk is not None and (typed is None or typed == username):
         return "u:%d" % int(pk)
-    return wf_name_key(secret, typed)
+    return wf_name_key(secret, typed if typed is not None else username)
 
 
 def wf_parse_time(value):
@@ -187,12 +204,16 @@ def wf_paused_until(events, right, account, conn, marker, now):
 
 def wf_throttled_until(events, right, key, network, now):
     """The throttle of a connection (or, with `network`, an IPv6 /48): wrong tries from it in the last WF_LOOK_BACK, any
-    name, any marker. None for a workplace."""
+    name, any marker. None for a workplace connection; a workplace /48 is held after
+    WF_WORKPLACE_NETWORK_THROTTLE_AFTER (the pause counts by /64, so it bounds nothing across a /48)."""
+    limit = WF_NETWORK_THROTTLE_AFTER if network else WF_THROTTLE_AFTER
     if wf_workplace(events, key, network, now):
-        return None
+        if not network:
+            return None
+        limit = WF_WORKPLACE_NETWORK_THROTTLE_AFTER
     times = [e["at"] for e in events if wf_is_wrong(e, right, now, now - WF_LOOK_BACK)
              and (wf_network_key(e.get("conn")) if network else e.get("conn")) == key]
-    return wf_held_until(times, WF_NETWORK_THROTTLE_AFTER if network else WF_THROTTLE_AFTER, now)
+    return wf_held_until(times, limit, now)
 
 
 def wf_decide(events, account, conn, markers, now):
@@ -240,9 +261,12 @@ def wf_spread(events, account, conn, user_pk, now, before=None):
                            "wf_connections": len(set(e.get("conn") for e in from_here)), "wf_wrong": len(from_here),
                            "wf_window": WF_SPREAD_HOUR})
     if user_pk is not None:
-        mine_hour = [e for e in hour if e.get("account") == account]
+        # The person, whichever of their names was typed (each counts apart for the pause, never for an alert).
+        def mine(e):
+            return e.get("account") == account or (e.get("pk") is not None and e.get("pk") == int(user_pk))
+        mine_hour = [e for e in hour if mine(e)]
         conns = set(e.get("conn") for e in mine_hour)
-        mine_day = [e for e in events if e.get("account") == account and wf_is_wrong(e, right, now, now - WF_SPREAD_DAY)]
+        mine_day = [e for e in events if mine(e) and wf_is_wrong(e, right, now, now - WF_SPREAD_DAY)]
         if len(conns) >= WF_SPREAD_CONNECTIONS:
             alerts.append({"wf_kind": "account-spread", "wf_conn": None, "wf_user_pk": int(user_pk),
                            "wf_user_pks": [int(user_pk)], "wf_accounts": 1, "wf_connections": len(conns),
@@ -307,8 +331,9 @@ def wf_events(rows, kind):
     for at, ctx in rows:
         if not isinstance(ctx, dict):
             continue
+        pk = ctx.get("wf_user_pk")
         out.append({"at": at, "kind": kind, "try": ctx.get("wf_try"), "account": ctx.get("wf_account"),
-                    "conn": wf_connection_key(ctx.get("wf_conn"))})
+                    "conn": wf_connection_key(ctx.get("wf_conn")), "pk": pk if isinstance(pk, int) else None})
     return out
 
 
@@ -323,27 +348,46 @@ def wf_lock_key(text):
 
 def wf_ak_subject(request):
     """(http request, user or None, account key, connection key, address) of the sign-in this policy decides for. The
-    user is a real account (it has a pk), or None for a name nobody has. The address is authentik's own
+    user is a real account (it has a pk), or None for a name nobody has. The account key is by the name as typed
+    (the flow plan's pending_user_identifier, which the identification stage keeps for every name with
+    show_matched_user off; the pending user's username otherwise), folded by the database exactly as authentik's
+    lookup folds it (its iexact is UPPER(field) = UPPER(typed)): wf_account_key. The address is authentik's own
     (ClientIPMiddleware.get_client_ip, which the gateway decides: contract 2.1); never a header read here, never
     anything from the request's body."""
     from django.conf import settings
+    from django.db import connections
     from authentik.root.middleware import ClientIPMiddleware
     http = request.http_request
     user = request.user
     address = ClientIPMiddleware.get_client_ip(http)
     pk = getattr(user, "pk", None)
-    account = wf_account_key(pk, getattr(user, "username", ""), settings.SECRET_KEY)
+    username = str(getattr(user, "username", "") or "")
+    plan = request.context.get("flow_plan")
+    typed = plan.context.get(WF_PLAN_IDENTIFIER) if plan is not None else None
+    typed = str(typed).strip() if isinstance(typed, str) and typed.strip() else username
+    with connections["default"].cursor() as cursor:
+        cursor.execute("SELECT UPPER(%s), UPPER(%s)", [typed, username])
+        folded, own = cursor.fetchone()
+    account = wf_account_key(pk, folded, own, settings.SECRET_KEY)
     return http, (user if pk is not None else None), account, wf_connection_key(address), address
 
 
-def wf_ak_lock(cursor, first, second):
-    """Advisory locks for this transaction, in the order given (always the connection's, then the pair's). A lock or a
-    query that takes too long fails, and the policy with it (closed)."""
+def wf_ak_lock(cursor, *locks):
+    """Advisory locks for this transaction, in the order given: always the connection's, then (recording a try) its
+    IPv6 /48's, then the pair's, so no two requests ever wait on each other in a circle. A lock given as None is
+    skipped. A lock or a query that takes too long fails, and the policy with it (closed)."""
     cursor.execute("SET LOCAL lock_timeout = '5s'")
     cursor.execute("SET LOCAL statement_timeout = '10s'")
-    for space, text in (first, second):
-        if text is not None:
-            cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [space, wf_lock_key(text)])
+    for lock in locks:
+        if lock is not None and lock[1] is not None:
+            cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [lock[0], wf_lock_key(lock[1])])
+
+
+def wf_ak_try_locks(account, conn):
+    """The locks a try is recorded under: the connection, its IPv6 /48 (review finding 4: tries from many /64s of one
+    /48 at the same moment are counted one at a time against the /48's throttle too), the pair."""
+    net = (WF_LOCK_NET, "net:" + wf_network_key(conn)) if ":" in conn else None
+    return (WF_LOCK_CONN, "conn:" + conn), net, (WF_LOCK_PAIR, "pair:" + account + "|" + conn)
 
 
 def wf_ak_rows(action, since, within=None, most=None, **context):
@@ -371,14 +415,15 @@ def wf_ak_workplace_rows(since, within=None, **context):
     from django.db.models import Max
     from authentik.events.models import Event
     rows = Event.objects.db_manager("default").including_expired().filter(
-        action="custom_" + WF_RIGHT, created__gte=since, context__wf_account__startswith="u:")
+        action="custom_" + WF_RIGHT, created__gte=since, context__has_key="wf_user_pk").exclude(context__wf_user_pk=None)
     for key, value in context.items():
         rows = rows.filter(**{"context__" + key: value})
     if within is not None:
         import ipaddress
         rows = rows.extra(where=["client_ip <<= %s::inet"], params=[str(ipaddress.ip_network(within))])
-    rows = rows.values("context__wf_account").annotate(newest=Max("created")).order_by()[:WF_WORKPLACE_ACCOUNTS]
-    return [(r["newest"].timestamp(), {"wf_account": r["context__wf_account"]}) for r in rows]
+    # By the person (wf_user_pk), whichever of their names they typed.
+    rows = rows.values("context__wf_user_pk").annotate(newest=Max("created")).order_by()[:WF_WORKPLACE_ACCOUNTS]
+    return [(r["newest"].timestamp(), {"wf_account": "u:%d" % int(r["context__wf_user_pk"])}) for r in rows]
 
 
 def wf_ak_record(action, keep, address, user=None, **context):
@@ -410,7 +455,7 @@ def wf_ak_marker(user, now):
     return wf_marker(row[0], row[1], now) if row else None
 
 
-WF_MOST_ROWS = 2000                # newest tries read from one connection or /48 (only a workplace, never throttled, has more)
+WF_MOST_ROWS = 2000                # newest tries read from one connection or /48 (more than any throttle counts)
 
 
 def wf_ak_events(conn, account, user, now, spread):
@@ -432,8 +477,9 @@ def wf_ak_events(conn, account, user, now, spread):
         rights = rights + wf_ak_rows(WF_RIGHT, at(now - back), within=net)
         places.append((wf_ak_workplace_rows(at(now - WF_KNOWN_FOR), within=net), net))
     if spread and user is not None:
-        tries = tries + wf_ak_rows(WF_TRY, at(now - WF_SPREAD_DAY), wf_account=account)
-        rights = rights + wf_ak_rows(WF_RIGHT, at(now - WF_SPREAD_DAY), wf_account=account)
+        # The person's tries of the day, under any of their names.
+        tries = tries + wf_ak_rows(WF_TRY, at(now - WF_SPREAD_DAY), wf_user_pk=int(user.pk))
+        rights = rights + wf_ak_rows(WF_RIGHT, at(now - WF_SPREAD_DAY), wf_user_pk=int(user.pk))
     seen = set()
     events = []
     for e in wf_events(tries, "try") + wf_events(rights, "right"):

@@ -129,10 +129,15 @@ for key in ("wf-password-paused", "wf-password-try", "wf-password-right", "wf-co
     check(key + ": the address is authentik's own, through wf_ak_subject", "wf_ak_subject(request)" in body)
 try_policy = next((e for e in entries if "id: wf-password-try\n" in e), "")
 check("a try is recorded only for a request the stage checks", "wf_password_request(http.method, http.data)" in try_policy)
-check("under the connection's lock, then the pair's", "(WF_LOCK_CONN, \"conn:\" + conn), (WF_LOCK_PAIR," in try_policy)
+check("under the try's locks (the connection's, its /48's, the pair's)", "wf_ak_lock(cursor, *wf_ak_try_locks(account, conn))" in try_policy)
+pp = open(sys.argv[1].replace("workforce-app.yaml.j2", "password-pause.py"), encoding="utf-8").read()
+check("the /48's lock, between the connection's and the pair's (review finding 4)",
+      'return (WF_LOCK_CONN, "conn:" + conn), net, (WF_LOCK_PAIR, "pair:" + account + "|" + conn)' in pp
+      and 'net = (WF_LOCK_NET, "net:" + wf_network_key(conn)) if ":" in conn else None' in pp)
 check("in one transaction", "transaction.atomic" in try_policy)
 ident = next((e for e in entries if "name: default-authentication-identification }" in e), "")
 check("a name nobody has goes on like a real one", "pretend_user_exists: true" in ident)
+check("the password step shows every name as typed (review finding 1)", "show_matched_user: false" in ident)
 # Fix round (contract 3.8): a pause and a throttle each have their own words, the same for any name.
 pause_words = "Too many wrong passwords for this name, from this connection. Wait 15 minutes, then try again."
 throttle_words = "Too many wrong passwords from this connection. Wait 15 minutes, or use another connection"

@@ -164,12 +164,15 @@ Workforce issue 462 (ADR-0039, amendment of 14 November 2026). Nothing is ever l
   ("Too many wrong passwords for this name, from this connection…"). Requests during the pause are refused before
   the password is checked and aren't counted, so they can't stretch it. The same person can sign in at once from
   another connection (a phone's mobile data). Every account is treated alike, `admin` included, and a name nobody
-  has gets exactly the same answers, so the page never tells anyone which names exist.
+  has gets exactly the same answers, so the page never tells anyone which names exist. "Name" means the name as
+  typed, in any letter case (as the sign-in server matches names): a person's username and their email, where they
+  differ, each count apart, as two names nobody has would, and the password page shows the name as typed.
 - **The throttle.** Ten wrong passwords from one connection within 15 minutes, whatever names were typed, hold that
   connection for 15 minutes for every name ("Too many wrong passwords from this connection…"); for IPv6 also thirty
   from one /48. A **workplace** (a connection, or a /48, where three or more staff typed the right password in the
   last 30 days) is never throttled, so nobody in the building can keep the office out; each person's own pause
-  still applies there.
+  still applies there. A workplace /48 is still held after 300 wrong passwords within 15 minutes: a mobile
+  network's /48 can hold three staff phones and thousands of strangers, each able to take a fresh /64.
 - **Codes** keep their own count: five wrong codes for an account within 15 minutes, then 15 minutes' wait from the
   fifth ("That code was wrong too many times…"). Only someone with the password reaches the code step.
 
@@ -614,6 +617,12 @@ Not yet scheduled — run it at least monthly (nightly once automated).
   (their entrypoint becomes the app user before java starts), backup (it holds the docker socket) and the
   `volume-owners` one-shot. Not read-only: init, backup and webmail. `bin/check-hardening.py` fails CI if any of
   this is lost, and on an image not pinned by digest; `bin/digest-check.py` checks every pin daily.
+- The Workforce app's sign-in service account (its token is `secrets/ak_invite_token`, read by the app): it can change
+  accounts (invitations, resets, unlocks) and, since Workforce issue 462, read every sign-in server event, because
+  authentik's permission to read events isn't per kind. authentik keeps the body of each email it sends in its
+  `email_sent` event, so that includes live sign-in codes and reset links until the events expire. Its power to
+  change accounts already made a leaked token a takeover; treat it as the most sensitive secret on the server after
+  the database's (review of 14 November 2026, finding 5).
 - Seccomp and AppArmor: the TEST appliance's rootless Docker (inside an unprivileged Incus container) applies
   neither, so a problem either would cause can't show there (Workforce issue 414).
 - Off-site backups: provide an S3/rsync target at install time, and keep the private key off the server

