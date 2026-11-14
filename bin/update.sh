@@ -18,6 +18,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 [ -f .env ] || { echo "No .env here. Run ./bin/install.sh first."; exit 1; }
+# shellcheck source=lib/env-file.sh
+. ./bin/lib/env-file.sh
+ENV_PROBLEM="$(env_file_problem .env)"
+[ -z "$ENV_PROBLEM" ] || { echo "Nothing was changed: $ENV_PROBLEM"; exit 1; }
 # shellcheck disable=SC1091
 . ./.env
 # shellcheck source=lib/common.sh
@@ -34,6 +38,16 @@ use_docker_socket
 . ./bin/lib/client-address.sh
 GTP_PROBLEM="$(gateway_proxies_problem)"
 [ -z "$GTP_PROBLEM" ] || { echo "$GTP_PROBLEM (RUNBOOK §7a). Nothing was changed."; exit 1; }
+# The TEST appliance confirms its testers' tailnet for the readiness check (environments/test.env; review finding
+# 13): a box installed before that has no line for it, and update.sh never re-renders .env. Added once; a line the
+# operator wrote, even an empty one, is theirs.
+if [ "${ENV_NAME:-}" = test ] && ! grep -q '^CLIENT_ADDRESSES_CONFIRMED=' .env; then
+  TEST_CONFIRMED="$(env_get CLIENT_ADDRESSES_CONFIRMED environments/test.env)"
+  if [[ "$TEST_CONFIRMED" =~ ^[0-9a-fA-F.:/,]+$ ]] && env_set CLIENT_ADDRESSES_CONFIRMED "$TEST_CONFIRMED" .env; then
+    CLIENT_ADDRESSES_CONFIRMED="$TEST_CONFIRMED"
+    echo "     The TEST appliance's tailnet (${TEST_CONFIRMED}) is confirmed as the testers' own for the client-address check."
+  fi
+fi
 
 # The backup container runs the nightly backup and the health watch through this socket. An older
 # install recorded the system socket on a rootless host: permission denied in the container, so

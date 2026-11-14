@@ -13,8 +13,8 @@ mkdir -p "$WORK/bin"
 cat > "$WORK/bin/docker" <<'SH'
 #!/usr/bin/env bash
 case "$1 $2" in
-  "network ls") echo n1; echo n2 ;;
-  "network inspect") case "$*" in *n1*) echo 172.18.0.0/16 ;; *) echo 172.19.0.0/16 ;; esac ;;
+  "network ls") [ -n "${FAKE_NO_NETS:-}" ] || { echo n1; echo n2; } ;;
+  "network inspect") case "$*" in *n1*) echo 172.18.0.0/16 ;; *) echo 172.19.0.0/16; echo fd00:5:0:1::/64 ;; esac ;;
   "run --rm") printf '%s\n' "$*" > "$DOCKER_RUN_LOG"; printf '%s' "$FAKE_ANSWER" ;;
 esac
 SH
@@ -41,6 +41,30 @@ check "a range around them" "$(ok "172.16.0.0/12")" refused
 check "far too wide" "$(ok "10.0.0.0/7")" refused
 check "not an address" "$(ok "proxy.example.org")" refused
 check "IPv6 link-local" "$(ok "fe80::1")" refused
+check "inside this stack's IPv6 network (review finding 12)" "$(ok "fd00:5:0:1::9")" refused
+check "a range around it" "$(ok "fd00:5::/48")" refused
+check "another IPv6 range" "$(ok "fd00:6::/48")" ok
+# Before the first install the stack has no networks yet (review finding 6): Docker's default pools are refused.
+check "no networks yet: Docker's pools' 172.16.0.0/12" "$(FAKE_NO_NETS=1 ok "172.16.0.0/12")" refused
+check "no networks yet: an address in 172.20.0.0/16" "$(FAKE_NO_NETS=1 ok "172.20.0.5")" refused
+check "no networks yet: 192.168.0.0/16's /20s" "$(FAKE_NO_NETS=1 ok "192.168.1.10/32")" refused
+check "no networks yet: saying when to name it" "$(FAKE_NO_NETS=1 gateway_proxies_problem "172.20.0.5" | grep -c 'after the first install')" 1
+check "no networks yet: a public proxy is fine" "$(FAKE_NO_NETS=1 ok "203.0.113.10 198.51.100.0/24")" ok
+check "no networks yet: 172.16.0.0/16 (outside Docker's pools)" "$(FAKE_NO_NETS=1 ok "172.16.4.4")" ok
+check "networks made: a LAN proxy in 192.168 outside them is fine" "$(ok "192.168.1.10/32")" ok
+
+# ---- IPv6 ranges (review finding 12)
+check "ip6_hex expands" "$(ip6_hex 2001:DB8::1)" 20010db8000000000000000000000001
+check "ip6_hex: all eight groups" "$(ip6_hex 1:2:3:4:5:6:7:8)" 00010002000300040005000600070008
+check "ip6_hex: not an address" "$(ip6_hex 1::2::3 || echo no)" no
+check "ip6_hex: too many groups" "$(ip6_hex 1:2:3:4:5:6:7:8:9 || echo no)" no
+check "ip6_hex: a trailing colon" "$(ip6_hex 1:2:3:4:5:6:7: || echo no)" no
+o6() { cidr6_overlap "$1" "$2" && echo yes || echo no; }
+check "a /64 inside a /48" "$(o6 2001:db8:aa:1::/64 2001:db8:aa::/48)" yes
+check "a /64 outside it" "$(o6 2001:db8:ab:1::/64 2001:db8:aa::/48)" no
+check "a /47 boundary" "$(o6 2001:db8:ab::/64 2001:db8:aa::/47)" yes
+check "an address inside a /64" "$(o6 2001:db8:aa:1::/64 2001:db8:aa:1:5::7)" yes
+check "the next /64" "$(o6 2001:db8:aa:2::/64 2001:db8:aa:1:5::7)" no
 
 # ---- the probe's record
 AUTH_HOSTNAME=auth.example.org
@@ -54,7 +78,7 @@ check "from the gateway's outside network (front), with the pinned curl image" \
 check "through the gateway, to the address check, with every forged header" \
   "$(printf '%s' "$RUN_ARGS" | grep -c -- "--connect-to auth.example.org:443:gateway:443 .*X-Forwarded-For: 198.51.100.11, 198.51.100.12.*CF-Connecting-IP: 198.51.100.18 https://auth.example.org/api/v3/flows/executor/workforce-client-address/")" 1
 client_address_read; check "and read back" "$CA_OK $CA_SEEN $CA_PROBE" "true 172.18.0.9 172.18.0.9"
-check "with the stack's networks" "$CA_NETWORKS_KNOWN $(printf '%s' "$CA_NETWORKS" | paste -sd' ' -)" "yes 172.18.0.0/16 172.19.0.0/16"
+check "with the stack's networks" "$CA_NETWORKS_KNOWN $(printf '%s' "$CA_NETWORKS" | paste -sd' ' -)" "yes 172.18.0.0/16 172.19.0.0/16 fd00:5:0:1::/64"
 FAKE_ANSWER=$'{"error_message":"workforce-client-address=198.51.100.11"}\n172.18.0.9\n200' client_address_probe >/dev/null; rc=$?
 client_address_read
 check "a forged address: FAIL" "$rc $CA_OK" "1 false"
@@ -79,7 +103,7 @@ check "doctor.sh reads GATEWAY_TRUSTED_PROXIES with a default" \
 # ---- where sign-ins came from
 judge() { # judge <WF lines> → "<state>: <detail>"
   CA_STATE=ok; CA_DETAIL=""; CA_CONFIRMED_NOTE=""
-  OWN_SET=(10.0.2.0/24 127.0.0.0/8 172.18.0.0/16)
+  OWN_SET=(10.0.2.0/24 127.0.0.0/8 172.18.0.0/16 ${OWN_SET_EXTRA:-})
   client_address_signins "$1"
   printf '%s: %s' "$CA_STATE" "$CA_DETAIL"
 }
@@ -89,6 +113,10 @@ check "people from several addresses: OK" "$(judge "$SPREAD")" "ok: "
 r="$(judge $'WFCONN 172.18.0.1 in 4 3\nWFSIGNINS 4 3\nWFFWD 0 -')"
 check "sign-ins from this server's own network: FAIL" "${r%%:*}" fail
 check "naming it" "$(printf '%s' "$r" | grep -c '172.18.0.1, this server')" 1
+r="$(OWN_SET_EXTRA=2001:db8:aa::/48 judge $'WFCONN 2001:db8:aa:1::/64 in 1 1\nWFSIGNINS 1 1\nWFFWD 0 -')"
+check "sign-ins from an IPv6 proxy named by its range: FAIL (review finding 12)" "${r%%:*}" fail
+check "naming the /64" "$(printf '%s' "$r" | grep -c '2001:db8:aa:1::/64, this server')" 1
+check "a /64 outside the named range: not this rule" "$(OWN_SET_EXTRA=2001:db8:aa::/48 judge $'WFCONN 2001:db8:ab:1::/64 in 1 1\nWFSIGNINS 1 1\nWFFWD 0 -')" "ok: "
 check "a wrong password from it counts too" "$(judge $'WFCONN 203.0.113.1 in 1 1\nWFCONN 10.0.2.2 try 1 1\nWFSIGNINS 1 1\nWFFWD 0 -' | cut -d: -f1)" fail
 ONE=$'WFCONN 203.0.113.7 in 5 4\nWFSIGNINS 5 4\nWFFWD 0 -'
 r="$(judge "$ONE")"
@@ -120,6 +148,30 @@ check "half or fewer: not this rule" "$(judge "${FWD/WFFWD 3/WFFWD 2}")" "ok: "
 CLIENT_ADDRESSES_CONFIRMED="203.0.113.1 203.0.113.2 203.0.113.3"
 check "every address they came through confirmed: OK" "$(judge "$FWD")" "ok: "
 CLIENT_ADDRESSES_CONFIRMED=""
+# Ranges confirm every connection in them (review finding 13: the TEST appliance's tailnet).
+TAILNET=$'WFCONN 100.101.7.8 in 3 2\nWFSIGNINS 3 2\nWFFWD 0 -'
+check "testers from one tailnet device: FAIL unconfirmed" "$(judge "$TAILNET" | cut -d: -f1)" fail
+CLIENT_ADDRESSES_CONFIRMED="100.64.0.0/10"
+check "the tailnet confirmed as a range (environments/test.env): OK" "$(judge "$TAILNET")" "ok: "
+check "the TEST environment confirms it" "$(grep -c '^CLIENT_ADDRESSES_CONFIRMED=100.64.0.0/10$' "$HERE/../../environments/test.env")" 1
+CLIENT_ADDRESSES_CONFIRMED="2001:db8:7::/48,203.0.113.0/29"
+check "an IPv6 range confirms a /64 in it" "$(client_address_confirmed 2001:db8:7:3::/64 && echo yes || echo no)" yes
+check "but not one outside it" "$(client_address_confirmed 2001:db8:8:3::/64 && echo yes || echo no)" no
+check "an IPv4 range confirms an address in it" "$(client_address_confirmed 203.0.113.6 && echo yes || echo no)" yes
+check "but not the next" "$(client_address_confirmed 203.0.113.8 && echo yes || echo no)" no
+CLIENT_ADDRESSES_CONFIRMED=""
+# The program's summary lines come first, and the whole is over every connection (review finding 9): with more
+# connections than doctor.sh reads, the summaries are still there, and a cut list doesn't fake a concentration.
+AK_ORDER="$(printf '%s\n' "$CLIENT_ADDRESS_AK" | grep -nE '^print\("WF(SIGNINS|INSUM|FWD|ALERTS|CONN)' | cut -d: -f1 | paste -sd' ' -)"
+check "the program prints its summaries before any connection" \
+  "$(printf '%s\n' "$CLIENT_ADDRESS_AK" | awk '/^print\("WF(SIGNINS|INSUM|FWD|ALERTS)/ {s = NR} /print\("WFCONN"/ && !c {c = NR} END {print (s < c) ? "yes" : "no"}')" yes
+check "and lists at most 1000 connections" "$(printf '%s\n' "$CLIENT_ADDRESS_AK" | grep -c '\[:500\]:')" 2
+check "never public addresses that only tried" "$(printf '%s\n' "$CLIENT_ADDRESS_AK" | grep -c 'kind == "try" and public(conn)')" 1
+check "doctor.sh keeps the whole" "$(grep -c 'WF(CONN|SIGNINS|INSUM|FWD|ALERTS)' "$HERE/../doctor.sh")" 1
+[ -n "$AK_ORDER" ] || check "the program's print lines" "" found
+CUT=$'WFSIGNINS 10 4\nWFINSUM 10\nWFFWD 0 -\nWFALERTS 0 0 0\nWFCONN 203.0.113.7 in 5 4'
+check "a cut list: half from one address is no concentration" "$(judge "$CUT")" "ok: "
+check "without the whole it would have looked like one" "$(judge "$(printf '%s\n' "$CUT" | grep -v WFINSUM)" | cut -d: -f1)" warn
 check "no sign-in yet: nothing found here (doctor.sh says not checked yet)" "$(judge $'WFSIGNINS 0 0\nWFFWD 0 -')" "ok: "
 
 echo "client address self-test: ${PASS} passed, ${FAILN} failed"

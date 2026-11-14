@@ -82,6 +82,13 @@ if [ ! -f .env ]; then
   row "configuration" fail ".env missing — the installer has not run here (./bin/install.sh --env prod)"
   finish
 fi
+# shellcheck source=lib/env-file.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/env-file.sh"
+ENV_PROBLEM="$(env_file_problem .env)"
+if [ -n "$ENV_PROBLEM" ]; then
+  row "configuration" fail "$ENV_PROBLEM"
+  finish
+fi
 # shellcheck disable=SC1091
 . ./.env
 
@@ -426,12 +433,12 @@ if under_controller; then
     ca_worse fail "the server's own networks couldn't be read (the controller's address check found none), so sign-ins from them can't be told apart. See RUNBOOK §7a."
   fi
 else
-  while read -r n; do [ -z "$n" ] || OWN_SET+=("$n"); done < <(stack_networks | grep -v : || true)
+  while read -r n; do [ -z "$n" ] || OWN_SET+=("$n"); done < <(stack_networks || true)
 fi
 GTP_LIST="${GATEWAY_TRUSTED_PROXIES:-}"; for n in ${GTP_LIST//,/ }; do OWN_SET+=("$n"); done
 CA_ASKED=0; SIGNIN_ALERTS=""
 if docker compose ps --status running -q authentik-server 2>/dev/null | grep -q .; then
-  CA_OUT="$(docker compose exec -T authentik-server ak shell -c "$CLIENT_ADDRESS_AK" 2>/dev/null | grep -E '^WF(CONN|SIGNINS|FWD|ALERTS) ' | head -n 2000)" || CA_OUT=""
+  CA_OUT="$(docker compose exec -T authentik-server ak shell -c "$CLIENT_ADDRESS_AK" 2>/dev/null | grep -E '^WF(CONN|SIGNINS|INSUM|FWD|ALERTS) ' | head -n 2000)" || CA_OUT=""
   if printf '%s\n' "$CA_OUT" | grep -q '^WFSIGNINS '; then
     CA_ASKED=1
     client_address_signins "$CA_OUT"

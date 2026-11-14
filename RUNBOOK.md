@@ -283,17 +283,23 @@ sign-in server takes `X-Forwarded-For` only from the stack's own private network
 - The appliance controller (the same rules for its Docker).
 - **Your own load balancer or reverse proxy** in front of the gateway: supported only when it sets
   `X-Forwarded-For` and is named in `GATEWAY_TRUSTED_PROXIES` in `.env` (its addresses or CIDRs, **separated by
-  spaces**, e.g. `GATEWAY_TRUSTED_PROXIES=203.0.113.10/32 203.0.113.11/32`), then `./bin/update.sh <running
-  version>`. Name **every** proxy or CDN in front, including all of a CDN's outgoing ranges. The gateway then reads
+  spaces, the whole value in single quotes**, e.g. `GATEWAY_TRUSTED_PROXIES='203.0.113.10/32 203.0.113.11/32'`:
+  without the quotes the scripts can't read `.env`, and `update.sh`, `doctor.sh` and the backup refuse to run until
+  it's fixed), then `./bin/update.sh <running version>`. Name **every** proxy or CDN in front, including all of a CDN's outgoing ranges. The gateway then reads
   `X-Forwarded-For` right to left and takes the first address that isn't one of them, so a forged left-hand entry
   can't choose it. `install.sh` and `update.sh` refuse a value that names everyone, loopback, link-local, the
-  rootless network's `10.0.2.0/24` or one of this stack's Docker networks.
+  rootless network's `10.0.2.0/24` or one of this stack's Docker networks (IPv4 or IPv6). Before the first install
+  those networks don't exist yet, so `install.sh` also refuses anything in Docker's default pools (`172.17.0.0/16`
+  to `172.31.0.0/16`, `192.168.0.0/16`): name a proxy there after the first install, with `./bin/update.sh`.
 - Not supported: a TCP pass-through that translates addresses, and the PROXY protocol (a later issue if needed).
 
 **Your offices.** When most sign-ins come through one or two internet addresses, that looks exactly like a proxy
 nobody named, so the check asks you to say which it is. If they are your offices' own connections, list them in
-`CLIENT_ADDRESSES_CONFIRMED` in `.env`, separated by commas (an IPv6 connection as the check names it, e.g.
-`2001:db8:1:2::/64`). It is read by the check only, never to let anyone in or to skip a limit.
+`CLIENT_ADDRESSES_CONFIRMED` in `.env`, separated by commas with no spaces, or the whole value in single quotes
+(an IPv6 connection as the check names it, e.g. `2001:db8:1:2::/64`; a range such as `203.0.113.0/29` confirms
+every address in it). It is read by the check only, never to let anyone in or to skip a limit. The TEST appliance
+confirms its tailnet (`100.64.0.0/10`, `environments/test.env`), so testers signing in as several people from one
+device don't turn the row red; on an existing TEST box, `./bin/update.sh` adds it.
 
 **The check** (`./bin/doctor.sh`, row "client addresses"; Workforce's Setup shows it as "Sign-in limits see each
 person's own connection", and only OK is ready):

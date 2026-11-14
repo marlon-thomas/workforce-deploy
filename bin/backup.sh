@@ -41,6 +41,10 @@ case "${1:-}" in
 esac
 
 [ -f .env ] || { echo "No .env here. Run ./bin/install.sh first."; exit 1; }
+# shellcheck source=lib/env-file.sh
+. ./bin/lib/env-file.sh
+ENV_PROBLEM="$(env_file_problem .env)"
+[ -z "$ENV_PROBLEM" ] || { echo "No backup was made: $ENV_PROBLEM"; exit 1; }
 # shellcheck disable=SC1091
 . ./.env
 # shellcheck source=lib/common.sh

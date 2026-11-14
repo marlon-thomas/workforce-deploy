@@ -51,6 +51,58 @@ cidr4_overlap() {
   a="$(cidr4_split "$1")" && b="$(cidr4_split "$2")" || return 1
   in_cidr4 "${a% *}" "$2" || in_cidr4 "${b% *}" "$1"
 }
+# ip6_hex <address> — the 32 hex digits of an IPv6 address (no zone, no IPv4 tail), or non-zero. Plain text only:
+# nothing here goes through bash arithmetic before it is checked.
+ip6_hex() {
+  local a="${1,,}" head tail g out="" n=0 i
+  local -a H=() T=()
+  [[ "$a" =~ ^[0-9a-f:]{2,39}$ ]] || return 1
+  case "$a" in *:::*) return 1 ;; esac
+  if [[ "$a" == *::* ]]; then
+    head="${a%%::*}"; tail="${a#*::}"
+    [[ "$tail" != *::* ]] || return 1
+    [ -z "$head" ] || IFS=: read -r -a H <<< "$head"
+    [ -z "$tail" ] || IFS=: read -r -a T <<< "$tail"
+    n=$(( 8 - ${#H[@]} - ${#T[@]} ))
+    [ "$n" -ge 1 ] || return 1
+  else
+    IFS=: read -r -a H <<< "$a"
+    [ "${#H[@]}" -eq 8 ] && [[ "$a" != *: ]] || return 1
+  fi
+  for g in "${H[@]}"; do [[ "$g" =~ ^[0-9a-f]{1,4}$ ]] || return 1; out+="$(printf '%4s' "$g" | tr ' ' 0)"; done
+  for (( i = 0; i < n; i++ )); do out+=0000; done
+  for g in "${T[@]}"; do [[ "$g" =~ ^[0-9a-f]{1,4}$ ]] || return 1; out+="$(printf '%4s' "$g" | tr ' ' 0)"; done
+  [ "${#out}" -eq 32 ] || return 1
+  printf '%s\n' "$out"
+}
+# cidr6_split <text> — an IPv6 address or CIDR (a bare address is /128). Prints "hex bits".
+cidr6_split() {
+  local a="${1%/*}" b=128 h
+  [ "$a" = "$1" ] || b="${1#*/}"
+  [[ "$b" =~ ^[0-9]{1,3}$ ]] && [ "$((10#$b))" -le 128 ] || return 1
+  h="$(ip6_hex "$a")" || return 1
+  printf '%s %d\n' "$h" "$((10#$b))"
+}
+# cidr6_overlap <CIDR> <CIDR> — the two IPv6 ranges share an address (a connection key such as 2001:db8:1:2::/64 is
+# a range too).
+cidr6_overlap() {
+  local a b ha hb m k r
+  a="$(cidr6_split "$1")" && b="$(cidr6_split "$2")" || return 1
+  ha="${a% *}"; hb="${b% *}"; m="${a#* }"; [ "${b#* }" -ge "$m" ] || m="${b#* }"
+  k=$(( m / 4 )); r=$(( m % 4 ))
+  [ "${ha:0:k}" = "${hb:0:k}" ] || return 1
+  [ "$r" -eq 0 ] && return 0
+  [ $(( (16#${ha:k:1} ^ 16#${hb:k:1}) >> (4 - r) )) -eq 0 ]
+}
+# cidr_overlap <CIDR> <CIDR> — either family; IPv4 never overlaps IPv6.
+cidr_overlap() {
+  case "$1|$2" in
+    *:*\|*:*) cidr6_overlap "$1" "$2" ;;
+    *:*\|*|*\|*:*) return 1 ;;
+    *) cidr4_overlap "$1" "$2" ;;
+  esac
+}
+
 # ip_private <key> — a connection key in a private range: 10/8, 172.16/12, 192.168/16, 100.64/10 (carrier and
 # tailnet addresses), fc00::/7.
 ip_private() {
@@ -73,11 +125,13 @@ stack_networks() {
 
 # gateway_proxies_problem [value] — why GATEWAY_TRUSTED_PROXIES (or the value given) can't be used, or nothing.
 # Space-separated IPv4 or IPv6 addresses or CIDRs (Caddy reads it so; a comma is refused, not guessed at). Never
-# everything, loopback, link-local, the rootless network's own 10.0.2.0/24, or any of this stack's networks: a
-# proxy named there would let any container choose a client's address.
+# everything, loopback, link-local, the rootless network's own 10.0.2.0/24, or any of this stack's networks (IPv4 or
+# IPv6), and before they exist nothing in Docker's default pools: a proxy named there would let any container
+# choose a client's address.
 gateway_proxies_problem() {
-  local value="${1-${GATEWAY_TRUSTED_PROXIES:-}}" r n
+  local value="${1-${GATEWAY_TRUSTED_PROXIES:-}}" r n nets
   [ -n "${value// /}" ] || return 0
+  nets="$(stack_networks || true)"
   case "$value" in *,*) echo "GATEWAY_TRUSTED_PROXIES is separated by commas: use spaces (203.0.113.10/32 203.0.113.11/32)"; return 0 ;; esac
   for r in $value; do
     case "$r" in
@@ -85,7 +139,12 @@ gateway_proxies_problem() {
       *:*)
         [[ "$r" =~ ^[0-9a-fA-F:]+(/[0-9]{1,3})?$ ]] || { echo "GATEWAY_TRUSTED_PROXIES: '$r' is not an address or CIDR"; return 0; }
         case "${r,,}" in ::1|::1/*|fe8*|fe9*|fea*|feb*|::/*) echo "GATEWAY_TRUSTED_PROXIES must not name loopback or link-local ($r)"; return 0 ;; esac
-        [ "${r#*/}" = "$r" ] || [ "${r#*/}" -ge 32 ] || { echo "GATEWAY_TRUSTED_PROXIES: $r is far too wide for a proxy"; return 0; } ;;
+        [ "${r#*/}" = "$r" ] || [ "${r#*/}" -ge 32 ] || { echo "GATEWAY_TRUSTED_PROXIES: $r is far too wide for a proxy"; return 0; }
+        cidr6_split "$r" >/dev/null || { echo "GATEWAY_TRUSTED_PROXIES: '$r' is not an address or CIDR"; return 0; }
+        while read -r n; do
+          [ -n "$n" ] || continue
+          if cidr6_overlap "$r" "$n"; then echo "GATEWAY_TRUSTED_PROXIES must not name one of this server's Docker networks ($r overlaps $n)"; return 0; fi
+        done < <(printf '%s\n' "$nets" | grep : || true) ;;
       *)
         cidr4_split "$r" >/dev/null || { echo "GATEWAY_TRUSTED_PROXIES: '$r' is not an address or CIDR"; return 0; }
         [ "$(cidr4_split "$r" | cut -d' ' -f2)" -ge 8 ] || { echo "GATEWAY_TRUSTED_PROXIES: $r is far too wide for a proxy"; return 0; }
@@ -95,9 +154,24 @@ gateway_proxies_problem() {
         while read -r n; do
           [ -n "$n" ] || continue
           if cidr4_overlap "$r" "$n"; then echo "GATEWAY_TRUSTED_PROXIES must not name one of this server's Docker networks ($r overlaps $n)"; return 0; fi
-        done < <(stack_networks | grep -v :) ;;
+        done < <(printf '%s\n' "$nets" | grep -v : || true)
+        # Before the first install there are no networks yet to compare with (review finding 6): Docker will make
+        # them from its default pools, and the gateway would then trust its own networks and the Docker gateway some
+        # clients arrive through. So nothing in those pools until they exist; update.sh checks the real ones.
+        if ! printf '%s\n' "$nets" | grep -q '^[0-9]'; then
+          for n in $(docker_default_pools); do
+            if cidr4_overlap "$r" "$n"; then echo "GATEWAY_TRUSTED_PROXIES: $r overlaps Docker's default network pools ($n), where this server's own networks will be made. Name it after the first install: ./bin/update.sh then checks it against the networks Docker chose"; return 0; fi
+          done
+        fi ;;
     esac
   done
+}
+# docker_default_pools — the ranges Docker makes networks from unless its daemon is told otherwise: 172.17.0.0/16 to
+# 172.31.0.0/16, then 192.168.0.0/16.
+docker_default_pools() {
+  local i
+  for i in $(seq 17 31); do printf '172.%d.0.0/16\n' "$i"; done
+  printf '192.168.0.0/16\n'
 }
 
 # client_address_front — the gateway's outside-facing Docker network (compose.yaml's `front`) of this installation,
@@ -188,12 +262,21 @@ client_address_read() {
 }
 
 # What the sign-in server recorded about where sign-ins came from (doctor.sh's part b), counted inside authentik:
-# connection keys only, never a name. One line each:
-#   WFCONN <key> <in|try> <accounts> <days>    a connection sign-ins (in) or password tries (try) came from
+# connection keys only, never a name. The summary lines first, so that no number of connections can push them out
+# of what doctor.sh reads (review finding 9: a /48 spreading tries over thousands of /64s did), then the
+# connections, at most 1000 lines:
 #   WFSIGNINS <accounts> <days>                sign-ins of the last 7 days, all together
+#   WFINSUM <n>                                over every sign-in connection, its accounts added up (the
+#                                              concentration rule's whole, however many connections are listed)
 #   WFFWD <accounts> <key,key,…>               of those, accounts whose right password came through a peer nobody named
 #                                              in GATEWAY_TRUSTED_PROXIES (wf_fwd), and from where (at most 20)
 #   WFALERTS <connection-spread> <account-spread> <throttled>   alerts of the last day (contract 3.6)
+#   WFCONN <key> <in|try> <accounts> <days>    a connection sign-ins (in) or password tries (try) came from: every
+#                                              one outside the public internet (this server's own networks are
+#                                              there; at most 500), then the public sign-in ones, most accounts
+#                                              first (at most 500). Public addresses that only tried a password are
+#                                              never listed: an attacker has as many as they like.
+# An account is the real account (its pk) wherever the records name one, whichever form of its name was typed.
 # The program is passed word for word (the controller's allow-list compares it): change both together.
 # shellcheck disable=SC2016
 CLIENT_ADDRESS_AK='import ipaddress
@@ -209,6 +292,11 @@ def key(a):
     if ip.version == 6 and ip.ipv4_mapped is not None:
         return str(ip.ipv4_mapped)
     return str(ip) if ip.version == 4 else str(ipaddress.ip_network((ip, 64), strict=False))
+def public(k):
+    try:
+        return ipaddress.ip_network(k, strict=False).is_global
+    except ValueError:
+        return False
 t = now()
 seen = {}
 people = set()
@@ -220,8 +308,10 @@ for action, ip, ctx, user, created in rows.values_list("action", "client_ip", "c
     if action == "login":
         conn, who, kind = key(ip), "u:%s" % ((user or {}).get("pk") if isinstance(user, dict) else ""), "in"
     else:
-        conn, who, kind = key(ctx.get("wf_conn")), str(ctx.get("wf_account") or ""), "in" if action.endswith("right") else "try"
-    if not conn:
+        pk = ctx.get("wf_user_pk")
+        who = "u:%s" % pk if isinstance(pk, int) else str(ctx.get("wf_account") or "")
+        conn, kind = key(ctx.get("wf_conn")), "in" if action.endswith("right") else "try"
+    if not conn or (kind == "try" and public(conn)):
         continue
     s = seen.setdefault((conn, kind), [set(), set()])
     s[0].add(who)
@@ -231,21 +321,35 @@ for action, ip, ctx, user, created in rows.values_list("action", "client_ip", "c
         days.add(created.date())
         if ctx.get("wf_fwd") is True:
             fwd.setdefault(who, set()).add(conn)
-for (conn, kind), (who, when) in sorted(seen.items()):
-    print("WFCONN", conn.replace(" ", ""), kind, len(who), len(when))
 print("WFSIGNINS", len(people), len(days))
+print("WFINSUM", sum(len(w) for (c, k), (w, d) in seen.items() if k == "in"))
 print("WFFWD", len(fwd), ",".join(sorted(set(c.replace(" ", "") for cs in fwd.values() for c in cs))[:20]) or "-")
 alerts = Event.objects.filter(created__gte=t - timedelta(days=1), action="custom_workforce_password_alert")
 kinds = [str((c or {}).get("wf_kind")) for c in alerts.values_list("context", flat=True)]
-print("WFALERTS", kinds.count("connection-spread"), kinds.count("account-spread"), kinds.count("throttled"))'
+print("WFALERTS", kinds.count("connection-spread"), kinds.count("account-spread"), kinds.count("throttled"))
+inside = sorted((c, k, len(w), len(d)) for (c, k), (w, d) in seen.items() if not public(c))
+outside = sorted(((len(w), c, len(d)) for (c, k), (w, d) in seen.items() if k == "in" and public(c)), key=lambda x: (-x[0], x[1]))
+for c, k, n, d in inside[:500]:
+    print("WFCONN", c.replace(" ", ""), k, n, d)
+for n, c, d in outside[:500]:
+    print("WFCONN", c.replace(" ", ""), "in", n, d)'
 
 # client_addresses_confirmed <key> — the operator confirmed this address as an office's own connection
-# (CLIENT_ADDRESSES_CONFIRMED: addresses or connection keys, separated by commas or spaces). Used by the readiness
-# check's concentration and forwarding rules only; never by the gateway or the sign-in server.
+# (CLIENT_ADDRESSES_CONFIRMED: addresses, connection keys or ranges, separated by commas or spaces). Used by the
+# readiness check's concentration and forwarding rules only; never by the gateway or the sign-in server. A range
+# confirms every connection inside it (the TEST appliance confirms its tailnet, 100.64.0.0/10: environments/test.env).
 client_address_confirmed() {
   local c list="${CLIENT_ADDRESSES_CONFIRMED:-}"
   for c in ${list//,/ }; do
-    [ "${c,,}" = "$1" ] && return 0   # IPv6: the connection key, e.g. 2001:db8:1:2::/64, as the check names it
+    c="${c,,}"
+    [ "$c" = "$1" ] && return 0   # IPv6: the connection key, e.g. 2001:db8:1:2::/64, as the check names it
+    case "$c|$1" in
+      *:*/*\|*:*) # an IPv6 range: the whole /64 inside it
+        local cb="${c#*/}"
+        [[ "$cb" =~ ^[0-9]{1,3}$ ]] && [ "$((10#$cb))" -le 64 ] && cidr6_overlap "$1" "$c" && return 0 ;;
+      *:*|*\|*:*) ;;
+      */*\|*) in_cidr4 "$1" "$c" && return 0 ;;
+    esac
   done
   return 1
 }
@@ -264,7 +368,7 @@ own_address() { # own_address <key> — a connection key in this server's own se
   case "$1" in ::/64|fe8*|fe9*|fea*|feb*) return 0 ;; esac
   local r
   for r in "${OWN_SET[@]}"; do
-    case "$r" in *:*) [ "$1" = "$r" ] && return 0 ;; *) in_cidr4 "$1" "$r" && return 0 ;; esac
+    case "$r" in *:*) cidr6_overlap "$1" "$r" && return 0 ;; *) in_cidr4 "$1" "$r" && return 0 ;; esac
   done
   return 1
 }
@@ -275,7 +379,9 @@ own_address() { # own_address <key> — a connection key in this server's own se
 client_address_signins() {
   local CA_OUT="$1" IN_CONNS TOTAL TOP1 TOP2 CONC UNCONFIRMED PRIVATE WORDS FWD_UNCONFIRMED k key
   CA_FWD=""; CA_FWD_FROM=""
+  local IN_SUM
   read -r _ CA_PEOPLE CA_DAYS <<< "$(printf '%s\n' "$CA_OUT" | grep '^WFSIGNINS ' | tail -n 1)"
+  read -r _ IN_SUM <<< "$(printf '%s\n' "$CA_OUT" | grep '^WFINSUM ' | tail -n 1)"
   read -r _ CA_FWD CA_FWD_FROM <<< "$(printf '%s\n' "$CA_OUT" | grep '^WFFWD ' | tail -n 1)"
   SIGNIN_ALERTS="$(printf '%s\n' "$CA_OUT" | grep '^WFALERTS ' | tail -n 1)"
   # Sign-in connections by how many accounts signed in from each, most first (an account counts once per address).
@@ -291,6 +397,8 @@ client_address_signins() {
   # or two offices look like: the operator says which (GATEWAY_TRUSTED_PROXIES, or CLIENT_ADDRESSES_CONFIRMED).
   if ca_count "$CA_PEOPLE" && ca_count "$CA_DAYS" && [ "$CA_PEOPLE" -ge 3 ] && [ "$CA_DAYS" -ge 2 ] && [ -n "$IN_CONNS" ]; then
     TOTAL="$(printf '%s\n' "$IN_CONNS" | awk '{s += $1} END {print s + 0}')"
+    # Over every sign-in connection, not only those listed (the program lists at most 500 public ones).
+    if ca_count "${IN_SUM:-}" && [ "$IN_SUM" -gt "$TOTAL" ]; then TOTAL="$IN_SUM"; fi
     TOP1="$(printf '%s\n' "$IN_CONNS" | sed -n 1p)"; TOP2="$(printf '%s\n' "$IN_CONNS" | sed -n 2p)"
     CONC=()
     if [ $(( ${TOP1%% *} * 100 )) -ge $(( TOTAL * 80 )) ]; then CONC=("${TOP1#* }")
