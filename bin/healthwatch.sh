@@ -269,7 +269,7 @@ use_signin_route() {
     SMTP_PORT="${SIGNIN_SMTP_PORT:-587}"
     SMTP_USERNAME="${SIGNIN_SMTP_USERNAME:-}"
     SMTP_PASSWORD="${SIGNIN_SMTP_PASSWORD:-}"
-    SMTP_STARTTLS="${SIGNIN_SMTP_STARTTLS:-false}"
+    SMTP_STARTTLS="${SIGNIN_SMTP_STARTTLS:-true}"  # STARTTLS unless turned off on purpose (as authentik/email-route.sh)
     SMTP_FROM="${SIGNIN_SMTP_FROM:-${SMTP_FROM:-}}"
   fi
 }

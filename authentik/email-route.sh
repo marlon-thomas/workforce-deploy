@@ -3,6 +3,9 @@
 # codes use, chosen as ONE route. With SIGNIN_SMTP_HOST set, only SIGNIN_SMTP_* values are used, even empty ones,
 # so a sign-in relay never gets the staff relay's username or password. Without it, only SMTP_*. Port 465 means
 # implicit TLS. The raw values are removed from the environment before authentik starts.
+# Review of the controller bundle (finding 2): the sign-in route uses STARTTLS unless SIGNIN_SMTP_STARTTLS=false
+# is set on purpose (the test appliance's local catcher): the codes, and the relay's password, never cross the
+# internet unencrypted by default.
 #
 # Mounted read-only by compose.yaml; self-tested by bin/tests/email-route-test.sh (with a stand-in for `ak`).
 set -eu
@@ -12,7 +15,7 @@ if [ -n "${SIGNIN_SMTP_HOST:-}" ]; then
   port="${SIGNIN_SMTP_PORT:-587}"
   user="${SIGNIN_SMTP_USERNAME:-}"
   pass="${SIGNIN_SMTP_PASSWORD:-}"
-  starttls="${SIGNIN_SMTP_STARTTLS:-false}"
+  starttls="${SIGNIN_SMTP_STARTTLS:-true}"
   from="${SIGNIN_SMTP_FROM:-${SMTP_FROM:-workforce@localhost}}"
 else
   host="${SMTP_HOST:-}"

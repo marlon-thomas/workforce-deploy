@@ -403,7 +403,14 @@ if [ -n "${SIGNIN_SMTP_HOST:-}" ]; then
   case "$SIGNIN_SMTP_HOST" in
     mail|stalwart|"${MAIL_HOSTNAME:-mail.localhost}")
       row "sign-in email" fail "SIGNIN_SMTP_HOST is this server's own mail server: sign-in codes would depend on staff mail (use a relay account of its own)" ;;
-    *) row "sign-in email" ok "codes and alerts go by their own route (${SIGNIN_SMTP_HOST}:${SIGNIN_SMTP_PORT:-587})" ;;
+    *)
+      # Review of the controller bundle (finding 2): unencrypted, the codes and the relay's password cross the
+      # network in the clear. Only the test appliance's local catcher (mailpit) is let off.
+      if [ "${SIGNIN_SMTP_PORT:-587}" != 465 ] && [ "${SIGNIN_SMTP_STARTTLS:-true}" != true ] && [ "$SIGNIN_SMTP_HOST" != mailpit ]; then
+        oprow "sign-in email" fail "SIGNIN_SMTP_STARTTLS=${SIGNIN_SMTP_STARTTLS}: sign-in codes and the relay's password would be sent unencrypted (set it to true, or use port 465)"
+      else
+        row "sign-in email" ok "codes and alerts go by their own route (${SIGNIN_SMTP_HOST}:${SIGNIN_SMTP_PORT:-587})"
+      fi ;;
   esac
 elif [ -n "${SMTP_HOST:-}" ]; then
   row "sign-in email" warn "sign-in codes and alerts share the outgoing relay with notifications and staff mail: set SIGNIN_SMTP_* in .env to keep them apart"

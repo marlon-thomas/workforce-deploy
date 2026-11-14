@@ -22,13 +22,13 @@ check "no sign-in route: starttls" "$(val "$out" AUTHENTIK_EMAIL__USE_TLS)" true
 check "runs authentik with its arguments" "$(printf '%s\n' "$out" | sed -n 's/^args: //p')" server
 
 # A sign-in route with no account of its own: never the staff relay's username or password.
-out="$(run SMTP_HOST=relay.example.org SMTP_PORT=2525 SMTP_USERNAME=staff SMTP_PASSWORD=s3cret SMTP_STARTTLS=true \
+out="$(run SMTP_HOST=relay.example.org SMTP_PORT=2525 SMTP_USERNAME=staff SMTP_PASSWORD=s3cret SMTP_STARTTLS=false \
   SIGNIN_SMTP_HOST=codes.example.org)"
 check "sign-in route: its host" "$(val "$out" AUTHENTIK_EMAIL__HOST)" codes.example.org
 check "sign-in route: not the relay's port" "$(val "$out" AUTHENTIK_EMAIL__PORT)" 587
 check "sign-in route: not the relay's username" "$(val "$out" AUTHENTIK_EMAIL__USERNAME)" ""
 check "sign-in route: not the relay's password" "$(val "$out" AUTHENTIK_EMAIL__PASSWORD)" ""
-check "sign-in route: not the relay's STARTTLS" "$(val "$out" AUTHENTIK_EMAIL__USE_TLS)" false
+check "sign-in route: STARTTLS by default, not the relay's (controller bundle review, finding 2)" "$(val "$out" AUTHENTIK_EMAIL__USE_TLS)" true
 check "sign-in route: the raw values are gone" "$(printf '%s\n' "$out" | grep -c -E '^(SIGNIN_SMTP_|SMTP_)')" 0
 
 # Port 465 is implicit TLS.
@@ -36,6 +36,10 @@ out="$(run SIGNIN_SMTP_HOST=codes.example.org SIGNIN_SMTP_PORT=465 SIGNIN_SMTP_S
 check "465: implicit TLS" "$(val "$out" AUTHENTIK_EMAIL__USE_SSL)" true
 check "465: not STARTTLS as well" "$(val "$out" AUTHENTIK_EMAIL__USE_TLS)" false
 check "465: its own username" "$(val "$out" AUTHENTIK_EMAIL__USERNAME)" codes
+
+# Turned off on purpose (the test appliance's local catcher): no TLS.
+out="$(run SIGNIN_SMTP_HOST=mailpit SIGNIN_SMTP_PORT=1025 SIGNIN_SMTP_STARTTLS=false)"
+check "sign-in route: STARTTLS off only when asked" "$(val "$out" AUTHENTIK_EMAIL__USE_TLS)" false
 
 echo "email-route self-test: ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]
