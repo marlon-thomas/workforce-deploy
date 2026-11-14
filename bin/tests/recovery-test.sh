@@ -41,6 +41,10 @@ esac
 printf 'docker %s\n' "$*" >> "$FAKE_CALLS"
 case "$*" in
   *--password-stdin*) ;;
+  # The release-signature gate (bin/lib/signatures.sh) as a signed release answers it: the tag's digest, a good
+  # signature, and the version the image's label names (a fictitious digest; nothing is pulled).
+  *"triangulate --type digest "*) ref="${!#}"; printf '%s@sha256:%064d\n' "${ref%:*}" 0 ;;
+  *"image inspect --format"*org.opencontainers.image.version*) printf '0.0.0\n' ;;
   *pg_dump*) printf 'fictitious dump\n' ;;
   *certificate_data*) cat "$FAKE_SENT/ak-cert" 2>/dev/null ;;
   *"exec -T postgres psql"*|*"exec -T authentik-postgres psql"*) cat > /dev/null ;;
@@ -153,6 +157,7 @@ make_cert() { # make_cert <cert file> <public key file>
 }
 make_cert "$SENT/backup-cert" "$SENT/backup-pub"
 make_cert "$SENT/fresh-cert" "$SENT/fresh-pub"
+make_cert "$SENT/release-cert" "$SENT/release-pub"
 sum_of() { sha256sum < "$1" | cut -d' ' -f1; }
 
 # --- a server, as it stood: a bundle with its settings and secrets
@@ -173,6 +178,7 @@ AK_DB_NAME=authentik
 AK_DB_USER=authentik
 API_IMAGE=ghcr.io/example/workforce-suite
 APP_VERSION=0.0.0
+APP_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000
 APP_HOSTNAME=app.example.test
 AUTH_HOSTNAME=auth.example.test
 ACME_EMAIL=ops@example.test
@@ -204,6 +210,9 @@ make_clone() { # make_clone <dir>
   local d="$1"
   mkdir -p "$d/secrets" "$d/environments" "$d/ansible"
   cp -r "$REPO/bin" "$d/bin"
+  # The bundle's release key (a fictitious one: the fake docker above answers for cosign). Without it install.sh,
+  # which a recovery runs, refuses every image before anything else (Workforce issue 353).
+  cp "$SENT/release-pub" "$d/cosign.pub"
   printf 'image: goauthentik/server:2026.8.1\n' > "$d/compose.yaml"
   printf 'TLS_MODE=certs\n' > "$d/environments/test.env"
   mv "$d/bin/doctor.sh" "$d/bin/doctor-real.sh"
@@ -555,7 +564,8 @@ else
   check "recover: a secret the containers read" "$(mode_of "$T/secrets/db_password")" 644
   check "recover: the admin password" "$(mode_of "$T/secrets/initial-admin-password")" 400
   check "recover: the backup ssh key" "$(mode_of "$T/secrets/backup_ssh_key")" 600
-  check "recover: a key in a folder" "$(mode_of "$T/secrets/tls/tls.key")" 600
+  # The gateway's certificate folder: caddy reads it as a user of its own (Workforce issue 53, secret_modes).
+  check "recover: a key in a folder, as the gateway reads it" "$(mode_of "$T/secrets/tls/tls.key")" 644
   contains "recover: all of it given to the service user" "$(cat "$FAKE_CALLS")" "chown -R workforce_app_sa:workforce_app_sa $T"
   check "recover: asks for no password" "$(grep -c '^passwd' "$FAKE_CALLS")" 0
   contains "recover: the service user was made" "$(cat "$WORK/out")" "created (sudo member)"
