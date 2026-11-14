@@ -86,11 +86,12 @@ for e in entries:
 pw = binding("default-authentication-flow", "default-authentication-password")
 check("the password step is re-checked on every try", "re_evaluate_policies: true" in pw and order(pw) == 20)
 check("all of its policies must pass", "policy_engine_mode: all" in pw)
-check("one of them: not locked", any("policybinding" in e and "target: !KeyOf wf-password-binding" in e
-                                     and "policy: !KeyOf wf-too-many-tries" in e and "negate: true" in e for e in entries))
+check("one of them: not paused (issue 462), negated, an error refusing",
+      any("policybinding" in e and "target: !KeyOf wf-password-binding" in e and "policy: !KeyOf wf-password-try" in e
+          and "negate: true" in e and "failure_result: false" in e for e in entries))
 # ... and nothing goes past it without a password checked in this sign-in (a skipped password step refuses).
 guard = binding("default-authentication-flow", "wf-password-not-checked-stage")
-check("no password checked, no further", guard and 20 < order(guard) < 25 and "re_evaluate_policies: true" in guard)
+check("no password checked, no further", guard and 22 < order(guard) < 25 and "re_evaluate_policies: true" in guard)
 guard_policy = next((e for e in entries if "id: wf-password-not-checked\n" in e), "")
 check("decided by the password stage's own record", 'plan.context.get("user_backend")' in guard_policy)
 check("an error refuses too", any("target: !KeyOf wf-password-not-checked-binding" in e and "failure_result: true" in e
@@ -100,19 +101,58 @@ check("a wrong password can be retyped (authentik's default)", "failed_attempts_
 # Wrong codes count too; after too many, even a right code doesn't sign anyone in.
 after_code = binding("default-authentication-flow", "wf-too-many-tries-after-code")
 check("the lock again after the code", after_code and 30 < order(after_code) < 100 and "re_evaluate_policies: true" in after_code)
-check("with the same lock", any("target: !KeyOf wf-too-many-tries-after-code-binding" in e
-                                and "policy: !KeyOf wf-too-many-tries" in e for e in entries))
+check("by the wrong codes' own count, an error refusing", any("target: !KeyOf wf-too-many-tries-after-code-binding" in e
+      and "policy: !KeyOf wf-codes-paused" in e and "failure_result: true" in e for e in entries))
 
-# Review of the controller bundle, finding 1: the emergency administrator's name is public, so its lock is by
-# account and address (someone else's wrong tries can't lock it); everyone else's is by account, as before.
-lock_policy = next((e for e in entries if "id: wf-too-many-tries\n" in e), "")
-check("the lock counts the account's wrong tries", 'Reputation.objects.filter(identifier=user.username)' in lock_policy)
-check("the emergency administrator's only from this address",
-      "if emergency:" in lock_policy and "tries.filter(ip=str(ak_client_ip))" in lock_policy)
-check("not by authentik's internal ClientIPMiddleware (second review, finding 4)", "ClientIPMiddleware" not in lock_policy)
-check("at the same threshold", lock_policy.rstrip().endswith("<= -5"))
-check("the old lock by account alone is removed", any("reputationpolicy" in e and "name: workforce-too-many-tries }" in e
-                                                      and "state: absent" in e for e in entries))
+# Workforce issue 462 (contract 3.1): wrong passwords pause one account on one connection; codes count apart.
+def bound(binding_id, policy):
+    return next((e for e in entries if "policybinding" in e and "target: !KeyOf " + binding_id + "," in e
+                 and "policy: !KeyOf " + policy + " " in e), "")
+check("15: throttled, before the password", order(binding("default-authentication-flow", "wf-connection-throttled-stage")) == 15
+      and "failure_result: true" in bound("wf-connection-throttled-binding", "wf-password-throttled"))
+check("16: paused, before the password", order(binding("default-authentication-flow", "wf-too-many-tries-stage")) == 16
+      and "failure_result: true" in bound("wf-too-many-tries-binding", "wf-password-paused"))
+check("21: not checked and throttled: the throttle's words", order(binding("default-authentication-flow",
+      "wf-connection-throttled-after-stage")) == 21 and bound("wf-connection-throttled-after-binding", "wf-password-not-checked-throttled"))
+right = binding("default-authentication-flow", "wf-password-right-stage")
+check("22: the try marked right, after the password", order(right) == 22 and "re_evaluate_policies: true" in right
+      and "evaluate_on_plan: false" in right and bound("wf-password-right-binding", "wf-password-right"))
+check("29: wrong codes, before the code step", "failure_result: true" in bound("wf-too-many-tries-codes-binding", "wf-codes-paused"))
+check("30: each code typed recorded, never skipping the code step (it passes, an error too)",
+      "failure_result: true" in bound("wf-code-step-binding", "wf-code-try"))
+check("the old locks are removed", all(any(k in e and "state: absent" in e for e in entries) for k in
+      ("name: workforce-too-many-tries }", "name: workforce-too-many-tries-by-account }")))
+for key in ("wf-password-paused", "wf-password-try", "wf-password-right", "wf-code-try", "wf-codes-paused"):
+    policy = next((e for e in entries if "id: " + key + "\n" in e), "")
+    body = "\n".join(l for l in policy.splitlines() if not l.strip().startswith("#"))
+    check(key + ": authentik's reputation score isn't read", "Reputation" not in body and "update_score" not in body)
+    check(key + ": the address is authentik's own, through wf_ak_subject", "wf_ak_subject(request)" in body)
+try_policy = next((e for e in entries if "id: wf-password-try\n" in e), "")
+check("a try is recorded only for a request the stage checks", "wf_password_request(http.method, http.data)" in try_policy)
+check("under the connection's lock, then the pair's", "(WF_LOCK_CONN, \"conn:\" + conn), (WF_LOCK_PAIR," in try_policy)
+check("in one transaction", "transaction.atomic" in try_policy)
+ident = next((e for e in entries if "name: default-authentication-identification }" in e), "")
+check("a name nobody has goes on like a real one", "pretend_user_exists: true" in ident)
+# Fix round (contract 3.8): a pause and a throttle each have their own words, the same for any name.
+pause_words = "Too many wrong passwords for this name, from this connection. Wait 15 minutes, then try again."
+throttle_words = "Too many wrong passwords from this connection. Wait 15 minutes, or use another connection"
+for stage, words in (("wf-too-many-tries-stage", pause_words), ("wf-password-not-checked-stage", pause_words),
+                     ("wf-connection-throttled-stage", throttle_words), ("wf-connection-throttled-after-stage", throttle_words)):
+    e = next((x for x in entries if "id: " + stage + "\n" in x), "")
+    check(stage + ": its words", words in " ".join(e.split()))
+for key in ("wf-password-throttled", "wf-password-not-checked-throttled"):
+    policy = next((e for e in entries if "id: " + key + "\n" in e), "")
+    check(key + ": the address is authentik's own, through wf_ak_subject", "wf_ak_subject(request)" in policy)
+# Contract 3.9: authentik's user-settings page can't write attributes.workforce (only the name and locale fields).
+settings_stage = next((e for e in entries if "name: default-user-settings }" in e), "")
+check("the user's own settings have only authentik's name and locale fields (attributes.settings.locale)",
+      re.findall(r"\[name, (default-user-settings-field-[a-z]+)\]", settings_stage)
+      == ["default-user-settings-field-name", "default-user-settings-field-locale"])
+probe = next((e for e in entries if "id: wf-client-address-flow\n" in e), "")
+check("the address check: a flow anyone may open, with no stages", "authentication: none" in probe
+      and not any("flowstagebinding" in e and "wf-client-address-flow" in e for e in entries))
+check("whose one policy always refuses with the address", bound("wf-client-address-flow", "wf-client-address-policy")
+      and any("id: wf-client-address-policy" in e and "return False" in e and "workforce-client-address=" in e for e in entries))
 
 # Second review of the controller bundle, findings 1 and 6: whoever chooses the emergency administrator's password
 # (a reset link, the change-password page) needs at least 16 characters zxcvbn rates hard to guess; authentik's own
@@ -148,13 +188,25 @@ check "and moves the score's floor below the lock" "$(grep -c 'reputation_lower_
 check "the converge runs it" "$(grep -c "ak shell -c \"exec(open(./tmp/sign-in-hardening.py.)" "$REPO/ansible/roles/authentik/tasks/main.yml")" 1
 check "the operator's recovery removes the emergency administrator's app (new problem 6)" \
   "$(grep -c 'TOTPDevice.objects.filter(user=u).delete()' "$REPO/bin/reset-admin.sh")" 1
-check "and lifts its wrong-tries lock (controller bundle review, finding 1)" \
-  "$(grep -c 'Reputation.objects.filter(identifier="admin").delete()' "$REPO/bin/reset-admin.sh")" 1
+check "and lifts its wrong-password pause by the unlock marker (issue 462), not by deleting records" \
+  "$(grep -c 'wf\["password_unlocked_at"\] = ' "$REPO/bin/reset-admin.sh")/$(grep -c 'Reputation' "$REPO/bin/reset-admin.sh")" 1/0
 # Second review of the controller bundle, finding 4: the lock's policy reads authentik's own models, so a new authentik
 # pin needs bin/tests/authentik-policies-e2e.sh run against it (it also runs reset-admin.sh's program there).
 VERIFIED="$(sed -n 's/^VERIFIED_AUTHENTIK=//p' "$HERE/authentik-policies-e2e.sh")"
 check "authentik-policies-e2e.sh was run on the pinned authentik (set VERIFIED_AUTHENTIK once it passes)" \
   "$(grep -c "image: ghcr.io/goauthentik/server:${VERIFIED}@sha256:" "$REPO/compose.yaml")" 2
+# Workforce issue 462: the pause relies on how the pinned authentik runs a sign-in. On a new pin, check again in its
+# source, then run bin/tests/authentik-lock-e2e.sh on it and set its VERIFIED_AUTHENTIK: (1) the server (Rust,
+# ak-axum, in 2026.8) takes the client's address from X-Forwarded-For only from AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS
+# and hands Python exactly that address; (2) ClientIPMiddleware reads the first X-Forwarded-For entry, and
+# X-authentik-remote-ip only with an internal service account's token; (3) pretend_user_exists gives an unsaved
+# pending user; (4) the password stage's field is "password" (CharField, not trimmed) and its binding's policies run
+# on every request to it (ReevaluateMarker, cache off); (5) a policy's write to the flow plan is saved with stage_ok;
+# (6) a flow's refusing policy's message reaches the access-denied answer; (7) the events API filters by action and
+# orders by -created; (8) no other place checks a password (the OAuth token endpoint takes app-password tokens only).
+LOCK_VERIFIED="$(sed -n 's/^VERIFIED_AUTHENTIK=//p' "$HERE/authentik-lock-e2e.sh")"
+check "authentik-lock-e2e.sh was run on the pinned authentik (issue 462; set its VERIFIED_AUTHENTIK once it passes)" \
+  "$(grep -c "image: ghcr.io/goauthentik/server:${LOCK_VERIFIED}@sha256:" "$REPO/compose.yaml")" 2
 check "reset-admin.sh and doctor.sh find authentik's python on its PATH, not by a fixed venv path (finding 2)" \
   "$(grep -c '/ak-root/' "$REPO/bin/reset-admin.sh" "$REPO/bin/doctor.sh" | awk -F: '{s+=$2} END {print s}')" 0
 check "a typed emergency password is at least 16 characters (finding 1)" \

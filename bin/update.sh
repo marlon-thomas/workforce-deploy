@@ -29,6 +29,11 @@ cd "$(dirname "$0")/.."
 . ./bin/lib/prod-guards.sh
 prod_guard_start "${ENV_NAME:-prod}" "${TEST_INBOX:-}" "${TEST_INBOX_HOSTNAME:-}" "${COMPOSE_PROFILES:-}" || exit 1
 use_docker_socket
+# Workforce issue 462: the operator's own proxies in front of this server (RUNBOOK §7a), checked before they are used.
+# shellcheck source=lib/client-address.sh
+. ./bin/lib/client-address.sh
+GTP_PROBLEM="$(gateway_proxies_problem)"
+[ -z "$GTP_PROBLEM" ] || { echo "$GTP_PROBLEM (RUNBOOK §7a). Nothing was changed."; exit 1; }
 
 # The backup container runs the nightly backup and the health watch through this socket. An older
 # install recorded the system socket on a rootless host: permission denied in the container, so
@@ -210,4 +215,9 @@ if ! ./bin/gateway-reload.sh; then
   the \"Gateway\" lines just above say what state the gateway is in and what to do."
   exit 4
 fi
+# Workforce issue 462: does the sign-in server see each person's own address, whatever forwarded headers say? The
+# health check's "client addresses" row (and Workforce's Setup) reads what this finds; it never rolls anything back.
+say "Client addresses…"
+if CA_WORDS="$(client_address_probe)"; then echo "     $CA_WORDS"
+else printf '\033[1;33m!!\033[0m %s\n' "$CA_WORDS — Workforce's Setup says \"not ready\" until it is fixed: RUNBOOK §7a."; fi
 say "Updated to $TARGET successfully. Your pre-update backup is kept in ./backups."

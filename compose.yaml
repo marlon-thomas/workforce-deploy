@@ -16,8 +16,9 @@
 # doctor.sh and the identity converge say they're shared. With neither set nobody can finish signing in.
 # The route is chosen as one unit by authentik/email-route.sh, authentik's entrypoint wrapper: never a sign-in host
 # with the staff relay's account (review findings 8, 9 and 18).
-# Five wrong tries (password or code) for one account mean a 15-minute wait (the blueprint's reputation check);
-# the score is forgotten after REPUTATION seconds.
+# Wrong passwords and wrong codes are counted by the blueprint's own policies (Workforce issue 462): five wrong
+# passwords pause one account on one connection, five wrong codes pause the account's codes, each for 15 minutes.
+# authentik's reputation score is no longer read by anything; REPUTATION only shortens how long authentik keeps it.
 x-ak-sign-in-codes: &ak-sign-in-codes
   SIGNIN_SMTP_HOST: ${SIGNIN_SMTP_HOST:-}
   SIGNIN_SMTP_PORT: ${SIGNIN_SMTP_PORT:-}
@@ -205,6 +206,11 @@ services:
       # Staff webmail (COMPOSE_PROFILES=staffmail). Unset = a local-only name nobody reaches.
       WEBMAIL_HOSTNAME: ${WEBMAIL_HOSTNAME:-webmail.localhost}
       ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+      # Workforce issue 462: the operator's own load balancers or proxies in front of this server, if any, that set
+      # X-Forwarded-For (space-separated addresses or CIDRs; install.sh and update.sh refuse anything else, and any of
+      # this stack's networks, loopback or everyone). Unset = none: 192.0.2.255/32 is TEST-NET-1, never a real peer,
+      # because Caddy refuses an empty list. RUNBOOK §7a.
+      GATEWAY_TRUSTED_PROXIES: ${GATEWAY_TRUSTED_PROXIES:-192.0.2.255/32}
       # Only consumed by the duckdns gateway build (TLS_MODE=dns01); empty is
       # harmless for the stock HTTP-01 image.
       DUCKDNS_API_TOKEN: ${DUCKDNS_API_TOKEN:-}
@@ -1281,7 +1287,11 @@ services:
       # 2026.8: forwarded headers are honoured ONLY from trusted CIDRs — without
       # the compose networks listed here authentik sees TLS-terminated requests
       # as plain HTTP (issuer flips to http://, mixed-content blocks, login
-      # breaks). Gateway container IPs live in the compose bridge ranges.
+      # breaks). Gateway container IPs live in the compose bridge ranges. Workforce
+      # issue 462: the client's address the sign-in limits use is the gateway's
+      # X-Forwarded-For (it replaces whatever a browser sent; gateway/Caddyfile*).
+      # Only our own containers are on these networks, and none relays a browser's
+      # headers; doctor.sh's "client addresses" row proves the outside path.
       AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS: "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12"
       # Required from 2026.11.
       AUTHENTIK_WEB__BASE_URL: "https://${AUTH_HOSTNAME}"

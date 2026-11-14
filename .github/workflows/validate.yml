@@ -48,3 +48,13 @@ jobs:
       # code, and reset-admin.sh's program, run on the pinned authentik image (an error in the lock refuses everyone).
       - name: The sign-in policies and reset-admin.sh on the pinned authentik
         run: ./bin/tests/authentik-policies-e2e.sh
+      # Workforce issue 462: the gateway decides each client's address (every gateway file, on the pinned Caddy, with
+      # forged headers and named proxies), and the wrong-password pause, the throttle, workplaces, unlocks, wrong codes
+      # and the emergency administrator's password rule on a live authentik at the compose.yaml pin (the blueprint
+      # applied twice), signing in through its real flow executor and the real gateway. One live authentik at a time.
+      - name: Client addresses through every gateway file (the pinned Caddy)
+        run: ./bin/tests/gateway-client-address-e2e.sh
+      - name: Wrong passwords, the throttle and unlocks on a live authentik (the pin, through the gateway)
+        run: |
+          python3 -c 'import jinja2' 2>/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q python3-jinja2; }
+          ./bin/tests/authentik-lock-e2e.sh

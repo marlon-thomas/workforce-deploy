@@ -1,8 +1,8 @@
 # ADR-0017: the Workforce app's invitation credential, converged idempotently inside authentik
 # (`ak shell`). Reads the token key from stdin (never argv/env). The account can create, view
 # and delete invitations, (ADR-0024) look up a user and make them a password reset link, and
-# (ADR-0039) set where a staff account's sign-in codes go and remove its code methods — nothing else
-# (no flows, settings, groups or other tokens).
+# (ADR-0039) set where a staff account's sign-in codes go and remove its code methods, and (issue 462) read the
+# sign-in records and unlock a person's sign-in — nothing else (no flows, settings, groups or other tokens).
 import sys
 
 from authentik.core.models import Group, Token, TokenIntents, User, UserTypes
@@ -62,6 +62,10 @@ for perm in (
     # Workforce issue 290: count failed sign-in code emails (authentik keeps them only as failed send_mail
     # tasks) for Setup -> Email delivery. Read-only; the app shows a count and an error with addresses removed.
     "authentik_tasks.view_task",
+    # Workforce issue 462: read the sign-in server's records of wrong passwords (custom_workforce_password_try,
+    # _right, _alert), to show a manager whether someone is paused and to raise attack alerts. Read-only: no record
+    # can be changed or deleted, and the unlock itself is an attribute change_user above already covers.
+    "authentik_events.view_event",
 ):
     assign(perm)
 

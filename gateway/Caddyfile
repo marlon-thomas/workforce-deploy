@@ -17,9 +17,52 @@
 	# rate-limit window was reverted on 11 Sep — the duplicate-certificate limit
 	# is a rolling 7 days, so re-issuance is safe again.)
 	acme_ca https://acme-v02.api.letsencrypt.org/directory
+	# Workforce issue 462 (ADR-0039, amendment of 14 November 2026): the gateway alone decides a client's address,
+	# once, as {client_ip}. From a peer that isn't one of the operator's own proxies (GATEWAY_TRUSTED_PROXIES, empty by
+	# default: 192.0.2.255/32 is TEST-NET-1, never a real peer, because an empty list is refused) forwarded headers are
+	# ignored and the address is the connection's own. From a named proxy, X-Forwarded-For is read right to left and the
+	# first address that isn't one of those proxies wins, so a forged left-hand entry can't choose it (strict).
+	servers {
+		trusted_proxies static {$GATEWAY_TRUSTED_PROXIES:192.0.2.255/32}
+		trusted_proxies_strict
+		client_ip_headers X-Forwarded-For
+	}
+}
+
+# Imported in every reverse_proxy below (bin/ci-validate.sh fails if one lacks it): the sign-in server, the
+# application and webmail each receive exactly one address, the gateway's {client_ip}, whatever a browser sent. Every
+# other header that could name a client is removed, authentik's own outpost override among them.
+(client_address) {
+	header_up X-Forwarded-For {client_ip}
+	header_up X-Real-IP {client_ip}
+	header_up -Forwarded
+	header_up -X-Forwarded-Host-Ip
+	header_up -X-Client-IP
+	header_up -True-Client-IP
+	header_up -CF-Connecting-IP
+	header_up -Fastly-Client-IP
+	header_up -X-Cluster-Client-IP
+	header_up -X-Original-Forwarded-For
+	header_up -X-authentik-remote-ip
+	header_up -X-authentik-outpost-token
+	header_up X-Workforce-Forwarded "{vars.wf_forwarded}"
+}
+
+# Contract 2.3 (b), fix round: a request that arrives with a forwarding header from a peer nobody named in
+# GATEWAY_TRUSTED_PROXIES (a CDN or proxy with many outgoing addresses that nobody told the gateway about) is marked to
+# the sign-in server: X-Workforce-Forwarded: 1, set by client_address (any copy a client sent is replaced). The
+# right-password record keeps it (wf_fwd), and bin/doctor.sh's "client addresses" row fails when most sign-ins came
+# that way. Imported at the top of every site.
+(client_forwarded) {
+	@wf_forwarded_unnamed {
+		not remote_ip {$GATEWAY_TRUSTED_PROXIES:192.0.2.255/32}
+		expression `{http.request.header.X-Forwarded-For} != '' || {http.request.header.Forwarded} != '' || {http.request.header.CF-Connecting-IP} != '' || {http.request.header.True-Client-IP} != ''`
+	}
+	vars @wf_forwarded_unnamed wf_forwarded 1
 }
 
 {$APP_HOSTNAME} {
+	import client_forwarded
 	# Asked only by the sign-in server on the private network (staff webmail); never from outside.
 	respond /api/public/mail/* 404
 	# While the appliance controller installs an update (Workforce slice 3b), users are kept out until the new
@@ -37,6 +80,7 @@
 	header @updating Retry-After 120
 	respond @updating "Workforce is being updated. Please try again in a few minutes." 503
 	reverse_proxy api:8080 {
+		import client_address
 		header_up X-Forwarded-Proto {scheme}
 	}
 	header {
@@ -50,6 +94,7 @@
 }
 
 {$AUTH_HOSTNAME} {
+	import client_forwarded
 	# While the appliance controller installs an update (Workforce issue 453), the sign-in pages are kept out too, from the
 	# moment the application stops until the update has succeeded or been rolled back: a rollback puts the sign-in
 	# server's database back, so a password changed or an account switched off here meanwhile would be silently undone.
@@ -75,7 +120,9 @@
 	respond /setup* 404
 	respond /if/flow/initial-setup* 404
 	respond /api/v3/flows/executor/initial-setup* 404
-	reverse_proxy authentik-server:9000
+	reverse_proxy authentik-server:9000 {
+		import client_address
+	}
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
@@ -87,7 +134,9 @@
 # path of the app: email is untrusted HTML, so webmail must not share the app's origin.
 # WEBMAIL_HOSTNAME unset = webmail.localhost, a local-only name with an internal certificate.
 {$WEBMAIL_HOSTNAME:webmail.localhost} {
+	import client_forwarded
 	reverse_proxy webmail:80 {
+		import client_address
 		header_up X-Forwarded-Proto {scheme}
 	}
 	header {

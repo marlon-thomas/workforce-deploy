@@ -248,9 +248,9 @@ entries:
         user = request.user
         return (getattr(user, "type", "") == "internal" and not user.is_superuser
                 and not ak_is_group_member(user, name="authentik Admins"))
-  # Second review of the controller bundle (findings 1 and 6): wrong tries at the emergency administrator lock only
-  # the address they come from (see wf-too-many-tries), so its password must be too strong to guess from many
-  # addresses at once. Whoever chooses it (a reset link, which is how it gets its first password under the
+  # Second review of the controller bundle (findings 1 and 6): wrong tries at the emergency administrator pause only
+  # the connection they come from (as for everyone since Workforce issue 462: wf-password-try), so its password must be
+  # too strong to guess from many addresses at once. Whoever chooses it (a reset link, which is how it gets its first password under the
   # appliance controller, or the change-password page) needs at least 16 characters that zxcvbn doesn't call easy
   # to guess (a score of 3 or 4). Everyone else keeps the rule above. The installer's and reset-admin.sh's
   # passwords are 24 random characters; authentik's own change-password page refuses this account
@@ -371,6 +371,9 @@ entries:
     attrs:
       user_fields: [email, username]
       recovery_flow: !Find [authentik_flows.flow, [slug, workforce-forgot-password]]
+      # Workforce issue 462: a name nobody has goes on to the password step like a real one (authentik's default,
+      # restated): the same answers, the same pause after five, and nothing says which names exist.
+      pretend_user_exists: true
     state: present
 
   # ---------- Review R5: the sign-in page is ours, not authentik's ----------
@@ -434,8 +437,8 @@ entries:
   # first-time setup there is no email yet, and the account that gets everyone back in when email or codes are
   # broken mustn't depend on them. It is the account ADR-0026 names: exactly "admin", internal, not a superuser,
   # not in "authentik Admins". The code step is skipped for it alone (decided when the step is reached, once the
-  # password has identified the account); the wrong-tries lock (order 15) still applies to it, by account and
-  # address. Workforce audits every sign-in to it and emails the installation's contact and the registered managers
+  # password has identified the account); the wrong-password pause (orders 15 to 23) still applies to it, by account
+  # and connection, as to everyone (Workforce issue 462). Workforce audits every sign-in to it and emails the installation's contact and the registered managers
   # and directors.
   - model: authentik_policies_expression.expressionpolicy
     id: wf-not-emergency
@@ -473,6 +476,9 @@ entries:
   # wf-password-binding below), so a wrong password may be tried again on the same page, as authentik's default
   # has it (5; an earlier fix set 1, which made people start again after one typo). authentik validates the whole
   # stage on update, so its other fields are restated as its default blueprint has them.
+  # Workforce issue 462 (seen on 2026.8.5): authentik counts this by the name's reputation score, which wrong passwords
+  # for the name from any connection lower, so someone else's wrong passwords can end an open sign-in at its next typo
+  # ("Invalid password"; start again). That is never a lock: the pause and the throttle above are what hold anyone.
   - model: authentik_stages_password.passwordstage
     identifiers: { name: default-authentication-password }
     attrs:
@@ -536,69 +542,245 @@ entries:
     identifiers: { target: !KeyOf wf-ask-hr-binding, policy: !KeyOf wf-codes-not-ready }
     attrs: { order: 0, enabled: true }
 
-  # Wrong tries are limited: each wrong password or code lowers the account's score, and at five the next
-  # sign-in stops here for 15 minutes (AUTHENTIK_REPUTATION__EXPIRY in compose.yaml); after that a new code is
-  # sent. Each code also slows down after every wrong try, and lasts 10 minutes. By account, not by address: one
-  # office's shared connection mustn't lock everyone out.
-  # Review of the controller bundle (finding 1): the emergency administrator is always called "admin" and this
-  # file is public, so a lock by account alone let anyone on the internet keep the last-resort account locked
-  # (five wrong passwords every 15 minutes, from anywhere). For that account alone the wrong tries count by
-  # account AND address: someone else's wrong tries lock only their own address. What makes guessing from many
-  # addresses hopeless is its password: 24 random characters from the installer or ./bin/reset-admin.sh, and at
-  # least 16 that zxcvbn rates hard to guess wherever it is chosen (wf-emergency-password; authentik's own
-  # change-password page refuses it). No total across addresses: any such limit would let anyone keep it locked.
-  # The address is the one authentik records the wrong tries under (ak_client_ip, from the same function). Where
-  # every client reaches authentik with one address (RUNBOOK 7a), this is a lock by account again, as before.
-  # authentik's reputation policy can only add the two up (account OR address), so this is an expression with
-  # the same sum and the same threshold as before. It reads authentik's own Reputation model: an error here
-  # refuses every sign-in, so bin/tests/authentik-policies-e2e.sh runs it on the pinned authentik, and
-  # blueprint-test.sh fails when the pin moves until that has been run again.
+  # ---------- Workforce issue 462 (ADR-0039, amendment of 14 November 2026, and its fix round): wrong passwords ----------
+  # Five wrong passwords for one account from one connection within 15 minutes pause that account on that connection
+  # until 15 minutes after the fifth; every account alike, the emergency administrator included. Ten wrong passwords
+  # from one connection within 15 minutes, whatever names were typed, throttle that connection for 15 minutes (for
+  # IPv6 also thirty from one /48), unless it is a workplace: a connection (or /48) where 3 or more real accounts typed
+  # the right password in the last 30 days. Nothing is ever locked for the whole account, or for good: someone else's
+  # wrong passwords pause only their own connection.
+  # - The connection is the address authentik gives the request (the gateway decides it: no browser header can choose
+  #   it), an IPv6 address by its /64. An unknown name is counted exactly as a real account (authentik's "pretend the
+  #   account exists"), under a keyed digest of the name, never the name. Neither decision depends on whether a name
+  #   exists, so neither answer tells anyone which names do.
+  # - Each try is recorded before the password is checked (custom_workforce_password_try), under PostgreSQL advisory
+  #   locks on the connection and then the pair, so requests at the same moment are taken one at a time and a sixth
+  #   can't slip in; it counts as wrong until the flow reaches the step after the password (22), which marks it right.
+  #   A refused request is never recorded, so it can't stretch a pause or a throttle. A real account's records carry
+  #   it as the event's user (Workforce reads one person's with ?username=).
+  # - Wrong passwords before the account's marker no longer count for its pause: its last password change, or its last
+  #   "Unlock sign-in" in Workforce (attributes.workforce.password_unlocked_at, written by the application's service
+  #   account, and by ./bin/reset-admin.sh for the emergency administrator). Neither touches a throttle.
+  # - Alerts (custom_workforce_password_alert), never a lock: one connection (or /48) trying five or more names within
+  #   an hour; one account tried from three or more connections within an hour, or twenty wrong passwords in a day; a
+  #   connection that has just been throttled. Each at most once an hour. Workforce reads them (Today, audit, email).
+  # - authentik's own reputation score is no longer read by anything.
+  # The decision is ansible/roles/authentik/templates/password-pause.py (included in each policy below; tested on its
+  # own by bin/tests/password-pause-test.sh against the vectors the application shares), and the whole thing runs on
+  # the pinned authentik in bin/tests/authentik-lock-e2e.sh. Any error refuses the password (it is never checked).
   - model: authentik_policies_reputation.reputationpolicy
     identifiers: { name: workforce-too-many-tries }
     state: absent
+  # The lock by account (and, for the emergency administrator, by account and address) that this replaces. Removing it
+  # removes its bindings at 15, 20, 29 and 31 with it.
   - model: authentik_policies_expression.expressionpolicy
-    id: wf-too-many-tries
     identifiers: { name: workforce-too-many-tries-by-account }
+    state: absent
+  # Orders 15 and 16 (once a sign-in reaches them, after the name): throttled now (15), paused now (16). Each has its
+  # own words (contract 3.8); a throttle wins when both hold, since an unlock doesn't lift it. Decide only.
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-password-throttled
+    identifiers: { name: workforce-password-throttled }
     attrs:
-      name: workforce-too-many-tries-by-account
+      name: workforce-password-throttled
       expression: |
-        from django.db.models import Sum
-        from authentik.policies.reputation.models import Reputation
-        user = request.user
-        tries = Reputation.objects.filter(identifier=user.username)
-        emergency = (user.username == "admin" and getattr(user, "type", "") == "internal" and not user.is_superuser
-                     and not ak_is_group_member(user, name="authentik Admins"))
-        if emergency:
-            tries = tries.filter(ip=str(ak_client_ip))
-        return (tries.aggregate(score=Sum("score"))["score"] or 0) <= -5
+{% filter indent(8, true) %}
+{% include 'password-pause.py' %}
+{% endfilter %}
+        # ---- the authentik part ----
+        from django.utils import timezone
+        http, person, account, conn, address = wf_ak_subject(request)
+        now = timezone.now().timestamp()
+        events, markers = wf_ak_events(conn, account, person, now, False)
+        decision = wf_decide(events, account, conn, markers, now)
+        return decision["throttled"] and wf_ak_refused(decision, address, person, account, conn, now)
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-password-paused
+    identifiers: { name: workforce-password-paused }
+    attrs:
+      name: workforce-password-paused
+      expression: |
+{% filter indent(8, true) %}
+{% include 'password-pause.py' %}
+{% endfilter %}
+        # ---- the authentik part ----
+        from django.utils import timezone
+        http, person, account, conn, address = wf_ak_subject(request)
+        now = timezone.now().timestamp()
+        events, markers = wf_ak_events(conn, account, person, now, False)
+        decision = wf_decide(events, account, conn, markers, now)
+        return decision["paused"] and wf_ak_refused(decision, address, person, account, conn, now)
+  # Order 20 (the password stage's binding, negated, checked on every request to the stage): decides, and records a
+  # try when it allows one, under one lock. The password stage runs only when this answers "neither".
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-password-try
+    identifiers: { name: workforce-password-try }
+    attrs:
+      name: workforce-password-try
+      expression: |
+{% filter indent(8, true) %}
+{% include 'password-pause.py' %}
+{% endfilter %}
+        # ---- the authentik part ----
+        from datetime import datetime, timezone as tz
+        from uuid import uuid4
+        from django.db import connections, transaction
+        from django.utils import timezone
+        from rest_framework.exceptions import ParseError
+        http, person, account, conn, address = wf_ak_subject(request)
+        pk = getattr(person, "pk", None)
+        # The request as the password stage reads it: the same parsed request.data (never the raw body). If it can't be
+        # parsed the stage can't read it either, and checks nothing. Anything else unexpected (no request.data at all)
+        # raises: the binding's failure result then refuses the password (closed).
+        try:
+            checked = wf_password_request(http.method, http.data)
+        except ParseError:
+            checked = False
+        plan = request.context.get("flow_plan")
+        if plan is not None:
+            # Only the try this request records may be marked right at 22, never an earlier one of this sign-in.
+            plan.context.pop(WF_PLAN_TRY, None)
+        if not checked:
+            # A page load or an answer the stage won't check: decide only, record nothing.
+            now = timezone.now().timestamp()
+            events, markers = wf_ak_events(conn, account, person, now, False)
+            decision = wf_decide(events, account, conn, markers, now)
+            return decision["paused"] or decision["throttled"]
+        with transaction.atomic(using="default"):
+            with connections["default"].cursor() as cursor:
+                wf_ak_lock(cursor, (WF_LOCK_CONN, "conn:" + conn), (WF_LOCK_PAIR, "pair:" + account + "|" + conn))
+            now = timezone.now().timestamp()
+            events, markers = wf_ak_events(conn, account, person, now, True)
+            decision = wf_decide(events, account, conn, markers, now)
+            if wf_ak_refused(decision, address, person, account, conn, now, locked=True):
+                return True
+            tid = str(uuid4())
+            wf_ak_record(WF_TRY, WF_KEEP_TRY, address, person, wf_try=tid, wf_account=account, wf_conn=conn,
+                         wf_user_pk=pk)
+            if plan is not None:
+                plan.context[WF_PLAN_TRY] = tid
+            after = events + [{"at": now, "kind": "try", "try": tid, "account": account, "conn": conn}]
+            for alert in wf_spread(after, account, conn, pk, now, before=events):
+                field, value = wf_alert_key(alert)
+                if not wf_ak_rows(WF_ALERT, datetime.fromtimestamp(now - WF_ALERT_GAP, tz.utc),
+                                  wf_kind=alert["wf_kind"], **{field: value}):
+                    wf_ak_record(WF_ALERT, WF_KEEP_ALERT, address, None, **alert)
+            return False
+  # Order 22, reached only once the password stage has accepted the password: marks this sign-in's try right (with
+  # wf_fwd: the gateway marked the request as forwarded by a peer nobody named, for the readiness check), then fails,
+  # so its deny stage never shows.
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-password-right
+    identifiers: { name: workforce-password-right }
+    attrs:
+      name: workforce-password-right
+      expression: |
+{% filter indent(8, true) %}
+{% include 'password-pause.py' %}
+{% endfilter %}
+        # ---- the authentik part ----
+        from datetime import datetime, timezone as tz
+        from django.db import connections, transaction
+        from django.utils import timezone
+        plan = request.context.get("flow_plan")
+        if plan is None or not plan.context.get("user_backend"):
+            return False
+        http, person, account, conn, address = wf_ak_subject(request)
+        pk = getattr(person, "pk", None)
+        forwarded = http.META.get(WF_FORWARDED_HEADER, "") == "1"
+        now = timezone.now().timestamp()
+        tid = plan.context.get(WF_PLAN_TRY)
+        found = wf_ak_rows(WF_TRY, datetime.fromtimestamp(now - WF_KEEP_TRY, tz.utc), wf_try=tid) if tid else []
+        if found:
+            ctx = found[0][1]
+            account, conn = str(ctx.get("wf_account")), wf_connection_key(ctx.get("wf_conn"))
+        with transaction.atomic(using="default"):
+            with connections["default"].cursor() as cursor:
+                wf_ak_lock(cursor, (WF_LOCK_CONN, "conn:" + conn), (WF_LOCK_PAIR, "pair:" + account + "|" + conn))
+            if not found:
+                # No try in the plan (or no longer kept): the pair's newest unmarked try of the last minute.
+                since = datetime.fromtimestamp(now - WF_RIGHT_FALLBACK, tz.utc)
+                rows = wf_ak_rows(WF_TRY, since, wf_account=account, wf_conn=conn)
+                marked = set(c.get("wf_try") for at, c in wf_ak_rows(WF_RIGHT, since, wf_account=account, wf_conn=conn))
+                rows = sorted([r for r in rows if r[1].get("wf_try") not in marked], key=lambda r: r[0])
+                if not rows:
+                    return False
+                tid = rows[-1][1].get("wf_try")
+            if not wf_ak_rows(WF_RIGHT, datetime.fromtimestamp(now - WF_KEEP_TRY, tz.utc), wf_try=tid):
+                wf_ak_record(WF_RIGHT, WF_KEEP_RIGHT, address, person, wf_try=tid, wf_account=account, wf_conn=conn,
+                             wf_user_pk=pk, wf_fwd=forwarded)
+        plan.context.pop(WF_PLAN_TRY, None)
+        return False
+  # After a password that wasn't checked (order 21): throttled now? (Then the throttle's words; otherwise the guard at
+  # 23 refuses with the pause's.)
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-password-not-checked-throttled
+    identifiers: { name: workforce-password-not-checked-throttled }
+    attrs:
+      name: workforce-password-not-checked-throttled
+      expression: |
+{% filter indent(8, true) %}
+{% include 'password-pause.py' %}
+{% endfilter %}
+        # ---- the authentik part ----
+        from django.utils import timezone
+        plan = request.context.get("flow_plan")
+        if plan is not None and plan.context.get("user_backend"):
+            return False
+        http, person, account, conn, address = wf_ak_subject(request)
+        now = timezone.now().timestamp()
+        events, markers = wf_ak_events(conn, account, person, now, False)
+        decision = wf_decide(events, account, conn, markers, now)
+        return decision["throttled"] and wf_ak_refused(decision, address, person, account, conn, now)
+  # The words (contract 3.8): the same for a real name and one nobody has.
+  - model: authentik_stages_deny.denystage
+    id: wf-connection-throttled-stage
+    identifiers: { name: workforce-connection-throttled }
+    attrs:
+      name: workforce-connection-throttled
+      deny_message: >-
+        Too many wrong passwords from this connection. Wait 15 minutes, or use another connection (for example your
+        phone’s mobile data). Unlocking your sign-in doesn’t lift this.
   - model: authentik_stages_deny.denystage
     id: wf-too-many-tries-stage
     identifiers: { name: workforce-too-many-tries }
     attrs:
       name: workforce-too-many-tries
       deny_message: >-
-        That was wrong too many times. Wait 15 minutes, then sign in again, and we’ll send you a new code.
+        Too many wrong passwords for this name, from this connection. Wait 15 minutes, then try again. If you’ve
+        forgotten your password, use “Forgot your password?”. If you’re still stuck, ask your manager to unlock your
+        sign-in.
+  - model: authentik_flows.flowstagebinding
+    id: wf-connection-throttled-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-connection-throttled-stage
+    attrs:
+      # Review finding 6: before the password (20), after the account is identified (10).
+      order: 15
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-connection-throttled-binding, policy: !KeyOf wf-password-throttled }
+    # An error shows the deny stage (closed).
+    attrs: { order: 0, enabled: true, failure_result: true }
   - model: authentik_flows.flowstagebinding
     id: wf-too-many-tries-binding
     identifiers:
       target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
       stage: !KeyOf wf-too-many-tries-stage
     attrs:
-      # Review finding 6: before the password (20), after the account is identified (10). At 26 it came after the
-      # password, so guessing was never blocked and the lock told an attacker the password was right.
-      order: 15
+      order: 16
       evaluate_on_plan: false
       re_evaluate_policies: true
   - model: authentik_policies.policybinding
-    identifiers: { target: !KeyOf wf-too-many-tries-binding, policy: !KeyOf wf-too-many-tries }
-    attrs: { order: 0, enabled: true }
+    identifiers: { target: !KeyOf wf-too-many-tries-binding, policy: !KeyOf wf-password-paused }
+    attrs: { order: 0, enabled: true, failure_result: true }
 
-  # Third review of finding 6: the lock at 15 is checked once, when a sign-in reaches it, so many sign-ins opened
-  # before the first wrong try each still took a password afterwards, and a right one went on (a different answer:
-  # the password was right). So the lock is also checked on every password sent: authentik re-checks a stage's
-  # policies on every request to it, and the password stage now runs only while the account isn't locked (the
-  # lock's policy, negated, and all of the binding's policies must pass). A locked account's password is never
-  # checked; the step after (21) then refuses, because no password was checked.
+  # The password stage runs only while workforce-password-try (negated) and all of the binding's policies pass; it is
+  # re-checked on every request to the stage (third review of finding 6), so many sign-ins opened at once can't each
+  # take a password. A paused pair's password is never checked; the steps after (21, 23) then refuse. An error in the
+  # policy is its binding's failure result, false: the password isn't checked either.
   - model: authentik_flows.flowstagebinding
     id: wf-password-binding
     identifiers:
@@ -610,10 +792,32 @@ entries:
       re_evaluate_policies: true
       policy_engine_mode: all
   - model: authentik_policies.policybinding
-    identifiers: { target: !KeyOf wf-password-binding, policy: !KeyOf wf-too-many-tries }
-    attrs: { order: 5, enabled: true, negate: true }
-  # Nothing goes past the password step without a password checked in this sign-in (authentik's password stage
-  # records which backend accepted it). Decided by what happened, not by the score, so a lock that ends between
+    identifiers: { target: !KeyOf wf-password-binding, policy: !KeyOf wf-password-try }
+    attrs: { order: 5, enabled: true, negate: true, failure_result: false }
+  # Order 21: no password checked and the connection throttled: the throttle's words. (A stage is bound to a flow
+  # once, so this is a second deny stage with the same words as at 15.) An error passes on to the guard at 23.
+  - model: authentik_stages_deny.denystage
+    id: wf-connection-throttled-after-stage
+    identifiers: { name: workforce-connection-throttled-after }
+    attrs:
+      name: workforce-connection-throttled-after
+      deny_message: >-
+        Too many wrong passwords from this connection. Wait 15 minutes, or use another connection (for example your
+        phone’s mobile data). Unlocking your sign-in doesn’t lift this.
+  - model: authentik_flows.flowstagebinding
+    id: wf-connection-throttled-after-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-connection-throttled-after-stage
+    attrs:
+      order: 21
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-connection-throttled-after-binding, policy: !KeyOf wf-password-not-checked-throttled }
+    attrs: { order: 0, enabled: true, failure_result: false }
+  # Order 23: nothing goes past the password step without a password checked in this sign-in (authentik's password
+  # stage records which backend accepted it). Decided by what happened, not by a count, so a pause that ends between
   # two checks can't let anyone through; an error refuses too.
   - model: authentik_policies_expression.expressionpolicy
     id: wf-password-not-checked
@@ -629,19 +833,73 @@ entries:
     attrs:
       name: workforce-password-not-checked
       deny_message: >-
-        That was wrong too many times. Wait 15 minutes, then sign in again, and we’ll send you a new code.
+        Too many wrong passwords for this name, from this connection. Wait 15 minutes, then try again. If you’ve
+        forgotten your password, use “Forgot your password?”. If you’re still stuck, ask your manager to unlock your
+        sign-in.
   - model: authentik_flows.flowstagebinding
     id: wf-password-not-checked-binding
     identifiers:
       target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
       stage: !KeyOf wf-password-not-checked-stage
     attrs:
-      order: 21
+      order: 23
       evaluate_on_plan: false
       re_evaluate_policies: true
   - model: authentik_policies.policybinding
     identifiers: { target: !KeyOf wf-password-not-checked-binding, policy: !KeyOf wf-password-not-checked }
     attrs: { order: 0, enabled: true, failure_result: true }
+  # Order 22: the try was right (workforce-password-right always fails, so this deny stage never shows).
+  - model: authentik_stages_deny.denystage
+    id: wf-password-right-stage
+    identifiers: { name: workforce-password-right }
+    attrs:
+      name: workforce-password-right
+      deny_message: >-
+        Too many wrong passwords for this name, from this connection. Wait 15 minutes, then try again.
+  - model: authentik_flows.flowstagebinding
+    id: wf-password-right-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-password-right-stage
+    attrs:
+      order: 22
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-password-right-binding, policy: !KeyOf wf-password-right }
+    attrs: { order: 0, enabled: true, failure_result: false }
+
+  # Contract 2.3 (a): "what address does the sign-in server see?", for the readiness check ("client addresses" in
+  # bin/doctor.sh, and the controller's probe). A flow anyone may open, with no stages, whose one policy always
+  # refuses with workforce-client-address=<connection key>: authentik answers with its access-denied page carrying
+  # that message. It reads and writes nothing about any account; it tells a caller only their own address.
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-client-address-policy
+    identifiers: { name: workforce-client-address }
+    attrs:
+      name: workforce-client-address
+      expression: |
+{% filter indent(8, true) %}
+{% include 'password-pause.py' %}
+{% endfilter %}
+        # ---- the authentik part ----
+        from authentik.root.middleware import ClientIPMiddleware
+        ak_message("workforce-client-address=" + wf_connection_key(ClientIPMiddleware.get_client_ip(request.http_request)))
+        return False
+  - model: authentik_flows.flow
+    id: wf-client-address-flow
+    identifiers: { slug: workforce-client-address }
+    attrs:
+      name: Workforce client address check
+      slug: workforce-client-address
+      title: Client address check
+      designation: stage_configuration
+      authentication: none
+      denied_action: message
+      layout: stacked
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-client-address-flow, policy: !KeyOf wf-client-address-policy }
+    attrs: { order: 0, enabled: true }
 
   # My Hub → "Use an authenticator app" opens this (signed in already): an email code first, so only the person
   # who reads that email can add an app, then the app's QR code. Workforce then removes the email method when they
@@ -772,15 +1030,102 @@ entries:
     identifiers: { target: !KeyOf wf-emergency-app-flow, stage: !KeyOf wf-authenticator-app }
     attrs: { order: 10 }
 
-  # Review finding 6: wrong codes lock too. The same check again just before the code step (its own deny stage:
-  # a stage is bound to a flow once).
+  # Workforce issue 462 (contract 3.7): wrong codes keep their own count, by account, apart from wrong passwords and
+  # the "Send a new code" limit: five wrong codes within 15 minutes, then a 15-minute wait from the fifth (only someone
+  # with the password reaches the code step). code-tries.py has the rule; bin/tests/authentik-lock-e2e.sh runs it.
+  # - workforce-code-try, on the code step's binding, records each code typed in (custom_workforce_code_try), unless
+  #   the account's codes are paused (then nothing is recorded, so the wait isn't stretched). It always passes: the code
+  #   step is never skipped because of it (its failure result is true too).
+  # - workforce-codes-paused, before the code step (29) and after it (31): at 31 it first marks this sign-in's code
+  #   try right (the code step accepted it), then decides. After five wrong codes even a right one doesn't sign in.
+  # An unlock in Workforce doesn't touch it.
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-code-try
+    identifiers: { name: workforce-code-try }
+    attrs:
+      name: workforce-code-try
+      expression: |
+{% filter indent(8, true) %}
+{% include 'password-pause.py' %}
+{% include 'code-tries.py' %}
+{% endfilter %}
+        # ---- the authentik part ----
+        from datetime import datetime, timezone as tz
+        from uuid import uuid4
+        from django.db import connections, transaction
+        from django.utils import timezone
+        from rest_framework.exceptions import ParseError
+        http, person, account, conn, address = wf_ak_subject(request)
+        pk = getattr(person, "pk", None)
+        plan = request.context.get("flow_plan")
+        if pk is None or plan is None:
+            return True
+        # Only a code this request records may be marked right at 31: never one typed earlier in this sign-in (a wrong
+        # one, or one typed while the codes were paused, which is recorded nowhere).
+        plan.context.pop(WF_PLAN_CODE_TRY, None)
+        offered = [c.get("device_class") for c in (plan.context.get(
+            "goauthentik.io/stages/authenticator_validate/device_challenges") or []) if isinstance(c, dict)]
+        try:
+            checked = wf_code_request(http.method, http.data, offered)
+        except ParseError:
+            checked = False
+        if not checked:
+            return True
+        with transaction.atomic(using="default"):
+            with connections["default"].cursor() as cursor:
+                wf_ak_lock(cursor, (WF_LOCK_CODES, "codes:%d" % int(pk)), (WF_LOCK_CODES, None))
+            now = timezone.now().timestamp()
+            since = datetime.fromtimestamp(now - 2 * WF_WINDOW, tz.utc)
+            tries = [(at, c.get("wf_try")) for at, c in wf_ak_rows(WF_CODE_TRY, since, wf_user_pk=int(pk))]
+            right = set(c.get("wf_try") for at, c in wf_ak_rows(WF_CODE_RIGHT, since, wf_user_pk=int(pk)))
+            if wf_codes_paused(tries, right, now) is not None:
+                return True
+            tid = str(uuid4())
+            wf_ak_record(WF_CODE_TRY, WF_CODE_KEEP, address, wf_try=tid, wf_user_pk=int(pk))
+            plan.context[WF_PLAN_CODE_TRY] = tid
+        return True
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-code-step-binding, policy: !KeyOf wf-code-try }
+    attrs: { order: 3, enabled: true, failure_result: true }
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-codes-paused
+    identifiers: { name: workforce-codes-paused }
+    attrs:
+      name: workforce-codes-paused
+      expression: |
+{% filter indent(8, true) %}
+{% include 'password-pause.py' %}
+{% include 'code-tries.py' %}
+{% endfilter %}
+        # ---- the authentik part ----
+        from datetime import datetime, timezone as tz
+        from django.db import connections, transaction
+        from django.utils import timezone
+        http, person, account, conn, address = wf_ak_subject(request)
+        pk = getattr(person, "pk", None)
+        if pk is None:
+            return False
+        plan = request.context.get("flow_plan")
+        with transaction.atomic(using="default"):
+            with connections["default"].cursor() as cursor:
+                wf_ak_lock(cursor, (WF_LOCK_CODES, "codes:%d" % int(pk)), (WF_LOCK_CODES, None))
+            now = timezone.now().timestamp()
+            since = datetime.fromtimestamp(now - 2 * WF_WINDOW, tz.utc)
+            tries = [(at, c.get("wf_try")) for at, c in wf_ak_rows(WF_CODE_TRY, since, wf_user_pk=int(pk))]
+            right = set(c.get("wf_try") for at, c in wf_ak_rows(WF_CODE_RIGHT, since, wf_user_pk=int(pk)))
+            tid = plan.context.pop(WF_PLAN_CODE_TRY, None) if plan is not None else None
+            if tid and tid in set(t for at, t in tries) and tid not in right:
+                # Only reached at 31, after the code step accepted this code (at 29 no code has been typed yet).
+                wf_ak_record(WF_CODE_RIGHT, WF_CODE_KEEP, address, wf_try=tid, wf_user_pk=int(pk))
+                right.add(tid)
+        return wf_codes_paused(tries, right, now) is not None
   - model: authentik_stages_deny.denystage
     id: wf-too-many-tries-codes
     identifiers: { name: workforce-too-many-tries-codes }
     attrs:
       name: workforce-too-many-tries-codes
       deny_message: >-
-        That was wrong too many times. Wait 15 minutes, then sign in again, and we’ll send you a new code.
+        That code was wrong too many times. Wait 15 minutes, then sign in again, and we’ll send you a new code.
   - model: authentik_flows.flowstagebinding
     id: wf-too-many-tries-codes-binding
     identifiers:
@@ -791,20 +1136,19 @@ entries:
       evaluate_on_plan: false
       re_evaluate_policies: true
   - model: authentik_policies.policybinding
-    identifiers: { target: !KeyOf wf-too-many-tries-codes-binding, policy: !KeyOf wf-too-many-tries }
-    attrs: { order: 0, enabled: true }
+    identifiers: { target: !KeyOf wf-too-many-tries-codes-binding, policy: !KeyOf wf-codes-paused }
+    attrs: { order: 0, enabled: true, failure_result: true }
 
-  # Third review of finding 6: wrong codes count too (authentik lowers the score for each one), but the code step
-  # asks again in place, so the lock at 29 isn't seen again. It is checked once more after the code: after too
-  # many wrong tries, even a right code doesn't sign anyone in. (Not a lock on the code step itself: a skipped code
-  # step would sign in without a code.)
+  # Third review of finding 6: the code step asks again in place, so the check at 29 isn't seen again. It is checked
+  # once more after the code: after too many wrong codes, even a right code doesn't sign anyone in. (Not a lock on the
+  # code step itself: a skipped code step would sign in without a code.)
   - model: authentik_stages_deny.denystage
     id: wf-too-many-tries-after-code
     identifiers: { name: workforce-too-many-tries-after-code }
     attrs:
       name: workforce-too-many-tries-after-code
       deny_message: >-
-        That was wrong too many times. Wait 15 minutes, then sign in again, and we’ll send you a new code.
+        That code was wrong too many times. Wait 15 minutes, then sign in again, and we’ll send you a new code.
   - model: authentik_flows.flowstagebinding
     id: wf-too-many-tries-after-code-binding
     identifiers:
@@ -815,8 +1159,8 @@ entries:
       evaluate_on_plan: false
       re_evaluate_policies: true
   - model: authentik_policies.policybinding
-    identifiers: { target: !KeyOf wf-too-many-tries-after-code-binding, policy: !KeyOf wf-too-many-tries }
-    attrs: { order: 0, enabled: true }
+    identifiers: { target: !KeyOf wf-too-many-tries-after-code-binding, policy: !KeyOf wf-codes-paused }
+    attrs: { order: 0, enabled: true, failure_result: true }
 
   # Second security review (finding 1): authentik's first-run page (initial-setup) sets akadmin's password with no
   # code. The flow itself is closed, as authentik closes it after its own setup: only a superuser may run it, and

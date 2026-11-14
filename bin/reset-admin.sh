@@ -55,18 +55,20 @@ sys.path.insert(0, "/authentik")
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "authentik.root.settings")
 import django
 django.setup()
+from datetime import datetime, timedelta, timezone
 from authentik.core.models import User
 u = User.objects.get(username="admin")
 u.set_password(os.environ["WF_NEW_PW"])
+# Workforce issue 462: wrong passwords before this moment no longer count, on every connection (the same marker an
+# "Unlock sign-in" in Workforce writes for staff: attributes.workforce.password_unlocked_at). Nothing else is touched.
+wf = dict((u.attributes or {}).get("workforce") or {})
+wf["password_unlocked_at"] = (datetime.now(timezone.utc) + timedelta(seconds=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+u.attributes = dict(u.attributes or {}, workforce=wf)
 u.save()
 # Workforce ADR-0039 §5: an authenticator app added to the emergency administrator is required once added, and this
 # server step is the only way to remove it (a lost phone mustn't lose the last-resort account).
 from authentik.stages.authenticator_totp.models import TOTPDevice
 TOTPDevice.objects.filter(user=u).delete()
-# The wrong-tries lock on it is lifted too (review of the controller bundle, finding 1): the new password can be
-# used at once, from the address that was locked.
-from authentik.policies.reputation.models import Reputation
-Reputation.objects.filter(identifier="admin").delete()
 print("OK")
 PYEOF' 2>&1 | tail -1)"
 
@@ -75,7 +77,7 @@ PYEOF' 2>&1 | tail -1)"
 cat <<EOF
 
 Done. Any authenticator app on the account has been removed too (add one again from
-Workforce if you want it), and any wrong-tries lock on it lifted. The administrator
+Workforce if you want it), and any pause after wrong passwords lifted. The administrator
 password is now:
 
   ${NEW_PW}

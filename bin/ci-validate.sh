@@ -203,6 +203,46 @@ for f in gateway/Caddyfile*; do
 done
 [ "$RC" -ne 0 ] || echo "ok   no test inbox, mailpit or plain relay outside the TEST appliance"
 
+echo "== client addresses: every gateway file"
+# Workforce issue 462 (contract 2.1 and 2.3 c): the gateway alone decides a client's address. Each gateway file has
+# the servers block (trusted proxies from GATEWAY_TRUSTED_PROXIES, read strictly, X-Forwarded-For only), every
+# reverse_proxy imports client_address (one X-Forwarded-For, every other client header removed), and every site
+# imports client_forwarded (the mark for forwarding by a peer nobody named). bin/tests/gateway-client-address-e2e.sh
+# runs them on the pinned Caddy.
+python3 -I - gateway/Caddyfile* <<'PY' || bad "a gateway file doesn't decide client addresses as it must (contract 2.1)"
+import re, sys
+failed = False
+for path in sys.argv[1:]:
+    lines = [l.split("#", 1)[0].rstrip() if not l.lstrip().startswith("#") else "" for l in open(path, encoding="utf-8")]
+    text = "\n".join(lines)
+    for need in ("trusted_proxies static {$GATEWAY_TRUSTED_PROXIES:192.0.2.255/32}", "trusted_proxies_strict",
+                 "client_ip_headers X-Forwarded-For", "(client_address) {", "header_up X-Forwarded-For {client_ip}",
+                 "header_up -Forwarded", "header_up -X-authentik-remote-ip", "header_up -X-authentik-outpost-token"):
+        if need not in text:
+            print("FAIL %s: no '%s'" % (path, need)); failed = True
+    depth = 0
+    for i, line in enumerate(lines):
+        if depth == 0 and line.endswith("{") and not line.startswith("(") and line.strip() != "{":
+            nxt = next((l.strip() for l in lines[i + 1:] if l.strip()), "")
+            if nxt != "import client_forwarded":
+                print("FAIL %s:%d: the site doesn't begin with 'import client_forwarded'" % (path, i + 1)); failed = True
+        m = re.match(r"^\s*reverse_proxy\s+\S+(.*)$", line)
+        if m:
+            body = []
+            if m.group(1).strip() == "{":
+                d = 1
+                for l in lines[i + 1:]:
+                    d += l.count("{") - l.count("}")
+                    if d <= 0:
+                        break
+                    body.append(l.strip())
+            if "import client_address" not in body:
+                print("FAIL %s:%d: a reverse_proxy without 'import client_address'" % (path, i + 1)); failed = True
+        depth += line.count("{") - line.count("}")
+sys.exit(1 if failed else 0)
+PY
+[ "$RC" -ne 0 ] || echo "ok   every reverse_proxy imports client_address; every file trusts GATEWAY_TRUSTED_PROXIES only"
+
 echo "== self-tests"
 for t in bin/tests/*-test.sh; do
   [ -e "$t" ] || continue

@@ -422,6 +422,8 @@ INV
   WFV_ops_alert_email="${OPS_ALERT_EMAIL}" \
   WFV_ops_alert_from="${OPS_ALERT_FROM:-}" \
   WFV_ops_heartbeat_url="${OPS_HEARTBEAT_URL:-}" \
+  WFV_gateway_trusted_proxies="${GATEWAY_TRUSTED_PROXIES:-}" \
+  WFV_client_addresses_confirmed="${CLIENT_ADDRESSES_CONFIRMED:-}" \
   WFV_ai_test_services="${AI_TEST_SERVICES:-false}" \
   WFV_brand_product_name="${BRAND_PRODUCT_NAME:-Workforce}" \
   WFV_brand_logo_file="${BRAND_LOGO_FILE:-logo.png}" \
@@ -817,6 +819,11 @@ if [ -f .env ]; then
     # shellcheck source=lib/prod-guards.sh
     . ./bin/lib/prod-guards.sh
     prod_guard_start "${ENV_NAME:-prod}" "${TEST_INBOX:-}" "${TEST_INBOX_HOSTNAME:-}" "${COMPOSE_PROFILES:-}" || exit 1
+    # Workforce issue 462: the operator's own proxies in front of this server (RUNBOOK §7a), checked before they are used.
+    # shellcheck source=lib/client-address.sh
+    . ./bin/lib/client-address.sh
+    GTP_PROBLEM="$(gateway_proxies_problem)"
+    [ -z "$GTP_PROBLEM" ] || { echo "$GTP_PROBLEM (RUNBOOK §7a). Nothing was changed."; exit 1; }
     preflight_network
     preflight_and_pull
     # ADMIN_PASSWORD for the playbook: resume uses a fresh random value — the
@@ -1046,6 +1053,11 @@ esac
 # shellcheck source=lib/prod-guards.sh
 . ./bin/lib/prod-guards.sh
 prod_guard_start "${ENV_NAME:-prod}" "${TEST_INBOX:-}" "${TEST_INBOX_HOSTNAME:-}" "${COMPOSE_PROFILES:-}" || exit 1
+# Workforce issue 462: the operator's own proxies in front of this server (RUNBOOK §7a), checked before they are used.
+# shellcheck source=lib/client-address.sh
+. ./bin/lib/client-address.sh
+GTP_PROBLEM="$(gateway_proxies_problem)"
+[ -z "$GTP_PROBLEM" ] || { echo "$GTP_PROBLEM (RUNBOOK §7a). Nothing was changed."; exit 1; }
 cat > .env <<ENV
 ENV_NAME=${ENV_NAME:-prod}
 APP_HOSTNAME=${APP_HOSTNAME}
@@ -1096,6 +1108,11 @@ say "Final health check:"
 # Captured, not ignored: the admin password below must still be shown/saved
 # (it is already live in authentik), THEN a red check fails the install.
 DOCTOR_RC=0
+# Workforce issue 462: does the sign-in server see each person's own address? Read by the "client addresses" row.
+if [ "${SMOKE}" -eq 0 ]; then
+  if CA_WORDS="$(client_address_probe)"; then echo "     $CA_WORDS"
+  else warn "$CA_WORDS — Workforce's Setup says \"not ready\" until it is fixed: RUNBOOK §7a."; fi
+fi
 if [ "${SMOKE}" -eq 1 ]; then
   ./bin/doctor.sh --gate --smoke || DOCTOR_RC=$?
 else

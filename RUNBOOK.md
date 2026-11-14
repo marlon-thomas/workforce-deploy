@@ -155,25 +155,41 @@ install that same unsigned version.
   emergency administrator and its recovery email"). On a server installed before releases
   were signed, update to a signed release first ("Release signatures" above).
 
-### Wrong tries and the lock
+### Wrong passwords: the pause and the throttle
 
-Five wrong passwords or codes for one account in 15 minutes stop its sign-in for 15 minutes ("That was wrong too
-many times"); then it works again, and staff are sent a new code (`admin` gets no codes: it signs in with its
-password alone, or its authenticator app if it has one). For staff accounts the lock is by account, from
-wherever the tries came. For the emergency administrator (`admin`, whose name is public) it is by account **and**
-address: wrong tries from somewhere else don't lock you out. If you are locked out of `admin` and can't wait, or
-think someone else has the password, `./bin/reset-admin.sh` sets a new one and lifts the lock.
+Workforce issue 462 (ADR-0039, amendment of 14 November 2026). Nothing is ever locked for the whole account:
 
-Because guesses at `admin` from many addresses are not added up, its password is what stops them. The
-installer's and `reset-admin.sh`'s are 24 random characters; one you type into the installer needs at least 16;
-one chosen later ("Forgot your password?", or Change password in Workforce's account menu) needs at least 16
-that aren't easy to guess. authentik's own change-password page refuses `admin`. **On a server installed or
-updated before this rule:** if `admin`'s password is shorter than 16 characters, or easy to guess, change it now
-(Workforce's account menu, or `./bin/reset-admin.sh`).
+- **The pause.** Five wrong passwords for one name from one connection (the client's internet address; an IPv6
+  address by its /64) within 15 minutes pause that name **on that connection** until 15 minutes after the fifth
+  ("Too many wrong passwords for this name, from this connection…"). Requests during the pause are refused before
+  the password is checked and aren't counted, so they can't stretch it. The same person can sign in at once from
+  another connection (a phone's mobile data). Every account is treated alike, `admin` included, and a name nobody
+  has gets exactly the same answers, so the page never tells anyone which names exist.
+- **The throttle.** Ten wrong passwords from one connection within 15 minutes, whatever names were typed, hold that
+  connection for 15 minutes for every name ("Too many wrong passwords from this connection…"); for IPv6 also thirty
+  from one /48. A **workplace** (a connection, or a /48, where three or more staff typed the right password in the
+  last 30 days) is never throttled, so nobody in the building can keep the office out; each person's own pause
+  still applies there.
+- **Codes** keep their own count: five wrong codes for an account within 15 minutes, then 15 minutes' wait from the
+  fifth ("That code was wrong too many times…"). Only someone with the password reaches the code step.
 
-The lock by address needs authentik to see each client's real address (§7a). Where every client reaches it with
-one address, someone else's wrong tries lock `admin` for you too, as before this rule; `reset-admin.sh` still
-lifts the lock.
+**What lifts a pause:** time; a new password ("Forgot your password?" never skips the code); **Unlock sign-in** on
+the person's record in Workforce (a registered manager or director; a data administrator if the organisation
+switched it on), which lets them try again from every connection and changes nothing else; for `admin`,
+`./bin/reset-admin.sh`, which sets a new password and lifts its pause the same way. Nothing lifts a throttle or the
+codes' wait but time. Spread attempts (one connection trying five or more names in an hour, one account tried from
+three or more connections in an hour or twenty times in a day) are recorded as alerts, never locks: Workforce shows
+each organisation its own on Today, and `doctor.sh` counts them ("sign-in attacks").
+
+Because nothing adds up guesses at `admin` from many addresses, its password is what stops them. The installer's
+and `reset-admin.sh`'s are 24 random characters; one you type into the installer needs at least 16; one chosen later
+("Forgot your password?", or Change password in Workforce's account menu) needs at least 16 that aren't easy to
+guess. authentik's own change-password page refuses `admin`. **On a server installed or updated before this rule:**
+if `admin`'s password is shorter than 16 characters, or easy to guess, change it now (Workforce's account menu, or
+`./bin/reset-admin.sh`).
+
+All of this needs the sign-in server to see each person's own address (§7a). Workforce's Setup says "not ready"
+until the health check's "client addresses" row is OK.
 
 ## 6a. Jobs from the app
 
@@ -248,26 +264,59 @@ back a good update. Run it by hand without `--gate` to see them as FAILs.
 
 ## 7a. Client addresses
 
-The sign-in server's wrong-tries lock for `admin` (§6) counts by address, and the audit and signature
-certificates record it, so each client must reach the server with its own address. These don't:
+Wrong passwords pause one person on one **connection** (§6), and the audit and signature certificates record the
+address, so the sign-in server must see each client's own address, and nothing a browser sends may choose it.
 
-- Rootless Docker with its default port driver (below; `doctor.sh` warns).
-- IPv6 clients on system Docker with the userland proxy, when the Compose networks have no IPv6: every IPv6
-  client arrives as the bridge's IPv4 gateway (`172.x.0.1`). Give the networks IPv6, or publish the gateway
-  only on IPv4 (no AAAA record for the two names).
-- A load balancer, CDN or NAT in front of the gateway: every client arrives as its address. The gateway
-  ignores an incoming `X-Forwarded-For` (it trusts no proxy), so put nothing in front of it, or accept that
-  the lock and the audit see that one address.
+**How the address is decided.** The gateway alone decides it, once, and sends exactly that one address on to the
+sign-in server, the application and webmail (`X-Forwarded-For` and `X-Real-IP`), removing every other header that
+could name a client (`Forwarded`, `True-Client-IP`, `CF-Connecting-IP`, authentik's own `X-authentik-remote-ip`, …).
+With nothing in front of the gateway the address is the connection's own, and forged headers are ignored. The
+sign-in server takes `X-Forwarded-For` only from the stack's own private networks
+(`AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS` in `compose.yaml`), which only the stack's own containers join.
 
-The sign-in server takes the address from `X-Forwarded-For` sent by any private address
-(`AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS` in `compose.yaml`); only the gateway, which sets it, reaches it from
-outside. Any container on its networks could name the address it is counted under, so run nothing else there.
+**What keeps real addresses:**
 
-Rootless Docker's default port driver shows every client as the Docker gateway (`172.x`), which puts a
-meaningless address on signature certificates, in the audit and in the mail server's filtering. New installs
-use the `slirp4netns` driver, which keeps the real address (it's a little slower, which doesn't matter
-here). `./bin/doctor.sh` warns under "client addresses" if a server still has the default. To change one, as
-root, once (the stack restarts, about a minute of downtime):
+- Rootless Docker with the `slirp4netns` port driver (the installer's default; how to switch an older server is
+  below). The default `builtin` driver shows every client as the Docker gateway (`172.x.0.1`): not supported.
+- System (rootful) Docker publishing with iptables. With the userland proxy and Compose networks without IPv6, every
+  IPv6 client arrives as the bridge's IPv4 gateway: give the networks IPv6, or publish only on IPv4 (no AAAA record).
+- The appliance controller (the same rules for its Docker).
+- **Your own load balancer or reverse proxy** in front of the gateway: supported only when it sets
+  `X-Forwarded-For` and is named in `GATEWAY_TRUSTED_PROXIES` in `.env` (its addresses or CIDRs, **separated by
+  spaces**, e.g. `GATEWAY_TRUSTED_PROXIES=203.0.113.10/32 203.0.113.11/32`), then `./bin/update.sh <running
+  version>`. Name **every** proxy or CDN in front, including all of a CDN's outgoing ranges. The gateway then reads
+  `X-Forwarded-For` right to left and takes the first address that isn't one of them, so a forged left-hand entry
+  can't choose it. `install.sh` and `update.sh` refuse a value that names everyone, loopback, link-local, the
+  rootless network's `10.0.2.0/24` or one of this stack's Docker networks.
+- Not supported: a TCP pass-through that translates addresses, and the PROXY protocol (a later issue if needed).
+
+**Your offices.** When most sign-ins come through one or two internet addresses, that looks exactly like a proxy
+nobody named, so the check asks you to say which it is. If they are your offices' own connections, list them in
+`CLIENT_ADDRESSES_CONFIRMED` in `.env`, separated by commas (an IPv6 connection as the check names it, e.g.
+`2001:db8:1:2::/64`). It is read by the check only, never to let anyone in or to skip a limit.
+
+**The check** (`./bin/doctor.sh`, row "client addresses"; Workforce's Setup shows it as "Sign-in limits see each
+person's own connection", and only OK is ready):
+
+- **The probe.** After every install and update (and daily under the controller; on the host `doctor.sh` runs it
+  when its record is a day old), a request with forged headers goes to the sign-in server through the gateway, as an
+  outside request does. It must come back with the probe's own address. Kept in `status/client-address.json`; older
+  than 8 days counts as not checked.
+- **Where sign-ins came from** in the last 7 days, as the sign-in server recorded them (addresses only, no names):
+  - FAIL when any came from the server's own networks (the Docker networks, `10.0.2.0/24`, loopback) or from a
+    proxy named in `GATEWAY_TRUSTED_PROXIES`;
+  - with 3 or more people over 2 or more days, when one or two addresses carry 80% or more of them and aren't in
+    `CLIENT_ADDRESSES_CONFIRMED`: WARN for one public address, FAIL otherwise (two, or a private one);
+  - FAIL when more than half of the people signed in through something that forwards addresses (a CDN or proxy)
+    which `GATEWAY_TRUSTED_PROXIES` doesn't name (the gateway marks such requests);
+  - SKIP ("Not checked yet") until someone has signed in from outside: sign in to Workforce from your own computer,
+    then look again.
+- WARN, FAIL and SKIP are all "not ready" in Setup. The row names the address it saw and what to do.
+
+Rootless Docker's default port driver shows every client as the Docker gateway (`172.x`). New installs use the
+`slirp4netns` driver, which keeps the real address (it's a little slower, which doesn't matter here).
+`./bin/doctor.sh` shows it as "port driver" (FAIL when the client-address check fails too). To change one, as root,
+once (the stack restarts, about a minute of downtime):
 
 ```bash
 apt-get install -y slirp4netns
@@ -372,6 +421,11 @@ docker compose up -d backup
 (The bundle must be at a version that has `bin/healthwatch.sh`; any `update.sh` run after that
 recreates the backup container itself.) The watch reads `.env` at every run, so later changes
 to `OPS_ALERT_EMAIL` need no restart. New installs take it from `environments/<env>.env`.
+
+**Sign-in rows.** "client addresses" (§7a) is a FAIL that emails like any other (at most WARN during an install or
+update, so neither is failed or rolled back by it); Workforce's Setup treats anything but OK there as "not ready".
+"sign-in attacks" counts the sign-in server's alerts of the last day (connections trying many names, accounts tried
+from many places, connections throttled): a WARN, never a lock; Workforce shows each organisation its own on Today.
 
 **What it cannot do.** A server that is off, or has lost its network, cannot send email about
 it. That is what the outside uptime check (§7c) is for.

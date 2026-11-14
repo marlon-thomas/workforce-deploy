@@ -109,13 +109,15 @@ compose_state() { # compose_state <service> — "running", "exited", … or noth
 
 # --- rootless Docker's port driver: the default shows every client as the Docker gateway, so
 #     signature certificates and the audit would hold a meaningless address (host only: the
-#     backup container can't see the daemon's process).
+#     backup container can't see the daemon's process). Workforce issue 462: the sign-in limits too; the
+#     "client addresses" row below says whether it is so, and this row turns FAIL with it.
+PORT_DRIVER=""
 if [ "$IN_STACK" -eq 0 ] && command -v pgrep >/dev/null 2>&1; then
   RK="$(pgrep -af 'rootlesskit --state-dir' 2>/dev/null | head -1)" || RK=""
   case "$RK" in
     "") : ;;
-    *--port-driver=slirp4netns*) row "client addresses" ok "real addresses reach the app" ;;
-    *) row "client addresses" warn "rootless Docker hides client addresses, so certificates and the audit record the Docker gateway — see RUNBOOK (client addresses)" ;;
+    *--port-driver=slirp4netns*) PORT_DRIVER=slirp4netns ;;
+    *) PORT_DRIVER=builtin ;;
   esac
 fi
 
@@ -380,6 +382,90 @@ print("CODEFAIL", mail.filter(aggregated_status="error", mtime__gte=now() - time
     ''|*[!0-9]*) row "sign-in code emails" skip "couldn't ask the sign-in server" ;;
     *) oprow "sign-in code emails" fail "${CODE_FAILS} sign-in code email(s) couldn't be sent in the last day — people can't sign in without them (check SIGNIN_SMTP_* / SMTP_*)" ;;
   esac
+fi
+
+# --- client addresses (Workforce issue 462; contract 2.3): wrong passwords pause one account on one connection, so
+# the sign-in server must see each person's own address, and no forwarded header may choose it. Three parts, the row
+# is the worst; Workforce shows it as a required setup check (anything but OK is "not ready", WARN included).
+#   (a) the probe: through the gateway, with forged headers (bin/lib/client-address.sh). On the host layout doctor.sh
+#       runs it when its record is missing or a day old (install.sh and update.sh run it after every start); under
+#       the controller the controller runs it after each apply. Older than 8 days counts as not checked.
+#   (b) where sign-ins really came from in the last 7 days, as the sign-in server recorded them (connection keys,
+#       counted inside it, no names): never this server's own networks or a named proxy; not most sign-ins of 3+
+#       people over 2+ days through one or two addresses the operator hasn't confirmed (CLIENT_ADDRESSES_CONFIRMED:
+#       a load balancer, an HA pair or a CDN nobody named looks just like that; WARN for one public address, FAIL
+#       otherwise); and not most of them forwarded by a peer nobody named (the gateway's X-Workforce-Forwarded mark).
+#   (c) the gateway files themselves: bin/ci-validate.sh.
+# shellcheck source=lib/client-address.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/client-address.sh"
+CA_STATE=ok; CA_DETAIL=""; CA_CONFIRMED_NOTE=""
+if ! under_controller; then
+  CA_RC=0; client_address_read || CA_RC=$?
+  if [ "$CA_RC" -ne 0 ] || [ "$(( $(date +%s) - ${CA_AT:-0} ))" -gt 86400 ]; then
+    client_address_probe >/dev/null 2>&1 || true
+  fi
+fi
+CA_RC=0; client_address_read || CA_RC=$?
+if [ "$CA_RC" -eq 1 ]; then
+  ca_worse fail "not checked yet: the sign-in server's address check hasn't run (it runs after each install and update)"
+elif [ "$CA_RC" -ne 0 ]; then
+  ca_worse fail "the address check's record (${CLIENT_ADDRESS_FILE}) can't be read: run ./bin/update.sh, or the controller's update, again"
+elif [ "$(( $(date +%s) - CA_AT ))" -gt $(( 8 * 86400 )) ]; then
+  ca_worse fail "not checked since $(date -u -d "@$CA_AT" +%Y-%m-%d 2>/dev/null || echo "over a week")"
+elif [ "$CA_OK" != true ]; then
+  ca_worse fail "${CA_WHY:-the sign-in server doesn't see the probe's own address}. See RUNBOOK §7a."
+fi
+# This server's own set: its Docker networks (under the controller as the controller read them from Docker, in the
+# probe's record: null there is a failure; on the host read here), the rootless network, loopback, link-local, and
+# any proxy named in GATEWAY_TRUSTED_PROXIES.
+OWN_SET=(10.0.2.0/24 127.0.0.0/8)
+if under_controller; then
+  if [ "$CA_RC" -eq 0 ] && [ "$CA_NETWORKS_KNOWN" = yes ] && [ -n "$CA_NETWORKS" ]; then
+    while read -r n; do [ -z "$n" ] || OWN_SET+=("$n"); done <<< "$CA_NETWORKS"
+  elif [ "$CA_RC" -eq 0 ]; then
+    ca_worse fail "the server's own networks couldn't be read (the controller's address check found none), so sign-ins from them can't be told apart. See RUNBOOK §7a."
+  fi
+else
+  while read -r n; do [ -z "$n" ] || OWN_SET+=("$n"); done < <(stack_networks | grep -v : || true)
+fi
+GTP_LIST="${GATEWAY_TRUSTED_PROXIES:-}"; for n in ${GTP_LIST//,/ }; do OWN_SET+=("$n"); done
+CA_ASKED=0; SIGNIN_ALERTS=""
+if docker compose ps --status running -q authentik-server 2>/dev/null | grep -q .; then
+  CA_OUT="$(docker compose exec -T authentik-server ak shell -c "$CLIENT_ADDRESS_AK" 2>/dev/null | grep -E '^WF(CONN|SIGNINS|FWD|ALERTS) ' | head -n 2000)" || CA_OUT=""
+  if printf '%s\n' "$CA_OUT" | grep -q '^WFSIGNINS '; then
+    CA_ASKED=1
+    client_address_signins "$CA_OUT"
+    if [ "${CA_PEOPLE:-0}" = 0 ]; then
+      ca_worse skip "Not checked yet: sign in to Workforce from your own computer, then look again."
+    fi
+  fi
+fi
+[ "$CA_ASKED" -eq 1 ] || ca_worse skip "couldn't ask the sign-in server where sign-ins came from"
+case "$CA_STATE" in
+  ok) row "client addresses" ok "each person's own address reaches the sign-in server (forged headers ignored; checked $(date -u -d "@$CA_AT" '+%Y-%m-%d %H:%M' 2>/dev/null) UTC)${CA_CONFIRMED_NOTE:+; ${CA_CONFIRMED_NOTE}}" ;;
+  fail) oprow "client addresses" fail "$CA_DETAIL" ;;
+  *) row "client addresses" "$CA_STATE" "$CA_DETAIL" ;;
+esac
+case "$PORT_DRIVER" in
+  slirp4netns) row "port driver" ok "rootless Docker keeps clients' addresses (slirp4netns)" ;;
+  builtin)
+    if [ "$CA_STATE" = fail ]; then
+      oprow "port driver" fail "rootless Docker's default port driver shows every client as the Docker gateway: see RUNBOOK §7a"
+    else
+      row "port driver" warn "rootless Docker's default port driver hides client addresses, so certificates and the audit record the Docker gateway — see RUNBOOK §7a"
+    fi ;;
+esac
+# Spread wrong passwords the sign-in server noticed in the last day (contract 3.6): counts only, installation-wide;
+# Workforce shows each organisation its own on Today. Never a lock.
+if [ -n "$SIGNIN_ALERTS" ]; then
+  read -r _ AL_CONN AL_ACCOUNT AL_THROTTLED <<< "$SIGNIN_ALERTS"
+  if is_count "$AL_CONN" && is_count "$AL_ACCOUNT" && is_count "$AL_THROTTLED"; then
+    if [ $((AL_CONN + AL_ACCOUNT + AL_THROTTLED)) -eq 0 ]; then
+      row "sign-in attacks" ok "no spread of wrong passwords in the last day"
+    else
+      row "sign-in attacks" warn "in the last day: ${AL_CONN} connection(s) trying many accounts, ${AL_ACCOUNT} account(s) tried from many places, ${AL_THROTTLED} connection(s) held back. Nobody is locked out by it; Workforce shows each organisation its own on Today"
+    fi
+  fi
 fi
 
 # --- test-only things on a real install (owner, 8 November 2026): the test inbox and mailpit
