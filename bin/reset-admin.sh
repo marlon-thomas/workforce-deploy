@@ -55,16 +55,26 @@ sys.path.insert(0, "/authentik")
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "authentik.root.settings")
 import django
 django.setup()
-from datetime import datetime, timedelta, timezone
+import uuid
+from datetime import timedelta
+from django.utils import timezone
 from authentik.core.models import User
+from authentik.events.models import Event
 u = User.objects.get(username="admin")
 u.set_password(os.environ["WF_NEW_PW"])
-# Workforce issue 462: wrong passwords before this moment no longer count, on every connection (the same marker an
-# "Unlock sign-in" in Workforce writes for staff: attributes.workforce.password_unlocked_at). Nothing else is touched.
 wf = dict((u.attributes or {}).get("workforce") or {})
-wf["password_unlocked_at"] = (datetime.now(timezone.utc) + timedelta(seconds=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+wf.pop("password_unlocked_at", None)
 u.attributes = dict(u.attributes or {}, workforce=wf)
 u.save()
+# Workforce issue 462 (contract R.7.4): wrong passwords before this moment no longer count, on every source: the same
+# unlock record an "Unlock sign-in" in Workforce makes for staff (by this server's clock, never an attribute). The new
+# password moves the marker too. Source and network holds are untouched.
+t = timezone.now()
+e = Event.new("workforce_password_unlock", app="workforce", wf_unlock_id=str(uuid.uuid4()), wf_user_pk=u.pk,
+              wf_at=t.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), wf_was_paused=False)
+e.expires = t + timedelta(days=31)
+e.user = {"pk": u.pk, "username": u.username}
+e.save()
 # Workforce ADR-0039 §5: an authenticator app added to the emergency administrator is required once added, and this
 # server step is the only way to remove it (a lost phone mustn't lose the last-resort account).
 from authentik.stages.authenticator_totp.models import TOTPDevice

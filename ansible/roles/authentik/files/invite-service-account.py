@@ -1,8 +1,9 @@
 # ADR-0017: the Workforce app's invitation credential, converged idempotently inside authentik
 # (`ak shell`). Reads the token key from stdin (never argv/env). The account can create, view
 # and delete invitations, (ADR-0024) look up a user and make them a password reset link, and
-# (ADR-0039) set where a staff account's sign-in codes go and remove its code methods, and (issue 462) read the
-# sign-in records and unlock a person's sign-in — nothing else (no flows, settings, groups or other tokens).
+# (ADR-0039) set where a staff account's sign-in codes go and remove its code methods, and (issue 462, contract R.7 and
+# R.8) ask the sign-in status interface whether a person is paused, unlock them and read the attack alerts — nothing
+# else (no flows, settings, groups, other tokens, and no authentik events: authentik_events.view_event is revoked).
 import sys
 
 from authentik.core.models import Group, Token, TokenIntents, User, UserTypes
@@ -62,18 +63,74 @@ for perm in (
     # Workforce issue 290: count failed sign-in code emails (authentik keeps them only as failed send_mail
     # tasks) for Setup -> Email delivery. Read-only; the app shows a count and an error with addresses removed.
     "authentik_tasks.view_task",
-    # Workforce issue 462: read the sign-in server's records of wrong passwords (custom_workforce_password_try,
-    # _right, _alert), to show a manager whether someone is paused and to raise attack alerts. Read-only: no record
-    # can be changed or deleted, and the unlock itself is an attribute change_user above already covers.
-    # Known exposure (Workforce issue 462 review, finding 5): authentik's view_event is global, not per action, and
-    # authentik 2026.8.5 keeps the whole body of every email it sends in its email_sent event (stages/email/tasks.py),
-    # so this token can also read live sign-in codes and password-reset links, for every organisation, until the
-    # events expire. change_user above already lets this token take an account over (by redirecting its code email),
-    # so a leak of it was already a takeover; this widens what a read-only leak exposes. Keep the token where it is
-    # (secrets/ak_invite_token, the app's memory) and never log it. RUNBOOK, "Hardening notes".
-    "authentik_events.view_event",
 ):
     assign(perm)
+
+# Workforce issue 462 (the owner's decision 3 of 15 November 2026; contract R.8): no global event access. authentik's
+# view_event is global, not per action, and authentik 2026.8.5 keeps the whole body of every email it sends in its
+# email_sent event, so with it this credential could read live sign-in codes and password-reset links for every
+# organisation. Earlier builds of this script granted it, so it is revoked here, not just no longer granted: from this
+# role (globally and on any object), from the account's own managed role, and from its own permissions. Then checked
+# in a fresh copy of the account; if anything still gives it (another role, a group), this script fails rather than
+# carrying on (the converge stops, and the operator sees why).
+from django.contrib.auth.models import Permission
+from guardian.models import RoleModelPermission, RoleObjectPermission
+
+VIEW_EVENT = Permission.objects.get(content_type__app_label="authentik_events", codename="view_event")
+own_roles = [role] + [r for r in [user.get_managed_role()] if r is not None]
+for r in own_roles:
+    RoleModelPermission.objects.filter(role=r, permission=VIEW_EVENT).delete()
+    RoleObjectPermission.objects.filter(role=r, permission=VIEW_EVENT).delete()
+# (authentik 2026.8.5 keeps no per-user permissions: its User sets user_permissions to None.)
+if getattr(getattr(user, "user_permissions", None), "remove", None) is not None:
+    user.user_permissions.remove(VIEW_EVENT)
+
+# The sign-in status interface (contract R.7): a property mapping of authentik's own base kind, which authentik's API
+# lets a caller test (POST /api/v3/propertymappings/all/<pk>/test/) with an object permission on that one mapping. An
+# expression policy can't be given that way (authentik 2026.8.5 refuses an object permission on a policy of another
+# app: found while building, 15 November 2026), and its blueprint can't make this kind of mapping, so the code is the
+# blueprint's unbound policy workforce-sign-in-status-code, copied here after every apply. Its id is fixed, so the
+# application needs no list (authentik can't list a mapping of this kind) and no lookup.
+from authentik.core.models import PropertyMapping
+from authentik.policies.expression.models import ExpressionPolicy
+
+STATUS_PK = "7ccaf87d-46bb-5dcd-9b0c-7f0df9db4045"
+STATUS_NAME = "workforce-sign-in-status"
+code = ExpressionPolicy.objects.filter(name="workforce-sign-in-status-code").values_list("expression", flat=True).first()
+if not code or "wf_ak_status_answer" not in code:
+    raise SystemExit("the sign-in status code (workforce-sign-in-status-code) is missing: apply the Workforce blueprint first")
+PropertyMapping.objects.filter(name=STATUS_NAME).exclude(pk=STATUS_PK).delete()
+mapping, _ = PropertyMapping.objects.update_or_create(pk=STATUS_PK, defaults={"name": STATUS_NAME, "expression": code})
+if type(PropertyMapping.objects.select_subclasses().get(pk=STATUS_PK)) is not PropertyMapping:
+    raise SystemExit("the sign-in status interface is not a plain property mapping")
+# Testing it needs view (authentik's decorator) and add (its object check maps a POST to "add") on that one object:
+# neither lets this account make, change, list or test any other mapping, or delete this one.
+for r in own_roles:
+    RoleObjectPermission.objects.filter(role=r, content_type__app_label="authentik_core",
+                                        permission__codename__endswith="_propertymapping").exclude(object_pk=STATUS_PK).delete()
+role.assign_perms(["authentik_core.view_propertymapping", "authentik_core.add_propertymapping"], mapping)
+
+# Workforce issue 462 (contract R.7.4): the unlock marker is no longer an account attribute (this credential could
+# write it). Nothing reads attributes.workforce.password_unlocked_at any more; it is removed from every account, so
+# nobody takes it for a live control. Idempotent.
+for u in User.objects.filter(attributes__workforce__has_key="password_unlocked_at"):
+    wf = dict(u.attributes["workforce"])
+    wf.pop("password_unlocked_at", None)
+    u.attributes = dict(u.attributes, workforce=wf)
+    u.save(update_fields=["attributes"])
+
+fresh = User.objects.get(pk=user.pk)
+leaks = []
+if fresh.is_superuser:
+    leaks.append("it is a superuser")
+if fresh.has_perm("authentik_events.view_event"):
+    leaks.append("it may read every authentik event")
+if RoleObjectPermission.objects.filter(role__in=fresh.all_roles(), permission=VIEW_EVENT).exists():
+    leaks.append("it may read some authentik events")
+if fresh.has_perm("authentik_core.view_propertymapping") or fresh.has_perm("authentik_policies.view_policy"):
+    leaks.append("it may read every property mapping or policy")
+if leaks:
+    raise SystemExit("workforce-invites: " + "; ".join(leaks) + " (a role or group gives it): remove that, then run this again")
 
 Token.objects.update_or_create(
     identifier="workforce-invite-token",

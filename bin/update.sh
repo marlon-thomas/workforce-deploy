@@ -38,6 +38,9 @@ use_docker_socket
 . ./bin/lib/client-address.sh
 GTP_PROBLEM="$(gateway_proxies_problem)"
 [ -z "$GTP_PROBLEM" ] || { echo "$GTP_PROBLEM (RUNBOOK §7a). Nothing was changed."; exit 1; }
+# And the sign-in limits' settings (Workforce issue 462, contract R.3 and R.4).
+SIL_PROBLEM="$(sign_in_limits_problem)"
+[ -z "$SIL_PROBLEM" ] || { echo "$SIL_PROBLEM (RUNBOOK §7a). Nothing was changed."; exit 1; }
 # The TEST appliance confirms its testers' tailnet for the readiness check (environments/test.env; review finding
 # 13): a box installed before that has no line for it, and update.sh never re-renders .env. Added once; a line the
 # operator wrote, even an empty one, is theirs.

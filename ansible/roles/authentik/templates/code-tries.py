@@ -7,7 +7,8 @@
 # workforce-app.yaml.j2 includes this file (after password-pause.py, whose WF_WINDOW, wf_held_until and
 # wf_code_request it uses) in the expression policies workforce-code-try and workforce-codes-paused. Plain Python;
 # bin/tests/password-pause-test.sh tests it with python3 alone. A Jinja include: never two braces, or a brace and a
-# percent or hash sign, side by side.
+# percent or hash sign, side by side. Since 15 November 2026 a right code also completes a sign-in (wf_signs_in),
+# which the policy records as custom_workforce_signed_in (contract R.2, R.4).
 
 WF_CODE_PAUSE_AFTER = 5            # wrong codes for one account within WF_WINDOW
 WF_CODE_KEEP = 3600                # each code record is kept this long, whatever the event retention
@@ -22,3 +23,10 @@ def wf_codes_paused(tries, right, now):
     Returns the end of the wait, or None."""
     wrong = [at for at, tid in tries if tid not in right and now - 2 * WF_WINDOW <= at <= now]
     return wf_held_until(wrong, WF_CODE_PAUSE_AFTER, now)
+
+
+def wf_signs_in(person, plan):
+    """Does a right code here complete a sign-in that counts (contract R.2): an active internal account, not a service
+    account, whose password was checked in this sign-in (the flow plan's user_backend)?"""
+    return (person is not None and getattr(person, "is_active", False) and getattr(person, "type", None) == "internal"
+            and plan is not None and bool(plan.context.get("user_backend")))

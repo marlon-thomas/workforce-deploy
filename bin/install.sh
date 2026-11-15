@@ -424,6 +424,8 @@ INV
   WFV_ops_heartbeat_url="${OPS_HEARTBEAT_URL:-}" \
   WFV_gateway_trusted_proxies="${GATEWAY_TRUSTED_PROXIES:-}" \
   WFV_client_addresses_confirmed="${CLIENT_ADDRESSES_CONFIRMED:-}" \
+  WFV_sign_in_workplace_source_limit="${SIGN_IN_WORKPLACE_SOURCE_LIMIT:-}" \
+  WFV_sign_in_workplace_network_limit="${SIGN_IN_WORKPLACE_NETWORK_LIMIT:-}" \
   WFV_ai_test_services="${AI_TEST_SERVICES:-false}" \
   WFV_brand_product_name="${BRAND_PRODUCT_NAME:-Workforce}" \
   WFV_brand_logo_file="${BRAND_LOGO_FILE:-logo.png}" \
@@ -824,6 +826,9 @@ if [ -f .env ]; then
     . ./bin/lib/client-address.sh
     GTP_PROBLEM="$(gateway_proxies_problem)"
     [ -z "$GTP_PROBLEM" ] || { echo "$GTP_PROBLEM (RUNBOOK §7a). Nothing was changed."; exit 1; }
+    # And the sign-in limits' settings (Workforce issue 462, contract R.3 and R.4).
+    SIL_PROBLEM="$(sign_in_limits_problem)"
+    [ -z "$SIL_PROBLEM" ] || { echo "$SIL_PROBLEM (RUNBOOK §7a). Nothing was changed."; exit 1; }
     preflight_network
     preflight_and_pull
     # ADMIN_PASSWORD for the playbook: resume uses a fresh random value — the
@@ -1058,6 +1063,9 @@ prod_guard_start "${ENV_NAME:-prod}" "${TEST_INBOX:-}" "${TEST_INBOX_HOSTNAME:-}
 . ./bin/lib/client-address.sh
 GTP_PROBLEM="$(gateway_proxies_problem)"
 [ -z "$GTP_PROBLEM" ] || { echo "$GTP_PROBLEM (RUNBOOK §7a). Nothing was changed."; exit 1; }
+# And the sign-in limits' settings (Workforce issue 462, contract R.3 and R.4).
+SIL_PROBLEM="$(sign_in_limits_problem)"
+[ -z "$SIL_PROBLEM" ] || { echo "$SIL_PROBLEM (RUNBOOK §7a). Nothing was changed."; exit 1; }
 cat > .env <<ENV
 ENV_NAME=${ENV_NAME:-prod}
 APP_HOSTNAME=${APP_HOSTNAME}

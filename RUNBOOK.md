@@ -155,34 +155,64 @@ install that same unsigned version.
   emergency administrator and its recovery email"). On a server installed before releases
   were signed, update to a signed release first ("Release signatures" above).
 
-### Wrong passwords: the pause and the throttle
+### Wrong passwords: the pause, the connection's limit and the network's
 
-Workforce issue 462 (ADR-0039, amendment of 14 November 2026). Nothing is ever locked for the whole account:
+Workforce issue 462 (ADR-0039, amendment of 14 November 2026, revised 15 November 2026). Nothing is ever locked for
+the whole account. A **connection** here is the client's internet address as the gateway decides it (§7a): an IPv4
+address, or an IPv6 address's /64. It is **not** a TCP connection, a browser, a browser session, a cookie or a page:
+every count is kept on the sign-in server under the address, so opening a new browser, a private window or a new page
+changes nothing, and requests sent at the same moment are counted one at a time.
 
-- **The pause.** Five wrong passwords for one name from one connection (the client's internet address; an IPv6
-  address by its /64) within 15 minutes pause that name **on that connection** until 15 minutes after the fifth
-  ("Too many wrong passwords for this name, from this connection…"). Requests during the pause are refused before
-  the password is checked and aren't counted, so they can't stretch it. The same person can sign in at once from
-  another connection (a phone's mobile data). Every account is treated alike, `admin` included, and a name nobody
-  has gets exactly the same answers, so the page never tells anyone which names exist. "Name" means the name as
-  typed, in any letter case (as the sign-in server matches names): a person's username and their email, where they
-  differ, each count apart, as two names nobody has would, and the password page shows the name as typed.
-- **The throttle.** Ten wrong passwords from one connection within 15 minutes, whatever names were typed, hold that
-  connection for 15 minutes for every name ("Too many wrong passwords from this connection…"); for IPv6 also thirty
-  from one /48. A **workplace** (a connection, or a /48, where three or more staff typed the right password in the
-  last 30 days) is never throttled, so nobody in the building can keep the office out; each person's own pause
-  still applies there. A workplace /48 is still held after 300 wrong passwords within 15 minutes: a mobile
-  network's /48 can hold three staff phones and thousands of strangers, each able to take a fresh /64.
+- **The pause (one name, one connection).** Five wrong passwords for one name from one connection within 15 minutes
+  pause that name **on that connection** until 15 minutes after the fifth ("Too many wrong passwords for this name,
+  from this connection…"). Requests during the pause are refused before the password is checked and aren't counted,
+  so they can't stretch it. The same person can sign in at once from another connection (a phone's mobile data).
+  Every account is treated alike, `admin` included, and a name nobody has gets exactly the same answers, so the page
+  never tells anyone which names exist. "Name" means the name as typed, in any letter case (as the sign-in server
+  matches names): a person's username and their email each count apart, as two names nobody has would.
+- **The connection's limit (every name together).** Ten wrong passwords from one connection within 15 minutes,
+  whatever names were typed (usernames, emails, names nobody has, any spelling), hold that connection for every name
+  until 15 minutes after the tenth ("Too many wrong passwords from this connection…"). Refused requests aren't
+  counted, so someone who keeps sending can't stretch it: to hold it again they need ten more counted after it ends.
+  A **workplace connection** has a higher limit, never none: `SIGN_IN_WORKPLACE_SOURCE_LIMIT` wrong passwords in 15
+  minutes (50 unless set; 20 to 100). A connection is a workplace one only if you list it in
+  `CLIENT_ADDRESSES_CONFIRMED` (§7a), or if three or more different staff **completed** a sign-in there (the right
+  password and the right code) in the last 30 days. Nobody can choose or claim it: nothing the browser sends is read,
+  a forged forwarding header gets the forger's own address, and one person's sign-ins count once.
+- **The network's tightening (IPv6).** Thirty wrong passwords from one /48 within 15 minutes (for a workplace
+  network, `SIGN_IN_WORKPLACE_NETWORK_LIMIT`, 300 unless set; 100 to 1000; it must be above the connection limit)
+  **tighten** that /48, never hold it all: connections in it where someone completed a sign-in in the last 30 days
+  carry on as normal; connections nobody has signed in from (including any new /64, which is how someone rotating
+  through /64s is stopped) and connections with five or more wrong and no right password are refused ("Too many
+  wrong passwords from this network…"). It ends 15 minutes after the newest counted wrong password. One connection
+  can't cause it alone (its own limit is lower).
 - **Codes** keep their own count: five wrong codes for an account within 15 minutes, then 15 minutes' wait from the
   fifth ("That code was wrong too many times…"). Only someone with the password reaches the code step.
+
+**Sharing a connection.** Everyone behind one office router, café or phone network address (or one IPv6 /64) is one
+connection, so one person there **can** affect the others: once ten wrong passwords (fifty at a workplace
+connection) are counted from it in 15 minutes, nobody can start a password sign-in from it until 15 minutes after
+the one that reached the limit. People already signed in carry on; every other connection, and the same people
+elsewhere, are unaffected. The way out: another connection at once (mobile data, home), or wait. While someone there
+keeps sending that many wrong passwords every 15 minutes, the connection stays held for as long as they keep it up;
+each hold is an alert (Today in Workforce within 5 minutes, and this server's health email), naming the connection
+and the times, so the office's IT can find the device. Nobody, a manager or you, can lift a connection's hold early
+in this release (an unlock would lift it for the attacker too).
 
 **What lifts a pause:** time; a new password ("Forgot your password?" never skips the code); **Unlock sign-in** on
 the person's record in Workforce (a registered manager or director; a data administrator if the organisation
 switched it on), which lets them try again from every connection and changes nothing else; for `admin`,
-`./bin/reset-admin.sh`, which sets a new password and lifts its pause the same way. Nothing lifts a throttle or the
-codes' wait but time. Spread attempts (one connection trying five or more names in an hour, one account tried from
-three or more connections in an hour or twenty times in a day) are recorded as alerts, never locks: Workforce shows
-each organisation its own on Today, and `doctor.sh` counts them ("sign-in attacks").
+`./bin/reset-admin.sh`, which sets a new password and lifts its pause the same way. An unlock is recorded by the
+sign-in server itself, with its own clock, and wrong passwords **after** it count again, so an old unlock can't
+clear a later pause. Nothing lifts a connection's hold, a network's tightening or the codes' wait but time. Spread
+attempts (one connection trying five or more names in an hour, one account tried from three or more connections in
+an hour or twenty times in a day) and every hold are recorded as alerts, never locks: Workforce shows each
+organisation its own on Today, and `doctor.sh` counts them ("sign-in attacks").
+
+**What Workforce can see** (contract R.7): whether a person is paused, until when and on how many connections,
+through a narrow status interface on the sign-in server that only Workforce's own service account may ask, about one
+person at a time, and only for someone the asker may reset. Workforce shows "paused", "not paused" or "couldn't
+check"; a failure is never shown as "not paused", and the sign-in decisions never depend on Workforce asking.
 
 Because nothing adds up guesses at `admin` from many addresses, its password is what stops them. The installer's
 and `reset-admin.sh`'s are 24 random characters; one you type into the installer needs at least 16; one chosen later
@@ -300,9 +330,13 @@ sign-in server takes `X-Forwarded-For` only from the stack's own private network
 nobody named, so the check asks you to say which it is. If they are your offices' own connections, list them in
 `CLIENT_ADDRESSES_CONFIRMED` in `.env`, separated by commas with no spaces, or the whole value in single quotes
 (an IPv6 connection as the check names it, e.g. `2001:db8:1:2::/64`; a range such as `203.0.113.0/29` confirms
-every address in it). It is read by the check only, never to let anyone in or to skip a limit. The TEST appliance
-confirms its tailnet (`100.64.0.0/10`, `environments/test.env`), so testers signing in as several people from one
-device don't turn the row red; on an existing TEST box, `./bin/update.sh` adds it.
+every address in it; nothing wider than an IPv4 /8 or an IPv6 /32). Since 15 November 2026 the sign-in server reads
+it too: each confirmed connection is a **workplace connection** (§6: 50 wrong passwords in 15 minutes before it is
+held, instead of 10, or `SIGN_IN_WORKPLACE_SOURCE_LIMIT`), and a tightened IPv6 network never refuses it. It never
+lets anyone in or skips a limit. Change these settings in `.env`, then `./bin/update.sh <running version>`, which
+refuses a value out of range. The TEST appliance confirms its tailnet (`100.64.0.0/10`, `environments/test.env`),
+so testers signing in as several people from one device don't turn the row red; on an existing TEST box,
+`./bin/update.sh` adds it. (The appliance controller's settings don't offer these yet: a separate issue.)
 
 **The check** (`./bin/doctor.sh`, row "client addresses"; Workforce's Setup shows it as "Sign-in limits see each
 person's own connection", and only OK is ready):
@@ -434,7 +468,10 @@ to `OPS_ALERT_EMAIL` need no restart. New installs take it from `environments/<e
 **Sign-in rows.** "client addresses" (§7a) is a FAIL that emails like any other (at most WARN during an install or
 update, so neither is failed or rolled back by it); Workforce's Setup treats anything but OK there as "not ready".
 "sign-in attacks" counts the sign-in server's alerts of the last day (connections trying many names, accounts tried
-from many places, connections throttled): a WARN, never a lock; Workforce shows each organisation its own on Today.
+from many places, connections held, workplace connections held, IPv6 networks tightened): a WARN, never a lock, which
+this email carries to you; Workforce shows each organisation its own on Today. "sign-in limits" warns when
+`SIGN_IN_WORKPLACE_SOURCE_LIMIT`, `SIGN_IN_WORKPLACE_NETWORK_LIMIT` or `CLIENT_ADDRESSES_CONFIRMED` holds a value the
+sign-in server can't use (it then uses its default).
 
 **What it cannot do.** A server that is off, or has lost its network, cannot send email about
 it. That is what the outside uptime check (§7c) is for.
@@ -618,11 +655,15 @@ Not yet scheduled — run it at least monthly (nightly once automated).
   `volume-owners` one-shot. Not read-only: init, backup and webmail. `bin/check-hardening.py` fails CI if any of
   this is lost, and on an image not pinned by digest; `bin/digest-check.py` checks every pin daily.
 - The Workforce app's sign-in service account (its token is `secrets/ak_invite_token`, read by the app): it can change
-  accounts (invitations, resets, unlocks) and, since Workforce issue 462, read every sign-in server event, because
-  authentik's permission to read events isn't per kind. authentik keeps the body of each email it sends in its
-  `email_sent` event, so that includes live sign-in codes and reset links until the events expire. Its power to
-  change accounts already made a leaked token a takeover; treat it as the most sensitive secret on the server after
-  the database's (review of 14 November 2026, finding 5).
+  accounts (invitations, resets, where codes go) and ask the sign-in status interface about one person at a time
+  (paused or not, unlock, attack alerts: counts only). It **cannot** read authentik's events (since 15 November 2026
+  the converge revokes `authentik_events.view_event`, which an earlier build granted, and stops if anything still
+  gives it): authentik keeps the body of each email it sends, live sign-in codes and reset links included, in its
+  `email_sent` event. Its power to change accounts still makes a leaked token a takeover (it can set where a
+  person's codes go, and make a reset link); treat it as the most sensitive secret on the server after the
+  database's. The status interface is a property mapping of authentik's own base kind
+  (`workforce-sign-in-status`); authentik's admin page "Property Mappings" can't list that kind and shows an error
+  while it exists (Workforce never needs that page).
 - Seccomp and AppArmor: the TEST appliance's rootless Docker (inside an unprivileged Incus container) applies
   neither, so a problem either would cause can't show there (Workforce issue 414).
 - Off-site backups: provide an S3/rsync target at install time, and keep the private key off the server

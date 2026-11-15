@@ -174,5 +174,20 @@ check "a cut list: half from one address is no concentration" "$(judge "$CUT")" 
 check "without the whole it would have looked like one" "$(judge "$(printf '%s\n' "$CUT" | grep -v WFINSUM)" | cut -d: -f1)" warn
 check "no sign-in yet: nothing found here (doctor.sh says not checked yet)" "$(judge $'WFSIGNINS 0 0\nWFFWD 0 -')" "ok: "
 
+# ---- the sign-in limits' settings (Workforce issue 462, contract R.3 and R.4)
+lim() { SIGN_IN_WORKPLACE_SOURCE_LIMIT="$1" SIGN_IN_WORKPLACE_NETWORK_LIMIT="$2" CLIENT_ADDRESSES_CONFIRMED="$3" sign_in_limits_problem; }
+check "limits: none set: fine" "$(lim "" "" "")" ""
+check "limits: the widest allowed: fine" "$(lim 100 1000 "")" ""
+check "limits: the narrowest: fine" "$(lim 20 100 "")" ""
+check "limits: 19 refused" "$(lim 19 "" "" | grep -c 'from 20 to 100')" 1
+check "limits: 101 refused" "$(lim 101 "" "" | grep -c 'from 20 to 100')" 1
+check "limits: not a number refused" "$(lim fifty "" "" | grep -c 'from 20 to 100')" 1
+check "limits: a network limit of 99 refused" "$(lim "" 99 "" | grep -c 'from 100 to 1000')" 1
+check "limits: a source limit not below the network's refused" "$(lim 100 100 "" | grep -c 'must be below')" 1
+check "limits: confirmed addresses, keys and ranges: fine" "$(lim "" "" "203.0.113.7,2001:db8:1:2::/64,198.51.100.0/24,100.64.0.0/10")" ""
+check "limits: a confirmed range wider than an IPv4 /8 refused" "$(lim "" "" "0.0.0.0/0" | grep -c 'far too wide')" 1
+check "limits: wider than an IPv6 /32 refused" "$(lim "" "" "2001::/16" | grep -c 'far too wide')" 1
+check "limits: nonsense refused" "$(lim "" "" "office" | grep -c 'is not an address')" 1
+
 echo "client address self-test: ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]

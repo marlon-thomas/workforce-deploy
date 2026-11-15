@@ -108,14 +108,18 @@ check("by the wrong codes' own count, an error refusing", any("target: !KeyOf wf
 def bound(binding_id, policy):
     return next((e for e in entries if "policybinding" in e and "target: !KeyOf " + binding_id + "," in e
                  and "policy: !KeyOf " + policy + " " in e), "")
-check("15: throttled, before the password", order(binding("default-authentication-flow", "wf-connection-throttled-stage")) == 15
+check("15: the source held, before the password", order(binding("default-authentication-flow", "wf-connection-throttled-stage")) == 15
       and "failure_result: true" in bound("wf-connection-throttled-binding", "wf-password-throttled"))
-check("16: paused, before the password", order(binding("default-authentication-flow", "wf-too-many-tries-stage")) == 16
+check("16: the /48 tightened, before the password (contract R.6)", order(binding("default-authentication-flow",
+      "wf-network-tightened-stage")) == 16 and "failure_result: true" in bound("wf-network-tightened-binding", "wf-network-tightened"))
+check("17: the pair paused, before the password", order(binding("default-authentication-flow", "wf-too-many-tries-stage")) == 17
       and "failure_result: true" in bound("wf-too-many-tries-binding", "wf-password-paused"))
-check("21: not checked and throttled: the throttle's words", order(binding("default-authentication-flow",
+check("21: not checked and the source held: its words", order(binding("default-authentication-flow",
       "wf-connection-throttled-after-stage")) == 21 and bound("wf-connection-throttled-after-binding", "wf-password-not-checked-throttled"))
+check("22: not checked and the /48 tightened: its words", order(binding("default-authentication-flow",
+      "wf-network-tightened-after-stage")) == 22 and bound("wf-network-tightened-after-binding", "wf-password-not-checked-network"))
 right = binding("default-authentication-flow", "wf-password-right-stage")
-check("22: the try marked right, after the password", order(right) == 22 and "re_evaluate_policies: true" in right
+check("24: the try marked right, after the password and its guard", order(right) == 24 and "re_evaluate_policies: true" in right
       and "evaluate_on_plan: false" in right and bound("wf-password-right-binding", "wf-password-right"))
 check("29: wrong codes, before the code step", "failure_result: true" in bound("wf-too-many-tries-codes-binding", "wf-codes-paused"))
 check("30: each code typed recorded, never skipping the code step (it passes, an error too)",
@@ -126,7 +130,8 @@ for key in ("wf-password-paused", "wf-password-try", "wf-password-right", "wf-co
     policy = next((e for e in entries if "id: " + key + "\n" in e), "")
     body = "\n".join(l for l in policy.splitlines() if not l.strip().startswith("#"))
     check(key + ": authentik's reputation score isn't read", "Reputation" not in body and "update_score" not in body)
-    check(key + ": the address is authentik's own, through wf_ak_subject", "wf_ak_subject(request)" in body)
+    check(key + ": the address is authentik's own, through wf_ak_subject", "wf_ak_subject(request)" in body
+          or "wf_ak_decide(request)" in body)
 try_policy = next((e for e in entries if "id: wf-password-try\n" in e), "")
 check("a try is recorded only for a request the stage checks", "wf_password_request(http.method, http.data)" in try_policy)
 check("under the try's locks (the connection's, its /48's, the pair's)", "wf_ak_lock(cursor, *wf_ak_try_locks(account, conn))" in try_policy)
@@ -141,13 +146,30 @@ check("the password step shows every name as typed (review finding 1)", "show_ma
 # Fix round (contract 3.8): a pause and a throttle each have their own words, the same for any name.
 pause_words = "Too many wrong passwords for this name, from this connection. Wait 15 minutes, then try again."
 throttle_words = "Too many wrong passwords from this connection. Wait 15 minutes, or use another connection"
+network_words = "Too many wrong passwords from this network. Wait 15 minutes, or use another connection"
 for stage, words in (("wf-too-many-tries-stage", pause_words), ("wf-password-not-checked-stage", pause_words),
-                     ("wf-connection-throttled-stage", throttle_words), ("wf-connection-throttled-after-stage", throttle_words)):
+                     ("wf-connection-throttled-stage", throttle_words), ("wf-connection-throttled-after-stage", throttle_words),
+                     ("wf-network-tightened-stage", network_words), ("wf-network-tightened-after-stage", network_words)):
     e = next((x for x in entries if "id: " + stage + "\n" in x), "")
     check(stage + ": its words", words in " ".join(e.split()))
-for key in ("wf-password-throttled", "wf-password-not-checked-throttled"):
+for key in ("wf-password-throttled", "wf-password-not-checked-throttled", "wf-network-tightened", "wf-password-not-checked-network"):
     policy = next((e for e in entries if "id: " + key + "\n" in e), "")
-    check(key + ": the address is authentik's own, through wf_ak_subject", "wf_ak_subject(request)" in policy)
+    check(key + ": the address is authentik's own, through wf_ak_decide", "wf_ak_decide(request)" in policy)
+check("the source's and the network's words win over the pair's (an unlock lifts only the pair)",
+      'decision["rule"] == "network"' in next((e for e in entries if "id: wf-network-tightened\n" in e), "")
+      and 'decision["source"] and' in next((e for e in entries if "id: wf-password-throttled\n" in e), ""))
+# Contract R.7: the sign-in status code is bound nowhere (never part of a sign-in), logs no execution, catches every
+# error, and the decisions never read an account attribute (the application's credential can write those).
+status = next((e for e in entries if "id: wf-sign-in-status-code\n" in e), "")
+check("the status code: present, its execution not logged", "execution_logging: false" in status
+      and "return wf_ak_status_answer(request)" in status and 'return {"v": 1, "known": False, "why": "error"}' in status)
+check("bound nowhere", not any("policybinding" in e and "wf-sign-in-status-code" in e for e in entries))
+check("no decision reads the old unlock attribute", "password_unlocked_at" not in pp.split("# ---- the sign-in status interface")[0]
+      .split("def wf_marker")[0] and "attributes" not in pp.split("def wf_ak_marker")[1].split("def ")[0])
+signed = next((e for e in entries if "id: wf-codes-paused\n" in e), "")
+check("a completed sign-in (password and code) is recorded at 31 (contract R.2)",
+      "wf_ak_record(WF_SIGNED, WF_KEEP_SIGNED, address, person, wf_user_pk=int(pk), wf_conn=conn)" in signed
+      and "if marked and not paused and wf_signs_in(person, plan):" in signed)
 # Contract 3.9: authentik's user-settings page can't write attributes.workforce (only the name and locale fields).
 settings_stage = next((e for e in entries if "name: default-user-settings }" in e), "")
 check("the user's own settings have only authentik's name and locale fields (attributes.settings.locale)",
@@ -193,8 +215,16 @@ check "and moves the score's floor below the lock" "$(grep -c 'reputation_lower_
 check "the converge runs it" "$(grep -c "ak shell -c \"exec(open(./tmp/sign-in-hardening.py.)" "$REPO/ansible/roles/authentik/tasks/main.yml")" 1
 check "the operator's recovery removes the emergency administrator's app (new problem 6)" \
   "$(grep -c 'TOTPDevice.objects.filter(user=u).delete()' "$REPO/bin/reset-admin.sh")" 1
-check "and lifts its wrong-password pause by the unlock marker (issue 462), not by deleting records" \
-  "$(grep -c 'wf\["password_unlocked_at"\] = ' "$REPO/bin/reset-admin.sh")/$(grep -c 'Reputation' "$REPO/bin/reset-admin.sh")" 1/0
+check "and lifts its wrong-password pause by an unlock record (issue 462, contract R.7.4), not an attribute or by deleting records" \
+  "$(grep -c 'Event.new("workforce_password_unlock"' "$REPO/bin/reset-admin.sh")/$(grep -c 'wf\["password_unlocked_at"\] = \|Reputation' "$REPO/bin/reset-admin.sh")" 1/0
+# Workforce issue 462 (contract R.8): the application's service account gets no event access, and loses any it had.
+INVITE="$REPO/ansible/roles/authentik/files/invite-service-account.py"
+check "invite-service-account.py grants no view_event" "$(python3 -I -c 'import re,sys; t=open(sys.argv[1]).read(); m=re.search(r"for perm in \((.*?)\):\n    assign\(perm\)", t, re.S); print(int("view_event" in m.group(1)) if m else "no list")' "$INVITE")" 0
+check "and revokes it (globally and on objects), then fails if anything still gives it" \
+  "$(grep -c 'RoleModelPermission.objects.filter(role=r, permission=VIEW_EVENT).delete()\|RoleObjectPermission.objects.filter(role=r, permission=VIEW_EVENT).delete()\|fresh.has_perm("authentik_events.view_event")\|raise SystemExit("workforce-invites: "' "$INVITE")" 4
+check "the status interface: object permissions on that one mapping only" \
+  "$(grep -c 'role.assign_perms(\["authentik_core.view_propertymapping", "authentik_core.add_propertymapping"\], mapping)' "$INVITE")" 1
+check "and the old unlock attribute is removed from every account" "$(grep -c 'wf.pop("password_unlocked_at", None)' "$INVITE")" 1
 # Second review of the controller bundle, finding 4: the lock's policy reads authentik's own models, so a new authentik
 # pin needs bin/tests/authentik-policies-e2e.sh run against it (it also runs reset-admin.sh's program there).
 VERIFIED="$(sed -n 's/^VERIFIED_AUTHENTIK=//p' "$HERE/authentik-policies-e2e.sh")"

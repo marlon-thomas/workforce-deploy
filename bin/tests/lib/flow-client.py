@@ -99,6 +99,67 @@ def main():
         for t in threads:
             t.join()
         print(json.dumps(answers))
+    elif cmd == "many":                       # many <n> <name pattern> <password> [<XFF pattern> [per] [first]]: n
+        # sign-ins one after another, each a new session (TCP connection, cookie jar, flow); answers to the passwords
+        n, pattern, pw = int(args[0]), args[1], args[2]
+        xff = args[3] if len(args) > 3 else None
+        per = int(args[4]) if len(args) > 4 else 1          # [per]: that many sign-ins from each address in turn
+        first_at = int(args[5]) if len(args) > 5 else 0     # [first]: the first address's number
+        out = []
+        for i in range(n):
+            s = session()
+            if xff:
+                s.headers["X-Forwarded-For"] = xff % (first_at + i // per) if "%" in xff else xff
+            s.get(executor("default-authentication-flow"), timeout=30)
+            r = s.post(executor("default-authentication-flow"), json={"component": "ak-stage-identification",
+                                                                    "uid_field": pattern % i if "%" in pattern else pattern}, timeout=30)
+            first = outcome(r)
+            if first["component"] != "ak-stage-password":
+                out.append(dict(first, step="name"))
+                continue
+            out.append(password(s, pw))
+            s.close()
+        print(json.dumps(out))
+    elif cmd == "burstnames":                 # burstnames <n> <name pattern with %d> <password>: n sign-ins, each a
+        # different name, their passwords at one moment
+        n, pattern, pw = int(args[0]), args[1], args[2]
+        ready = []
+        for i in range(n):
+            s, first = start(pattern % i)
+            ready.append((s, first))
+        answers = [None] * n
+        gate = threading.Barrier(n)
+
+        def fire_named(i):
+            s, first = ready[i]
+            if first["component"] != "ak-stage-password":
+                answers[i] = dict(first, step="name")
+                gate.wait()
+                return
+            gate.wait()
+            answers[i] = password(s, pw)
+
+        threads = [threading.Thread(target=fire_named, args=(i,)) for i in range(n)]
+        for t_ in threads:
+            t_.start()
+        for t_ in threads:
+            t_.join()
+        print(json.dumps(answers))
+    elif cmd == "trace":                      # trace <name> <password>: every answer in full, the name, the timings
+        import time
+        name, pw = args
+        s = session()
+        steps = []
+        t0 = time.monotonic()
+        r = s.get(executor("default-authentication-flow"), timeout=30)
+        steps.append({"status": r.status_code, "body": r.text, "seconds": time.monotonic() - t0})
+        t0 = time.monotonic()
+        r = s.post(executor("default-authentication-flow"), json={"component": "ak-stage-identification", "uid_field": name}, timeout=30)
+        steps.append({"status": r.status_code, "body": r.text, "seconds": time.monotonic() - t0})
+        t0 = time.monotonic()
+        r = s.post(executor("default-authentication-flow"), json={"component": "ak-stage-password", "password": pw}, timeout=30)
+        steps.append({"status": r.status_code, "body": r.text, "seconds": time.monotonic() - t0})
+        print(json.dumps(steps))
     elif cmd == "shown":                      # shown <name>: the name the password step shows for it
         s = session()
         s.get(executor("default-authentication-flow"), timeout=30)
@@ -151,8 +212,8 @@ def main():
                 import time
                 time.sleep(int(c[5:]))
                 continue
-            if c == "@totp":
-                c = totp(open("/t/totp.key").read().strip())
+            if c.startswith("@totp"):             # @totp or @totp:<key file>: the next code of that key never used yet
+                c = totp(open("/t/" + (c[6:] or "totp.key")).read().strip())
             out.append(dict(outcome(s.post(executor("default-authentication-flow"), json={
                 "component": "ak-stage-authenticator-validate", "code": c}, timeout=30)), step="code"))
         print(json.dumps(out))
@@ -194,11 +255,20 @@ def main():
 
 
 def totp(hexkey, step=30, digits=6):
+    """The key's code for a time step no sign-in has used yet (authentik never takes the same step twice): the steps
+    used are kept in /state (shared by every client container), so a second sign-in waits for the next step."""
     import hashlib
     import hmac
+    import os
     import struct
     import time
+    mark = "/state/totp-" + hashlib.sha256(hexkey.encode()).hexdigest()[:16]
+    last = int(open(mark).read()) if os.path.exists(mark) else -1
+    while int(time.time()) // step <= last:
+        time.sleep(1)
     counter = int(time.time()) // step
+    if os.path.isdir("/state"):
+        open(mark, "w").write(str(counter))
     mac = hmac.new(bytes.fromhex(hexkey), struct.pack(">Q", counter), hashlib.sha1).digest()
     o = mac[-1] & 15
     return str((struct.unpack(">I", mac[o:o + 4])[0] & 0x7FFFFFFF) % 10 ** digits).zfill(digits)

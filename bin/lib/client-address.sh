@@ -270,7 +270,9 @@ client_address_read() {
 #                                              concentration rule's whole, however many connections are listed)
 #   WFFWD <accounts> <key,key,…>               of those, accounts whose right password came through a peer nobody named
 #                                              in GATEWAY_TRUSTED_PROXIES (wf_fwd), and from where (at most 20)
-#   WFALERTS <connection-spread> <account-spread> <throttled>   alerts of the last day (contract 3.6)
+#   WFALERTS <connection-spread> <account-spread> <throttled> <workplace-throttled> <network-tightened>
+#                                              alerts of the last day (contract 3.6, R.3; the last two since
+#                                              15 November 2026)
 #   WFCONN <key> <in|try> <accounts> <days>    a connection sign-ins (in) or password tries (try) came from: every
 #                                              one outside the public internet (this server's own networks are
 #                                              there; at most 500), then the public sign-in ones, most accounts
@@ -326,7 +328,7 @@ print("WFINSUM", sum(len(w) for (c, k), (w, d) in seen.items() if k == "in"))
 print("WFFWD", len(fwd), ",".join(sorted(set(c.replace(" ", "") for cs in fwd.values() for c in cs))[:20]) or "-")
 alerts = Event.objects.filter(created__gte=t - timedelta(days=1), action="custom_workforce_password_alert")
 kinds = [str((c or {}).get("wf_kind")) for c in alerts.values_list("context", flat=True)]
-print("WFALERTS", kinds.count("connection-spread"), kinds.count("account-spread"), kinds.count("throttled"))
+print("WFALERTS", kinds.count("connection-spread"), kinds.count("account-spread"), kinds.count("throttled"), kinds.count("workplace-throttled"), kinds.count("network-tightened"))
 inside = sorted((c, k, len(w), len(d)) for (c, k), (w, d) in seen.items() if not public(c))
 outside = sorted(((len(w), c, len(d)) for (c, k), (w, d) in seen.items() if k == "in" and public(c)), key=lambda x: (-x[0], x[1]))
 for c, k, n, d in inside[:500]:
@@ -336,8 +338,10 @@ for n, c, d in outside[:500]:
 
 # client_addresses_confirmed <key> — the operator confirmed this address as an office's own connection
 # (CLIENT_ADDRESSES_CONFIRMED: addresses, connection keys or ranges, separated by commas or spaces). Used by the
-# readiness check's concentration and forwarding rules only; never by the gateway or the sign-in server. A range
-# confirms every connection inside it (the TEST appliance confirms its tailnet, 100.64.0.0/10: environments/test.env).
+# readiness check's concentration and forwarding rules, and (since 15 November 2026, contract R.4) by the sign-in
+# server, where it makes a source a workplace one (a higher, still bounded, cap: SIGN_IN_WORKPLACE_SOURCE_LIMIT) and
+# proven (never refused by its tightened /48); never by the gateway, and it never lets anyone in. A range confirms
+# every connection inside it (the TEST appliance confirms its tailnet, 100.64.0.0/10: environments/test.env).
 client_address_confirmed() {
   local c list="${CLIENT_ADDRESSES_CONFIRMED:-}"
   for c in ${list//,/ }; do
@@ -352,6 +356,37 @@ client_address_confirmed() {
     esac
   done
   return 1
+}
+
+# sign_in_limits_problem — why the sign-in limits' settings (Workforce issue 462, contract R.3 and R.4) can't be used,
+# or nothing. install.sh and update.sh refuse them; doctor.sh's "sign-in limits" row warns, because the sign-in
+# server would use its defaults instead (its policy checks the same: password-pause.py's wf_limits).
+#   SIGN_IN_WORKPLACE_SOURCE_LIMIT   a workplace source's cap, a whole number from 20 to 100 (empty: 50)
+#   SIGN_IN_WORKPLACE_NETWORK_LIMIT  a workplace /48's tightening, from 100 to 1000 (empty: 300), above the source's
+#   CLIENT_ADDRESSES_CONFIRMED       addresses, IPv6 /64 keys or ranges; none wider than an IPv4 /8 or an IPv6 /32
+sign_in_limits_problem() {
+  local s="${SIGN_IN_WORKPLACE_SOURCE_LIMIT:-}" n="${SIGN_IN_WORKPLACE_NETWORK_LIMIT:-}" c list="${CLIENT_ADDRESSES_CONFIRMED:-}" b
+  s="${s// /}"; n="${n// /}"
+  if [ -n "$s" ] && ! { [[ "$s" =~ ^[0-9]{1,6}$ ]] && [ "$((10#$s))" -ge 20 ] && [ "$((10#$s))" -le 100 ]; }; then
+    echo "SIGN_IN_WORKPLACE_SOURCE_LIMIT must be a whole number from 20 to 100 (it is '$s')"; return 0
+  fi
+  if [ -n "$n" ] && ! { [[ "$n" =~ ^[0-9]{1,6}$ ]] && [ "$((10#$n))" -ge 100 ] && [ "$((10#$n))" -le 1000 ]; }; then
+    echo "SIGN_IN_WORKPLACE_NETWORK_LIMIT must be a whole number from 100 to 1000 (it is '$n')"; return 0
+  fi
+  if [ "$((10#${s:-50}))" -ge "$((10#${n:-300}))" ]; then
+    echo "SIGN_IN_WORKPLACE_SOURCE_LIMIT (${s:-50}) must be below SIGN_IN_WORKPLACE_NETWORK_LIMIT (${n:-300}): one source could otherwise tighten a whole network"; return 0
+  fi
+  for c in ${list//,/ }; do
+    c="${c#[}"; c="${c/]/}"
+    case "$c" in
+      *:*) cidr6_split "$c" >/dev/null || { echo "CLIENT_ADDRESSES_CONFIRMED: '$c' is not an address, connection key or range"; return 0; }
+           b="$(cidr6_split "$c" | cut -d' ' -f2)"
+           [ "$b" -ge 32 ] || { echo "CLIENT_ADDRESSES_CONFIRMED: $c is far too wide for an office (an IPv6 /32 at most)"; return 0; } ;;
+      *)   cidr4_split "$c" >/dev/null || { echo "CLIENT_ADDRESSES_CONFIRMED: '$c' is not an address, connection key or range"; return 0; }
+           b="$(cidr4_split "$c" | cut -d' ' -f2)"
+           [ "$b" -ge 8 ] || { echo "CLIENT_ADDRESSES_CONFIRMED: $c is far too wide for an office (an IPv4 /8 at most)"; return 0; } ;;
+    esac
+  done
 }
 
 # ---- doctor.sh's "client addresses" row, part (b) (contract 2.3 b). The row is the worst of its parts.

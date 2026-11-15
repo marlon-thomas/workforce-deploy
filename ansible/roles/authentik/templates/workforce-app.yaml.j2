@@ -547,32 +547,37 @@ entries:
     identifiers: { target: !KeyOf wf-ask-hr-binding, policy: !KeyOf wf-codes-not-ready }
     attrs: { order: 0, enabled: true }
 
-  # ---------- Workforce issue 462 (ADR-0039, amendment of 14 November 2026, and its fix round): wrong passwords ----------
-  # Five wrong passwords for one account from one connection within 15 minutes pause that account on that connection
-  # until 15 minutes after the fifth; every account alike, the emergency administrator included. Ten wrong passwords
-  # from one connection within 15 minutes, whatever names were typed, throttle that connection for 15 minutes (for
-  # IPv6 also thirty from one /48), unless it is a workplace: a connection (or /48) where 3 or more real accounts typed
-  # the right password in the last 30 days. Nothing is ever locked for the whole account, or for good: someone else's
-  # wrong passwords pause only their own connection.
-  # - The connection is the address authentik gives the request (the gateway decides it: no browser header can choose
-  #   it), an IPv6 address by its /64. An unknown name is counted exactly as a real account (authentik's "pretend the
-  #   account exists"), under a keyed digest of the name, never the name. Neither decision depends on whether a name
-  #   exists, so neither answer tells anyone which names do.
+  # ---------- Workforce issue 462 (ADR-0039, amendment of 14 November 2026, revised 15 November 2026): wrong passwords ----------
+  # The private repo's docs/architecture/462-lockout-contract.md, section R. Nothing is ever locked for the whole
+  # account, or for good.
+  # - A source is the address authentik gives the request (the gateway decides it: no browser header can choose it):
+  #   an IPv4 address, or an IPv6 address's /64. Not a TCP connection, a browser session, a page or a flow: every count
+  #   is kept here under the source, so a new connection, cookie jar or page changes nothing.
+  # - Pair (order 17): five wrong passwords for one name from one source within 15 minutes refuse that name there until
+  #   15 minutes after the fifth. Every name alike, the emergency administrator included; an unknown name is counted
+  #   exactly as a real one (authentik's "pretend the account exists"), under a keyed digest of the name, never the name.
+  # - Source (order 15): ten wrong passwords from one source within 15 minutes, every name together (username, email,
+  #   unknown, any spelling), refuse every name there until 15 minutes after the tenth. A workplace source (confirmed in
+  #   CLIENT_ADDRESSES_CONFIRMED, or where 3 or more accounts completed a sign-in, the right password and the right
+  #   code, in the last 30 days) has a higher cap, SIGN_IN_WORKPLACE_SOURCE_LIMIT (50 unless set; 20 to 100): never none.
+  # - Network (order 16, IPv6): thirty wrong passwords from one /48 within 15 minutes (SIGN_IN_WORKPLACE_NETWORK_LIMIT,
+  #   300 unless set, for a workplace /48) tighten it: its unproven sources (nobody completed a sign-in there in 30
+  #   days, which is how /64s rotated through are stopped) and its abusive ones (5 or more wrong, no right) are refused;
+  #   quiet, proven sources carry on. It ends 15 minutes after the newest counted try.
   # - Each try is recorded before the password is checked (custom_workforce_password_try), under PostgreSQL advisory
-  #   locks on the connection and then the pair, so requests at the same moment are taken one at a time and a sixth
-  #   can't slip in; it counts as wrong until the flow reaches the step after the password (22), which marks it right.
-  #   A refused request is never recorded, so it can't stretch a pause or a throttle. A real account's records carry
-  #   it as the event's user (Workforce reads one person's with ?username=).
-  # - Wrong passwords before the account's marker no longer count for its pause: its last password change, or its last
-  #   "Unlock sign-in" in Workforce (attributes.workforce.password_unlocked_at, written by the application's service
-  #   account, and by ./bin/reset-admin.sh for the emergency administrator). Neither touches a throttle.
-  # - Alerts (custom_workforce_password_alert), never a lock: one connection (or /48) trying five or more names within
-  #   an hour; one account tried from three or more connections within an hour, or twenty wrong passwords in a day; a
-  #   connection that has just been throttled. Each at most once an hour. Workforce reads them (Today, audit, email).
-  # - authentik's own reputation score is no longer read by anything.
+  #   locks on the source, its /48 and the pair, so requests at the same moment are taken one at a time; it counts as
+  #   wrong until the flow reaches the step after the password (24), which marks it right. A refused request is never
+  #   recorded, so it can't stretch any hold. A completed sign-in is recorded at 31 (custom_workforce_signed_in).
+  # - Wrong passwords before the account's marker no longer count for its pairs: its last password change, or its last
+  #   "Unlock sign-in" in Workforce, which only the sign-in status interface below records (custom_workforce_password_
+  #   unlock, by this server's clock). No account attribute is read: the application's credential can write those.
+  #   An unlock never touches a source or network hold.
+  # - Alerts (custom_workforce_password_alert), never a lock: one source (or /48) trying five or more names within an
+  #   hour; one account tried from three or more sources within an hour, or twenty wrong passwords in a day; a source
+  #   held (throttled, workplace-throttled); a /48 tightened (network-tightened). Each at most once an hour.
   # The decision is ansible/roles/authentik/templates/password-pause.py (included in each policy below; tested on its
-  # own by bin/tests/password-pause-test.sh against the vectors the application shares), and the whole thing runs on
-  # the pinned authentik in bin/tests/authentik-lock-e2e.sh. Any error refuses the password (it is never checked).
+  # own by bin/tests/password-pause-test.sh), and the whole thing runs on the pinned authentik in
+  # bin/tests/authentik-lock-e2e.sh. Any error refuses the password (it is never checked).
   - model: authentik_policies_reputation.reputationpolicy
     identifiers: { name: workforce-too-many-tries }
     state: absent
@@ -581,8 +586,9 @@ entries:
   - model: authentik_policies_expression.expressionpolicy
     identifiers: { name: workforce-too-many-tries-by-account }
     state: absent
-  # Orders 15 and 16 (once a sign-in reaches them, after the name): throttled now (15), paused now (16). Each has its
-  # own words (contract 3.8); a throttle wins when both hold, since an unlock doesn't lift it. Decide only.
+  # Orders 15, 16 and 17 (once a sign-in reaches them, after the name): the source held (15), the /48 tightened and this
+  # source refused by it (16), the pair paused (17). Each has its own words (contract 3.8, R.6.5); the source's and the
+  # network's win when they hold, since an unlock doesn't lift them. Decide only.
   - model: authentik_policies_expression.expressionpolicy
     id: wf-password-throttled
     identifiers: { name: workforce-password-throttled }
@@ -593,12 +599,20 @@ entries:
 {% include 'password-pause.py' %}
 {% endfilter %}
         # ---- the authentik part ----
-        from django.utils import timezone
-        http, person, account, conn, address = wf_ak_subject(request)
-        now = timezone.now().timestamp()
-        events, markers = wf_ak_events(conn, account, person, now, False)
-        decision = wf_decide(events, account, conn, markers, now)
-        return decision["throttled"] and wf_ak_refused(decision, address, person, account, conn, now)
+        decision, http, person, account, conn, address, now = wf_ak_decide(request)
+        return decision["source"] and wf_ak_refused(decision, address, person, account, conn, now)
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-network-tightened
+    identifiers: { name: workforce-network-tightened }
+    attrs:
+      name: workforce-network-tightened
+      expression: |
+{% filter indent(8, true) %}
+{% include 'password-pause.py' %}
+{% endfilter %}
+        # ---- the authentik part ----
+        decision, http, person, account, conn, address, now = wf_ak_decide(request)
+        return decision["rule"] == "network" and wf_ak_refused(decision, address, person, account, conn, now)
   - model: authentik_policies_expression.expressionpolicy
     id: wf-password-paused
     identifiers: { name: workforce-password-paused }
@@ -609,11 +623,7 @@ entries:
 {% include 'password-pause.py' %}
 {% endfilter %}
         # ---- the authentik part ----
-        from django.utils import timezone
-        http, person, account, conn, address = wf_ak_subject(request)
-        now = timezone.now().timestamp()
-        events, markers = wf_ak_events(conn, account, person, now, False)
-        decision = wf_decide(events, account, conn, markers, now)
+        decision, http, person, account, conn, address, now = wf_ak_decide(request)
         return decision["paused"] and wf_ak_refused(decision, address, person, account, conn, now)
   # Order 20 (the password stage's binding, negated, checked on every request to the stage): decides, and records a
   # try when it allows one, under one lock. The password stage runs only when this answers "neither".
@@ -645,33 +655,35 @@ entries:
         if plan is not None:
             # Only the try this request records may be marked right at 22, never an earlier one of this sign-in.
             plan.context.pop(WF_PLAN_TRY, None)
+        cfg = wf_ak_limits()
         if not checked:
             # A page load or an answer the stage won't check: decide only, record nothing.
             now = timezone.now().timestamp()
             events, markers = wf_ak_events(conn, account, person, now, False)
-            decision = wf_decide(events, account, conn, markers, now)
-            return decision["paused"] or decision["throttled"]
+            return wf_decide(events, account, conn, markers, now, cfg)["rule"] is not None
         with transaction.atomic(using="default"):
             with connections["default"].cursor() as cursor:
                 wf_ak_lock(cursor, *wf_ak_try_locks(account, conn))
             now = timezone.now().timestamp()
             events, markers = wf_ak_events(conn, account, person, now, True)
-            decision = wf_decide(events, account, conn, markers, now)
+            decision = wf_decide(events, account, conn, markers, now, cfg)
             if wf_ak_refused(decision, address, person, account, conn, now, locked=True):
                 return True
             tid = str(uuid4())
             wf_ak_record(WF_TRY, WF_KEEP_TRY, address, person, wf_try=tid, wf_account=account, wf_conn=conn,
                          wf_user_pk=pk)
+            # A decision worked out earlier in this request no longer stands (wf_ak_decide).
+            setattr(http, "_wf_decided", None)
             if plan is not None:
                 plan.context[WF_PLAN_TRY] = tid
             after = events + [{"at": now, "kind": "try", "try": tid, "account": account, "conn": conn, "pk": pk}]
-            for alert in wf_spread(after, account, conn, pk, now, before=events):
+            for alert in wf_spread(after, account, conn, pk, now, before=events, cfg=cfg):
                 field, value = wf_alert_key(alert)
                 if not wf_ak_rows(WF_ALERT, datetime.fromtimestamp(now - WF_ALERT_GAP, tz.utc),
                                   wf_kind=alert["wf_kind"], **{field: value}):
                     wf_ak_record(WF_ALERT, WF_KEEP_ALERT, address, None, **alert)
             return False
-  # Order 22, reached only once the password stage has accepted the password: marks this sign-in's try right (with
+  # Order 24, reached only once the password stage has accepted the password: marks this sign-in's try right (with
   # wf_fwd: the gateway marked the request as forwarded by a peer nobody named, for the readiness check), then fails,
   # so its deny stage never shows.
   - model: authentik_policies_expression.expressionpolicy
@@ -716,8 +728,8 @@ entries:
                              wf_user_pk=pk, wf_fwd=forwarded)
         plan.context.pop(WF_PLAN_TRY, None)
         return False
-  # After a password that wasn't checked (order 21): throttled now? (Then the throttle's words; otherwise the guard at
-  # 23 refuses with the pause's.)
+  # After a password that wasn't checked (order 21): the source held now? (Then its words; the network's are at 22;
+  # otherwise the guard at 23 refuses with the pause's.)
   - model: authentik_policies_expression.expressionpolicy
     id: wf-password-not-checked-throttled
     identifiers: { name: workforce-password-not-checked-throttled }
@@ -728,15 +740,27 @@ entries:
 {% include 'password-pause.py' %}
 {% endfilter %}
         # ---- the authentik part ----
-        from django.utils import timezone
         plan = request.context.get("flow_plan")
         if plan is not None and plan.context.get("user_backend"):
             return False
-        http, person, account, conn, address = wf_ak_subject(request)
-        now = timezone.now().timestamp()
-        events, markers = wf_ak_events(conn, account, person, now, False)
-        decision = wf_decide(events, account, conn, markers, now)
-        return decision["throttled"] and wf_ak_refused(decision, address, person, account, conn, now)
+        decision, http, person, account, conn, address, now = wf_ak_decide(request)
+        return decision["source"] and wf_ak_refused(decision, address, person, account, conn, now)
+  # After a password that wasn't checked (order 22): the /48 tightened and this source refused by it? (Its words.)
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-password-not-checked-network
+    identifiers: { name: workforce-password-not-checked-network }
+    attrs:
+      name: workforce-password-not-checked-network
+      expression: |
+{% filter indent(8, true) %}
+{% include 'password-pause.py' %}
+{% endfilter %}
+        # ---- the authentik part ----
+        plan = request.context.get("flow_plan")
+        if plan is not None and plan.context.get("user_backend"):
+            return False
+        decision, http, person, account, conn, address, now = wf_ak_decide(request)
+        return decision["rule"] == "network" and wf_ak_refused(decision, address, person, account, conn, now)
   # The words (contract 3.8): the same for a real name and one nobody has.
   - model: authentik_stages_deny.denystage
     id: wf-connection-throttled-stage
@@ -746,6 +770,14 @@ entries:
       deny_message: >-
         Too many wrong passwords from this connection. Wait 15 minutes, or use another connection (for example your
         phone’s mobile data). Unlocking your sign-in doesn’t lift this.
+  - model: authentik_stages_deny.denystage
+    id: wf-network-tightened-stage
+    identifiers: { name: workforce-network-tightened }
+    attrs:
+      name: workforce-network-tightened
+      deny_message: >-
+        Too many wrong passwords from this network. Wait 15 minutes, or use another connection (for example your
+        workplace Wi-Fi or your phone’s mobile data). Unlocking your sign-in doesn’t lift this.
   - model: authentik_stages_deny.denystage
     id: wf-too-many-tries-stage
     identifiers: { name: workforce-too-many-tries }
@@ -770,12 +802,24 @@ entries:
     # An error shows the deny stage (closed).
     attrs: { order: 0, enabled: true, failure_result: true }
   - model: authentik_flows.flowstagebinding
+    id: wf-network-tightened-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-network-tightened-stage
+    attrs:
+      order: 16
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-network-tightened-binding, policy: !KeyOf wf-network-tightened }
+    attrs: { order: 0, enabled: true, failure_result: true }
+  - model: authentik_flows.flowstagebinding
     id: wf-too-many-tries-binding
     identifiers:
       target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
       stage: !KeyOf wf-too-many-tries-stage
     attrs:
-      order: 16
+      order: 17
       evaluate_on_plan: false
       re_evaluate_policies: true
   - model: authentik_policies.policybinding
@@ -821,6 +865,27 @@ entries:
   - model: authentik_policies.policybinding
     identifiers: { target: !KeyOf wf-connection-throttled-after-binding, policy: !KeyOf wf-password-not-checked-throttled }
     attrs: { order: 0, enabled: true, failure_result: false }
+  # Order 22: no password checked and this source refused by its tightened /48: the network's words.
+  - model: authentik_stages_deny.denystage
+    id: wf-network-tightened-after-stage
+    identifiers: { name: workforce-network-tightened-after }
+    attrs:
+      name: workforce-network-tightened-after
+      deny_message: >-
+        Too many wrong passwords from this network. Wait 15 minutes, or use another connection (for example your
+        workplace Wi-Fi or your phone’s mobile data). Unlocking your sign-in doesn’t lift this.
+  - model: authentik_flows.flowstagebinding
+    id: wf-network-tightened-after-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-network-tightened-after-stage
+    attrs:
+      order: 22
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-network-tightened-after-binding, policy: !KeyOf wf-password-not-checked-network }
+    attrs: { order: 0, enabled: true, failure_result: false }
   # Order 23: nothing goes past the password step without a password checked in this sign-in (authentik's password
   # stage records which backend accepted it). Decided by what happened, not by a count, so a pause that ends between
   # two checks can't let anyone through; an error refuses too.
@@ -853,7 +918,8 @@ entries:
   - model: authentik_policies.policybinding
     identifiers: { target: !KeyOf wf-password-not-checked-binding, policy: !KeyOf wf-password-not-checked }
     attrs: { order: 0, enabled: true, failure_result: true }
-  # Order 22: the try was right (workforce-password-right always fails, so this deny stage never shows).
+  # Order 24 (22 until 15 November 2026): the try was right (workforce-password-right always fails, so this deny stage
+  # never shows). After the guard at 23, which passes only once a password was checked.
   - model: authentik_stages_deny.denystage
     id: wf-password-right-stage
     identifiers: { name: workforce-password-right }
@@ -867,7 +933,7 @@ entries:
       target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
       stage: !KeyOf wf-password-right-stage
     attrs:
-      order: 22
+      order: 24
       evaluate_on_plan: false
       re_evaluate_policies: true
   - model: authentik_policies.policybinding
@@ -905,6 +971,32 @@ entries:
   - model: authentik_policies.policybinding
     identifiers: { target: !KeyOf wf-client-address-flow, policy: !KeyOf wf-client-address-policy }
     attrs: { order: 0, enabled: true }
+
+  # Workforce issue 462 (contract R.7, 15 November 2026): the sign-in status interface's code. Bound to nothing, so it
+  # never takes part in a sign-in; it runs only as the property mapping workforce-sign-in-status, which
+  # invite-service-account.py makes from this text after every apply (authentik's blueprints can't make that kind of
+  # mapping) and which only the application's service account may test (object permissions on that one mapping). It
+  # answers that account alone, for one person: paused or not (from the records only this server writes, never an
+  # attribute the application could write), an unlock (recorded with this server's clock, its id used once), whether
+  # an unlock was applied (an id asked about before it was applied is voided), and the attack alerts. Nothing else:
+  # no email, code, link, typed name or other event. Run any other way (a test of this policy, by anyone) it answers
+  # nothing. The sign-in decisions above never read anything it writes except the unlock record, and never depend on
+  # it answering.
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-sign-in-status-code
+    identifiers: { name: workforce-sign-in-status-code }
+    attrs:
+      name: workforce-sign-in-status-code
+      execution_logging: false
+      expression: |
+{% filter indent(8, true) %}
+{% include 'password-pause.py' %}
+{% endfilter %}
+        # ---- the authentik part ----
+        try:
+            return wf_ak_status_answer(request)
+        except Exception:
+            return {"v": 1, "known": False, "why": "error"}
 
   # My Hub → "Use an authenticator app" opens this (signed in already): an email code first, so only the person
   # who reads that email can add an app, then the app's QR code. Workforce then removes the email method when they
@@ -1119,11 +1211,19 @@ entries:
             tries = [(at, c.get("wf_try")) for at, c in wf_ak_rows(WF_CODE_TRY, since, wf_user_pk=int(pk))]
             right = set(c.get("wf_try") for at, c in wf_ak_rows(WF_CODE_RIGHT, since, wf_user_pk=int(pk)))
             tid = plan.context.pop(WF_PLAN_CODE_TRY, None) if plan is not None else None
+            marked = False
             if tid and tid in set(t for at, t in tries) and tid not in right:
                 # Only reached at 31, after the code step accepted this code (at 29 no code has been typed yet).
                 wf_ak_record(WF_CODE_RIGHT, WF_CODE_KEEP, address, wf_try=tid, wf_user_pk=int(pk))
                 right.add(tid)
-        return wf_codes_paused(tries, right, now) is not None
+                marked = True
+            paused = wf_codes_paused(tries, right, now) is not None
+            if marked and not paused and wf_signs_in(person, plan):
+                # A completed sign-in (contract R.2): the right password (23 let it past) and now the right code. It
+                # makes this source proven, and with two other people's a workplace (R.4): never anything the browser
+                # sends, and one person counts once however often they sign in.
+                wf_ak_record(WF_SIGNED, WF_KEEP_SIGNED, address, person, wf_user_pk=int(pk), wf_conn=conn)
+        return paused
   - model: authentik_stages_deny.denystage
     id: wf-too-many-tries-codes
     identifiers: { name: workforce-too-many-tries-codes }

@@ -36,6 +36,11 @@ x-ak-sign-in-codes: &ak-sign-in-codes
   SMTP_FROM: ${SMTP_FROM:-workforce@localhost}
   AUTHENTIK_EMAIL__TIMEOUT: "10"
   AUTHENTIK_REPUTATION__EXPIRY: "900"
+  # Workforce issue 462 (contract R.3, R.4): the sign-in limits the server's policies read (password-pause.py's
+  # wf_limits checks them again and falls back to its defaults; bin/doctor.sh's "sign-in limits" row says so).
+  SIGN_IN_WORKPLACE_SOURCE_LIMIT: ${SIGN_IN_WORKPLACE_SOURCE_LIMIT:-50}
+  SIGN_IN_WORKPLACE_NETWORK_LIMIT: ${SIGN_IN_WORKPLACE_NETWORK_LIMIT:-300}
+  CLIENT_ADDRESSES_CONFIRMED: ${CLIENT_ADDRESSES_CONFIRMED:-}
 
 x-logging: &default-logging
   driver: json-file

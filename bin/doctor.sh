@@ -462,17 +462,30 @@ case "$PORT_DRIVER" in
       row "port driver" warn "rootless Docker's default port driver hides client addresses, so certificates and the audit record the Docker gateway — see RUNBOOK §7a"
     fi ;;
 esac
-# Spread wrong passwords the sign-in server noticed in the last day (contract 3.6): counts only, installation-wide;
-# Workforce shows each organisation its own on Today. Never a lock.
+# Spread wrong passwords the sign-in server noticed in the last day (contract 3.6, R.3): counts only, installation-wide;
+# Workforce shows each organisation its own on Today. Never a lock. A workplace connection held, or an IPv6 network
+# tightened, means many staff may be affected: the health email carries this row to the installation's contact.
 if [ -n "$SIGNIN_ALERTS" ]; then
-  read -r _ AL_CONN AL_ACCOUNT AL_THROTTLED <<< "$SIGNIN_ALERTS"
-  if is_count "$AL_CONN" && is_count "$AL_ACCOUNT" && is_count "$AL_THROTTLED"; then
-    if [ $((AL_CONN + AL_ACCOUNT + AL_THROTTLED)) -eq 0 ]; then
+  read -r _ AL_CONN AL_ACCOUNT AL_THROTTLED AL_WORKPLACE AL_NETWORK <<< "$SIGNIN_ALERTS"
+  AL_WORKPLACE="${AL_WORKPLACE:-0}"; AL_NETWORK="${AL_NETWORK:-0}"
+  if is_count "$AL_CONN" && is_count "$AL_ACCOUNT" && is_count "$AL_THROTTLED" && is_count "$AL_WORKPLACE" && is_count "$AL_NETWORK"; then
+    if [ $((AL_CONN + AL_ACCOUNT + AL_THROTTLED + AL_WORKPLACE + AL_NETWORK)) -eq 0 ]; then
       row "sign-in attacks" ok "no spread of wrong passwords in the last day"
     else
-      row "sign-in attacks" warn "in the last day: ${AL_CONN} connection(s) trying many accounts, ${AL_ACCOUNT} account(s) tried from many places, ${AL_THROTTLED} connection(s) held back. Nobody is locked out by it; Workforce shows each organisation its own on Today"
+      AL_MORE=""
+      [ "$AL_WORKPLACE" -eq 0 ] || AL_MORE="${AL_MORE}, ${AL_WORKPLACE} workplace connection(s) held back (their staff may have had to wait 15 minutes or use another connection)"
+      [ "$AL_NETWORK" -eq 0 ] || AL_MORE="${AL_MORE}, ${AL_NETWORK} IPv6 network(s) tightened (connections nobody signs in from were held there)"
+      row "sign-in attacks" warn "in the last day: ${AL_CONN} connection(s) trying many accounts, ${AL_ACCOUNT} account(s) tried from many places, ${AL_THROTTLED} connection(s) held back${AL_MORE}. Nobody is locked out of their account by it; Workforce shows each organisation its own on Today"
     fi
   fi
+fi
+# The sign-in limits' settings (Workforce issue 462, contract R.3 and R.4): a value the sign-in server can't use is
+# replaced there by its default (50, 300, or the entry ignored), so say which.
+SIL_PROBLEM="$(sign_in_limits_problem)"
+if [ -n "$SIL_PROBLEM" ]; then
+  row "sign-in limits" warn "${SIL_PROBLEM}; the sign-in server uses its default instead (RUNBOOK §7a)"
+else
+  row "sign-in limits" ok "workplace connections ${SIGN_IN_WORKPLACE_SOURCE_LIMIT:-50}, workplace networks ${SIGN_IN_WORKPLACE_NETWORK_LIMIT:-300} wrong passwords in 15 minutes (ordinary: 10 and 30)"
 fi
 
 # --- test-only things on a real install (owner, 8 November 2026): the test inbox and mailpit

@@ -71,7 +71,9 @@ your password?" or Workforce's account menu, needs 16 characters that aren't eas
 guess (four or five unrelated words work well). Wrong passwords at `admin` pause it only
 on the connection they came from, as for everyone (RUNBOOK §6), so its password is what
 stops guessing. If a proxy or load balancer sits in front of the gateway, name it in
-`GATEWAY_TRUSTED_PROXIES` (RUNBOOK §7a): the sign-in limits need each person's own address. The
+`GATEWAY_TRUSTED_PROXIES` (RUNBOOK §7a): the sign-in limits need each person's own address. Your
+offices' own addresses can go in `CLIENT_ADDRESSES_CONFIRMED`, which gives each a workplace's higher (still
+bounded) limit on wrong passwords, `SIGN_IN_WORKPLACE_SOURCE_LIMIT` (50 unless set; RUNBOOK §6). The
 prompt itself never echoes it — that would
 defeat `-rs`. The password then surfaces in exactly three places, in order:
 

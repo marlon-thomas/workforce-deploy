@@ -1,8 +1,8 @@
 # Self-test for the sign-in server's wrong-password pause, connection throttle, alerts and wrong-code count (Workforce
-# issue 462): the decision in ansible/roles/authentik/templates/password-pause.py and code-tries.py, with python3
-# alone. The same vectors as the application's PasswordPause (password-pause-vectors.json, a copy of the private
-# repo's src/test/resources/identity/ file: change both together). The authentik part (the lock, the records, real
-# requests at the same moment) runs on the pinned authentik in bin/tests/authentik-lock-e2e.sh.
+# issue 462, contract section R of 15 November 2026): the decision in ansible/roles/authentik/templates/password-pause.py
+# and code-tries.py, with python3 alone, against password-pause-vectors.json (kept here only since 15 November: the
+# application asks the sign-in server instead of computing a pause). The authentik part (the lock, the records, real
+# requests at the same moment, the status interface) runs on the pinned authentik in bin/tests/authentik-lock-e2e.sh.
 import json
 import os
 import re
@@ -31,7 +31,8 @@ T = g("wf_parse_time")
 
 # ---- the shared vectors
 vectors = json.load(open(os.path.join(HERE, "password-pause-vectors.json"), encoding="utf-8"))
-check("vectors: schema", vectors.get("schema"), 1)
+check("vectors: schema", vectors.get("schema"), 2)
+L = g("wf_limits")
 for address, key in vectors["keys"]:
     check("connection key of " + address, g("wf_connection_key")(address), key)
 for address, key in vectors["networkKeys"]:
@@ -40,10 +41,10 @@ for case in vectors["cases"]:
     events = [{"at": T(e["at"]), "kind": e["kind"], "try": e.get("try"), "account": e["account"],
                "conn": g("wf_connection_key")(e["conn"])} for e in case["events"]]
     markers = dict((k, T(v)) for k, v in case["markers"].items())
-    d = g("wf_decide")(events, case["account"], case["conn"], markers, T(case["now"]))
+    d = g("wf_decide")(events, case["account"], case["conn"], markers, T(case["now"]), L(case.get("config", {})))
     want = case["expect"]
-    check("vector: " + case["name"], (d["paused"], d["throttled"], d["until"]),
-          (want["paused"], want["throttled"], T(want["until"]) if want["until"] else None))
+    check("vector: " + case["name"], (d["paused"], d["throttled"], d["until"], d["rule"]),
+          (want["paused"], want["throttled"], T(want["until"]) if want["until"] else None, want.get("rule")))
 
 # ---- which requests are counted: exactly those the password stage checks
 pr = g("wf_password_request")
@@ -66,20 +67,20 @@ check("a code of spaces (trimmed to blank, never checked)", cr("POST", {"code": 
 check("no method that takes codes", cr("POST", {"code": "123456"}, ["webauthn"]), False)
 check("a page load", cr("GET", {"code": "123456"}, ["totp"]), False)
 
-# ---- the marker: the later of a new password and an unlock; a time far ahead is ignored
+# ---- V5, the marker: the later of a new password and the newest unlock record; never an attribute
 now = T("2026-11-14T12:00:00Z")
 wm = g("wf_marker")
-check("no marker", wm(None, {}, now), None)
-check("a password change", wm("2026-11-14T10:00:00+00:00", {}, now), T("2026-11-14T10:00:00Z"))
-check("an unlock after it wins", wm("2026-11-14T10:00:00Z", {"workforce": {"password_unlocked_at": "2026-11-14T11:00:00Z"}}, now),
-      T("2026-11-14T11:00:00Z"))
-check("a password change after the unlock wins", wm("2026-11-14T11:30:00Z", {"workforce": {"password_unlocked_at": "2026-11-14T11:00:00Z"}}, now),
+check("no marker", wm(None, [], now), None)
+check("a password change", wm("2026-11-14T10:00:00+00:00", [], now), T("2026-11-14T10:00:00Z"))
+check("an unlock record after it wins", wm("2026-11-14T10:00:00Z", ["2026-11-14T11:00:00.250000Z"], now),
+      T("2026-11-14T11:00:00.25Z"))
+check("a password change after the unlock wins", wm("2026-11-14T11:30:00Z", ["2026-11-14T11:00:00Z"], now),
       T("2026-11-14T11:30:00Z"))
-check("an unlock 2 minutes ahead counts", wm(None, {"workforce": {"password_unlocked_at": "2026-11-14T12:02:00Z"}}, now),
-      T("2026-11-14T12:02:00Z"))
-check("one further ahead is ignored", wm(None, {"workforce": {"password_unlocked_at": "2026-11-14T13:00:00Z"}}, now), None)
-check("an unreadable one is ignored", wm(None, {"workforce": {"password_unlocked_at": "soon"}}, now), None)
-check("attributes not a dict", wm(None, "x", now), None)
+check("the newest of several unlocks", wm(None, ["2026-11-14T09:00:00Z", "2026-11-14T11:00:00Z"], now), T("2026-11-14T11:00:00Z"))
+check("one far ahead is ignored", wm(None, ["2026-11-14T13:00:00Z"], now), None)
+check("an unreadable one is ignored", wm(None, ["soon", True], now), None)
+check("an attribute is never a marker: password_unlocked_at set to now in attributes is ignored",
+      wm(None, {"workforce": {"password_unlocked_at": "2026-11-14T12:00:00Z"}}, now), None)
 
 # ---- names nobody has: a keyed digest, never the name
 nk = g("wf_name_key")
@@ -155,26 +156,6 @@ check("the throttle is announced once, when it starts",
 check("alert keys", (g("wf_alert_key")({"wf_kind": "account-spread", "wf_user_pk": 4}),
                      g("wf_alert_key")({"wf_kind": "throttled", "wf_conn": "192.0.2.9"})), (("wf_user_pk", 4), ("wf_conn", "192.0.2.9")))
 
-# ---- a workplace /48 is still bounded (review finding 3): the pause counts by /64, so it bounds nothing there
-def rights(accounts, prefix, when="2026-11-11T09:00:00Z"):
-    out = []
-    for i, a in enumerate(accounts):
-        out += [{"at": T(when), "kind": k, "try": "ok-" + a, "account": a, "conn": "%s:%x::/64" % (prefix, 0xa0 + i)}
-                for k in ("try", "right")]
-    return out
-office = rights(["u:20", "u:21", "u:22"], "2001:db8:9")
-spray = lambda n: [{"at": base + i, "kind": "try", "try": "w%d" % i, "account": "u:7",
-                    "conn": "2001:db8:9:%x::/64" % (i + 1)} for i in range(n)]
-dec = g("wf_decide")
-check("a workplace /48: 299 wrong from as many /64s, not held", dec(office + spray(299), "u:7", "2001:db8:9:ffff::1", {}, base + 400)["throttled"], False)
-check("the 300th holds it", dec(office + spray(300), "u:7", "2001:db8:9:ffff::1", {}, base + 400)["throttled"], True)
-check("until 15 minutes after the 300th", dec(office + spray(300), "u:7", "2001:db8:9:ffff::1", {}, base + 400)["until"], base + 299 + 900)
-check("a /48 that isn't a workplace: after 30, as before", dec(spray(30), "u:7", "2001:db8:9:ffff::1", {}, base + 400)["throttled"], True)
-check("a workplace connection itself is still never throttled", dec(rights(["u:20", "u:21", "u:22"], "2001:db8:9")[:2]
-      + [dict(e, conn="2001:db8:9:a0::/64") for e in rights(["u:21", "u:22"], "2001:db8:9")]
-      + [{"at": base + i, "kind": "try", "try": "x%d" % i, "account": "n:%032x" % i, "conn": "2001:db8:9:a0::/64"} for i in range(29)],
-      "u:7", "2001:db8:9:a0::5", {}, base + 400)["throttled"], False)
-
 # ---- the throttle never depends on the name: a real account, a known one and an unknown name get the same answer
 ev = [{"at": base + i, "kind": "try", "try": "w%d" % i, "account": "n:%032x" % i, "conn": "192.0.2.50"} for i in range(10)]
 ev += [{"at": base - 86400, "kind": "right", "try": "r1", "account": "u:1", "conn": "192.0.2.50"},
@@ -186,14 +167,126 @@ for who, marker in (("u:1", None), ("u:2", base - 60), ("n:" + "e" * 32, None)):
 check("throttled: the same answer for a known account, one just unlocked and an unknown name", answers,
       set([(False, True, base + 9 + 900)]))
 for n in (2, 3):
-    ev2 = ev + [{"at": base - 86400, "kind": "right", "try": "x%d" % n, "account": "u:%d" % n, "conn": "192.0.2.50"}]
-    if n == 3:
-        ev2 += [{"at": base - 86400, "kind": "right", "try": "x2", "account": "u:2", "conn": "192.0.2.50"}]
+    ev2 = ev + [{"at": base - 86400, "kind": "signed", "account": "u:%d" % k, "conn": "192.0.2.50"} for k in range(1, n + 1)]
     d = g("wf_decide")(ev2, "n:" + "e" * 32, "192.0.2.50", {}, base + 20)
-    check("%d real accounts with a right password there: %s" % (n, "a workplace, never throttled" if n == 3 else "not yet a workplace"),
+    check("%d accounts with a completed sign-in there: %s" % (n, "a workplace, its cap is 50" if n == 3 else "not yet a workplace"),
           d["throttled"], n != 3)
-check("unknown names never make a workplace", g("wf_workplace")([{"at": base, "kind": "right", "try": "a", "account": "n:%d" % i,
-      "conn": "192.0.2.50"} for i in range(5)], "192.0.2.50", False, base + 1), False)
+cfg0 = L({})
+check("unknown names never make a workplace", g("wf_workplace")([{"at": base, "kind": "signed", "account": "n:%d" % i,
+      "conn": "192.0.2.50"} for i in range(5)], "192.0.2.50", False, cfg0, base + 1), False)
+
+# ---- the settings (contract R.3, R.4): read from the sign-in server's environment, checked again there
+import ipaddress
+check("defaults", (cfg0["source"], cfg0["network"], cfg0["confirmed"], cfg0["warnings"]), (50, 300, [], []))
+c = L({"SIGN_IN_WORKPLACE_SOURCE_LIMIT": "100", "SIGN_IN_WORKPLACE_NETWORK_LIMIT": "1000"})
+check("the highest allowed", (c["source"], c["network"], c["warnings"]), (100, 1000, []))
+c = L({"SIGN_IN_WORKPLACE_SOURCE_LIMIT": "19", "SIGN_IN_WORKPLACE_NETWORK_LIMIT": "1001"})
+check("out of range: the defaults, named", (c["source"], c["network"], c["warnings"]),
+      (50, 300, ["SIGN_IN_WORKPLACE_NETWORK_LIMIT", "SIGN_IN_WORKPLACE_SOURCE_LIMIT"]))
+c = L({"SIGN_IN_WORKPLACE_SOURCE_LIMIT": "100", "SIGN_IN_WORKPLACE_NETWORK_LIMIT": "100"})
+check("a source limit not below the network's: both defaults (one source could tighten a /48 alone)",
+      (c["source"], c["network"], len(c["warnings"])), (50, 300, 2))
+c = L({"SIGN_IN_WORKPLACE_SOURCE_LIMIT": " 60 ", "SIGN_IN_WORKPLACE_NETWORK_LIMIT": "-5"})
+check("spaces are trimmed; a negative isn't a number", (c["source"], c["network"]), (60, 300))
+c = L({"CLIENT_ADDRESSES_CONFIRMED": "203.0.113.7, 2001:db8:1:2::/64 198.51.100.0/24,[2001:db8:9::5],::ffff:192.0.2.9,nonsense,0.0.0.0/0,::/0,10.0.0.0/7"})
+check("confirmed addresses, keys and ranges; nonsense and the whole internet ignored and named",
+      ([str(n) for n in c["confirmed"]], c["warnings"]),
+      (["203.0.113.7/32", "2001:db8:1:2::/64", "198.51.100.0/24", "2001:db8:9::5/128", "192.0.2.9/32"], ["CLIENT_ADDRESSES_CONFIRMED"]))
+wc = g("wf_confirmed")
+check("an address in a confirmed range is confirmed", wc("198.51.100.77", c["confirmed"]), True)
+check("one outside isn't", wc("198.51.101.1", c["confirmed"]), False)
+check("a /64 holding a confirmed address is", wc("2001:db8:9::/64", c["confirmed"]), True)
+check("its /48 is (a workplace network)", wc("2001:db8:9::/48", c["confirmed"]), True)
+check("an IPv4 range never confirms an IPv6 source", wc("::ffff:0:0/96", c["confirmed"]), False)
+check("nothing that isn't an address", wc("nonsense", c["confirmed"]), False)
+
+# ---- alerts when a hold begins (contract R.3, R.6.6): which kind, and the affected accounts
+before = [{"at": base + i, "kind": "try", "try": "o%d" % i, "account": "n:%032x" % i, "conn": "203.0.113.70"} for i in range(49)]
+office_cfg = L({"CLIENT_ADDRESSES_CONFIRMED": "203.0.113.64/28"})
+signed = [{"at": base - 3600, "kind": "signed", "account": "u:%d" % k, "conn": "203.0.113.70"} for k in (31, 32)]
+after = signed + before + [{"at": base + 49, "kind": "try", "try": "o49", "account": "n:%032x" % 49, "conn": "203.0.113.70"}]
+al = [a for a in sp(after, "n:%032x" % 49, "203.0.113.70", None, base + 50, before=signed + before, cfg=office_cfg)
+      if a["wf_kind"] != "connection-spread"]
+check("the 50th at a workplace source: workplace-throttled, naming the people who sign in there",
+      [(a["wf_kind"], a["wf_workplace"], a["wf_affected_pks"], a["wf_wrong"]) for a in al], [("workplace-throttled", True, [31, 32], 50)])
+check("no alert before it", [a["wf_kind"] for a in sp(signed + before, "n:%032x" % 48, "203.0.113.70", None, base + 49,
+      before=signed + before[:-1], cfg=office_cfg) if a["wf_kind"] != "connection-spread"], [])
+v6 = [{"at": base + i, "kind": "try", "try": "z%d" % i, "account": "n:%032x" % i, "conn": "2001:db8:7:%x::/64" % (i + 1)} for i in range(29)]
+proven6 = [{"at": base - 3600, "kind": "signed", "account": "u:51", "conn": "2001:db8:7:a0::/64"}]
+last = {"at": base + 29, "kind": "try", "try": "z29", "account": "n:%032x" % 29, "conn": "2001:db8:7:ff::/64"}
+al = [a for a in sp(proven6 + v6 + [last], "n:%032x" % 29, "2001:db8:7:ff::/64", None, base + 30, before=proven6 + v6)
+      if a["wf_kind"] == "network-tightened"]
+check("the 30th wrong in an ordinary /48: network-tightened for the /48, naming who signs in there",
+      [(a["wf_conn"], a["wf_workplace"], a["wf_affected_pks"], a["wf_wrong"], a["wf_connections"]) for a in al],
+      [("2001:db8:7::/48", False, [51], 30, 30)])
+check("every alert has the same keys", sorted(al[0].keys()), sorted(["wf_kind", "wf_conn", "wf_user_pk", "wf_user_pks", "wf_accounts",
+      "wf_connections", "wf_wrong", "wf_window", "wf_workplace", "wf_affected_pks"]))
+
+# ---- V6, the status interface's answers (contract R.7): the pair rule over every name tied to the person
+st = g("wf_status")
+pt = lambda account, conn, minutes, pk=7: [{"at": base + 60 * m, "kind": "try", "try": "%s%s%d" % (account, conn, m), "account": account,
+                                           "conn": conn, "pk": pk} for m in minutes]
+check("five under the username from one source: paused there", st(pt("u:7", "203.0.113.1", range(5)), 7, None, base + 300),
+      {"paused": True, "pausedSources": 1, "until": base + 240 + 900})
+check("five under the email from another: two sources, the latest end",
+      st(pt("u:7", "203.0.113.1", range(5)) + pt("n:" + "e" * 32, "203.0.113.2", range(2, 7)), 7, None, base + 400),
+      {"paused": True, "pausedSources": 2, "until": base + 360 + 900})
+check("three and three: not paused", st(pt("u:7", "203.0.113.1", range(3)) + pt("n:" + "e" * 32, "203.0.113.1", range(3, 6)), 7, None, base + 400),
+      {"paused": False, "pausedSources": 0, "until": None})
+check("someone else's tries never count", st(pt("u:8", "203.0.113.1", range(5), pk=8), 7, None, base + 300)["paused"], False)
+check("after the marker: lifted", st(pt("u:7", "203.0.113.1", range(5)), 7, base + 250, base + 300)["paused"], False)
+check("an old marker: a later pause stands", st(pt("u:7", "203.0.113.1", range(5, 10)), 7, base + 250, base + 600)["paused"], True)
+
+# ---- the unlock: authorisation is the caller's (authentik part); here replay, staleness and acknowledgement (R.7.4)
+ud = g("wf_unlock_decide")
+us = g("wf_unlock_status_decide")
+uid = "0b6f1d2a-3c4d-4e5f-8a9b-0c1d2e3f4a5b"
+iso_now = "2026-11-14T10:00:00Z"
+check("a fresh id, the time right: apply", ud([], False, uid, 7, iso_now, base), ("apply", None))
+check("119 seconds off: still", ud([], False, uid, 7, "2026-11-14T10:01:59Z", base)[0], "apply")
+check("121 seconds off: stale", ud([], False, uid, 7, "2026-11-14T09:57:59Z", base)[1]["why"], "stale")
+check("no time: stale", ud([], False, uid, 7, None, base)[1]["why"], "stale")
+check("not a random UUID: invalid", [ud([], False, x, 7, iso_now, base)[1]["why"] for x in
+      ("", None, uid.upper(), "0b6f1d2a-3c4d-1e5f-8a9b-0c1d2e3f4a5b", uid + "0")], ["invalid"] * 5)
+first = ud([(base - 30, 7, True)], False, uid, 7, "2026-11-14T08:00:00Z", base)
+check("the same id for the same person again: the first answer and time, nothing new, however late",
+      (first[0], first[1]["applied"], first[1]["at"], first[1]["wasPaused"]), ("answer", True, "2026-11-14T09:59:30.000000Z", True))
+check("the same id for another person: reused", ud([(base - 30, 7, True)], False, uid, 8, iso_now, base)[1], {"v": 1, "op": "unlock", "applied": False, "why": "reused"})
+check("a voided id: reused, never applied", ud([], True, uid, 7, iso_now, base)[1]["why"], "reused")
+check("asked about before it was applied: void it", us([], False, uid, 7)[0], "void")
+check("then: voided", us([], True, uid, 7)[1]["voided"], True)
+check("applied: its server time", us([(base, 7, False)], False, uid, 7)[1], {"v": 1, "op": "unlock-status", "applied": True, "id": uid,
+      "at": "2026-11-14T10:00:00.000000Z"})
+check("another person's id: reused", us([(base, 8, False)], False, uid, 7)[1]["why"], "reused")
+
+# ---- the alerts' answer: counts, keys and numbers, nothing else
+ao = g("wf_alert_out")
+out = ao("e4b9c1d2-0000-4000-8000-000000000001", base, {"wf_kind": "network-tightened", "wf_conn": "2001:db8:7::/48",
+         "wf_user_pk": None, "wf_user_pks": [3, "x", True], "wf_accounts": 4, "wf_connections": 30, "wf_wrong": 30,
+         "wf_window": 900, "wf_workplace": False, "wf_affected_pks": [51], "secret": "never"})
+check("an alert's answer", out, {"id": "e4b9c1d2-0000-4000-8000-000000000001", "at": "2026-11-14T10:00:00.000000Z",
+      "kind": "network-tightened", "scope": "network", "source": "2001:db8:7::/48", "workplace": False, "accounts": 4,
+      "sources": 30, "wrong": 30, "window": 900, "userPks": [3], "affectedPks": [51]})
+check("account-spread is about an account", ao("x", base, {"wf_kind": "account-spread"})["scope"], "account")
+check("a /48's connection-spread is about a network", ao("x", base, {"wf_kind": "connection-spread", "wf_conn": "2001:db8::/48"})["scope"], "network")
+ac = g("wf_alert_cursor")
+check("a cursor", ac("2026-11-14T10:00:00.000001Z|e4b9c1d2-0000-4000-8000-000000000001"),
+      (base + 0.000001, "e4b9c1d2-0000-4000-8000-000000000001"))
+check("no cursor", [ac(x) for x in (None, "", "x|y", "2026-11-14T10:00:00Z|' or 1=1")], [None] * 4)
+
+# ---- a completed sign-in counts only for an active internal account whose password was checked (R.2)
+class Plan:
+    def __init__(self, ctx):
+        self.context = ctx
+class Person:
+    def __init__(self, active=True, kind="internal"):
+        self.is_active, self.type = active, kind
+si = g("wf_signs_in")
+check("staff, password checked: counts", si(Person(), Plan({"user_backend": "x"})), True)
+check("no password checked: doesn't", si(Person(), Plan({})), False)
+check("a service account doesn't", si(Person(kind="service_account"), Plan({"user_backend": "x"})), False)
+check("an inactive one doesn't", si(Person(active=False), Plan({"user_backend": "x"})), False)
+check("nobody doesn't", si(None, Plan({"user_backend": "x"})), False)
 
 # ---- wrong codes: their own count, by account
 cp = g("wf_codes_paused")
@@ -209,8 +302,9 @@ for name in ("password-pause.py", "code-tries.py"):
     check(name + " has no Jinja delimiters", re.findall(r"\{\{|\}\}|\{%|%\}|\{#|#\}", src), [])
 bp = open(os.path.join(TEMPLATES, "workforce-app.yaml.j2"), encoding="utf-8").read()
 for policy in ("workforce-password-paused", "workforce-password-try", "workforce-password-right",
-               "workforce-client-address", "workforce-code-try", "workforce-codes-paused"):
-    m = re.search(r"name: " + policy + r"\n      expression: \|\n\{% filter indent\(8, true\) %\}\n\{% include 'password-pause.py' %\}", bp)
+               "workforce-client-address", "workforce-code-try", "workforce-codes-paused", "workforce-network-tightened",
+               "workforce-password-not-checked-network", "workforce-sign-in-status-code"):
+    m = re.search(r"name: " + policy + r"\n(      execution_logging: false\n)?      expression: \|\n\{% filter indent\(8, true\) %\}\n\{% include 'password-pause.py' %\}", bp)
     check(policy + " includes the decision", bool(m), True)
 
 print("password pause self-test: %d passed, %d failed" % (passed, failed))
