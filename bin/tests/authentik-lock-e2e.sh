@@ -21,18 +21,21 @@
 #   - L1 (owner's instruction B): a colleague completes a sign-in (password and code) on the same IPv4 address and the
 #     same IPv6 /64 while someone attacks below the cap; at the cap they are refused, sign in at once elsewhere, and
 #     sign in on the same source 15 minutes after the cap while a paced attack goes on, but not while an attacker
-#     re-arms the moment it ends (review finding 10: only another connection helps then); a workplace source holds at 50,
-#     not 49 (a learned workplace: three people's completed sign-ins), and a confirmed one isn't held at 10;
+#     re-arms the moment it ends (review finding 10: only another connection helps then); three people's completed
+#     sign-ins make a source proven, never a workplace: it holds at 10 (the owner's Q3); a confirmed office holds at 50,
+#     not 49; each hold's alert names the people who completed sign-ins there (what the application needs for Q5);
 #   - L2 (decision 2): five as a username and five as its email, then the source's cap of 10 for every name; an
 #     unknown name and email get the same answers, byte for byte (the typed name aside), and the password step's
 #     median time over seven samples is within 25% of a real name's (review of 15 November 2026, findings 1, 14);
 #   - L3 (decision 1): each try a new TCP connection, cookie jar and flow, through the gateway: the 11th is refused;
 #     25 different names at one moment from one source record exactly 10;
-#   - L4 (decision 1, instruction C): in a large workplace /48 one source is held at its cap and nobody else is; 300
+#   - L4 (decision 1, instruction C): in a large workplace /48 (a confirmed /56) one source is held at its cap and
+#     nobody else is; 300
 #     tries from rotating /64s tighten it: a never-seen /64 is refused with the network's words, staff on proven /64s
 #     carry on, a proven /64 with five wrong is refused (a right password excuses only a confirmed source: review
 #     finding 2), staff on proven /64s are never refused while the rotation is being counted (findings 4 and 15), and
-#     it lifts 15 minutes after the newest try; an ordinary /48 tightens at 30;
+#     it lifts 15 minutes after the newest try; an ordinary /48 tightens at 30, though three people completed sign-ins
+#     in it (Q3);
 #   - L5 (instruction D): with the application's real token, generic account updates (attributes, the password change
 #     date) change neither the sign-in decision nor the status; the unlock refuses a stale time, a reused id, another
 #     person's id, the emergency administrator and a service account; a voided id never applies; an unlock at T
@@ -113,7 +116,7 @@ AK_ENV=(-e TZ=Europe/London -e AUTHENTIK_POSTGRESQL__HOST=authentik-postgres -e 
   -e AUTHENTIK_POSTGRESQL__NAME=authentik -e AUTHENTIK_POSTGRESQL__PASSWORD="$PGPW" -e AUTHENTIK_SECRET_KEY="$SECRET"
   -e AUTHENTIK_ERROR_REPORTING__ENABLED=false -e AUTHENTIK_WEB__BASE_URL=https://auth.e2e.test
   -e AUTHENTIK_REPUTATION__EXPIRY=900 -e AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS="$TRUSTED"
-  -e SIGN_IN_WORKPLACE_SOURCE_LIMIT=50 -e SIGN_IN_WORKPLACE_NETWORK_LIMIT=300 -e CLIENT_ADDRESSES_CONFIRMED=203.0.113.64/28)
+  -e SIGN_IN_WORKPLACE_SOURCE_LIMIT=50 -e SIGN_IN_WORKPLACE_NETWORK_LIMIT=300 -e "CLIENT_ADDRESSES_CONFIRMED=203.0.113.64/28 2001:db8:100::/56")
 AK_VOL=(-v "$WORK/workforce-app.yaml:/blueprints/workforce-app.yaml:ro" -v "$REPO/authentik:/workforce:ro"
   -v "$REPO/branding:/branding:ro" -v "$REPO/branding/authentik-templates:/templates:ro")
 docker create --name "$P-server" --network "$P-data" --network-alias authentik-server --user 1000:1000 \
@@ -651,26 +654,38 @@ fc s "$IN" many 3 "l1v6-more-%d" wrong 2001:db8:a1:1::10 >/dev/null
 check "L1 /64: refused, not counted" "$(trycount 2001:db8:a1:1::/64)" 10
 age_source 2001:db8:a1:1::/64 "15 minutes 1 second"
 check "L1 /64: 15 minutes after the cap: in" "$(complete s "$IN" "$(xff 2001:db8:a1:1::20)" sam "$PW_SAM" totp-sam.key)" "$DONE"
-# A workplace source learned from three people's completed sign-ins: its cap is 50, not 10 and not none.
+# The owner's Q3: three people's completed sign-ins make a source proven, never a workplace: it holds at 10.
 WP=198.51.100.200
 for who in "pat $PW_PAT totp.key" "sam $PW_SAM totp-sam.key" "kim $PW_KIM totp-kim.key"; do
   set -- $who
-  check "L1 workplace: $1 completes a sign-in at the office" "$(complete s "$IN" "$(xff $WP)" "$1" "$2" "$3")" "$DONE"
+  check "L1 Q3: $1 completes a sign-in at a source nobody confirmed" "$(complete s "$IN" "$(xff $WP)" "$1" "$2" "$3")" "$DONE"
 done
-check "L1 workplace: three people's completed sign-ins recorded there" "$(sql "select count(distinct context->>'wf_user_pk') from authentik_events_event where action = 'custom_workforce_signed_in' and context->>'wf_conn' = '$WP'")" 3
-fc s "$IN" many 49 "wp-%d" wrong "$WP" > "$WORK/wp.json"
-check "L1 workplace: 49 wrong, every one checked" "$(count_checked "$WORK/wp.json")" 49
-has "L1 workplace: staff still sign in there" "$(via "$WP" kim "$PW_KIM")" "next:ak-stage-authenticator-"
-via "$WP" wp-50 wrong >/dev/null
-has "L1 workplace: the 50th holds it, with the source's words" "$(via "$WP" kim "$PW_KIM")" "$THROTTLED"
-check "L1 workplace: alert workplace-throttled, naming the people who sign in there" \
-  "$(sql "select context->>'wf_workplace' || ' ' || (select string_agg(x::text, ',' order by x::int) from jsonb_array_elements_text(context->'wf_affected_pks') x) from authentik_events_event where action = 'custom_workforce_password_alert' and context->>'wf_kind' = 'workplace-throttled' and context->>'wf_conn' = '$WP'")" \
+check "L1 Q3: three people's completed sign-ins recorded there" "$(sql "select count(distinct context->>'wf_user_pk') from authentik_events_event where action = 'custom_workforce_signed_in' and context->>'wf_conn' = '$WP'")" 3
+fc s "$IN" many 10 "wp-%d" wrong "$WP" > "$WORK/wp.json"
+check "L1 Q3: ten wrong there, every one checked" "$(count_checked "$WORK/wp.json")" 10
+has "L1 Q3: no workplace: the 10th holds it, with the source's words" "$(via "$WP" kim "$PW_KIM")" "$THROTTLED"
+check "L1 Q3/Q5: its alert is throttled (no workplace) and names the people who completed sign-ins there" \
+  "$(sql "select context->>'wf_workplace' || ' ' || (select string_agg(x::text, ',' order by x::int) from jsonb_array_elements_text(context->'wf_affected_pks') x) from authentik_events_event where action = 'custom_workforce_password_alert' and context->>'wf_kind' = 'throttled' and context->>'wf_conn' = '$WP'")" \
+  "false $(printf '%s\n' "$PAT_PK" "$SAM_PK" "$KIM_PK" | sort -n | paste -sd, -)"
+check "L1 Q3: and no workplace-throttled alert for it" "$(sql "select count(*) from authentik_events_event where action = 'custom_workforce_password_alert' and context->>'wf_kind' = 'workplace-throttled' and context->>'wf_conn' = '$WP'")" 0
+# A confirmed office (CLIENT_ADDRESSES_CONFIRMED, 203.0.113.64/28): its cap is 50, not 10 and not none.
+CO=203.0.113.70
+for who in "pat $PW_PAT totp.key" "sam $PW_SAM totp-sam.key" "kim $PW_KIM totp-kim.key"; do
+  set -- $who
+  check "L1 confirmed office: $1 completes a sign-in there" "$(complete s "$IN" "$(xff $CO)" "$1" "$2" "$3")" "$DONE"
+done
+fc s "$IN" many 49 "office-%d" wrong "$CO" > "$WORK/co.json"
+check "L1 confirmed office: 49 wrong, every one checked" "$(count_checked "$WORK/co.json")" 49
+has "L1 confirmed office: staff still sign in there" "$(via "$CO" kim "$PW_KIM")" "next:ak-stage-authenticator-"
+via "$CO" office-50 wrong >/dev/null
+has "L1 confirmed office: the 50th holds it, with the source's words" "$(via "$CO" kim "$PW_KIM")" "$THROTTLED"
+check "L1 confirmed office: alert workplace-throttled, naming the people who sign in there" \
+  "$(sql "select context->>'wf_workplace' || ' ' || (select string_agg(x::text, ',' order by x::int) from jsonb_array_elements_text(context->'wf_affected_pks') x) from authentik_events_event where action = 'custom_workforce_password_alert' and context->>'wf_kind' = 'workplace-throttled' and context->>'wf_conn' = '$CO'")" \
   "true $(printf '%s\n' "$PAT_PK" "$SAM_PK" "$KIM_PK" | sort -n | paste -sd, -)"
-fc s "$IN" many 11 "conf-%d" wrong 203.0.113.70 > "$WORK/conf.json"
-check "L1 confirmed office address (CLIENT_ADDRESSES_CONFIRMED): eleven wrong, all checked" "$(count_checked "$WORK/conf.json")" 11
-has "L1 confirmed office: not held at 10" "$(via 203.0.113.70 kim "$PW_KIM")" "next:ak-stage-authenticator-"
 
-# ---- 13. L4 (decision 1, instruction C): a large workplace /48, one malicious source, then rotating /64s
+# ---- 13. L4 (decision 1, instruction C): a large workplace /48, one malicious source, then rotating /64s. The /48 is a
+# workplace network only through the operator's confirmed /56 (2001:db8:100::/56; the owner's Q3), whose /64s are
+# neither workplace nor proven sources for that: staff's /64s are proven by their own completed sign-ins.
 W=2001:db8:100
 for who in "pat $PW_PAT totp.key 1" "sam $PW_SAM totp-sam.key 2" "kim $PW_KIM totp-kim.key 3"; do
   set -- $who
@@ -701,6 +716,9 @@ echo "     L4 load: staff password steps during the flood, slowest $(sort -k2 -n
 check "L4: 290 from 29 rotating /64s, all checked (each /64 holds only at its own 10)" \
   "$(( $(count_checked "$WORK/l4r0.json") + $(count_checked "$WORK/l4r1.json") + $(count_checked "$WORK/l4r2.json") + $(count_checked "$WORK/l4r3.json") ))" 290
 check "L4: the /48's 300th tightens it (a workplace network): one alert" "$(sql "select count(*) || ' ' || min(context->>'wf_workplace') from authentik_events_event where action = 'custom_workforce_password_alert' and context->>'wf_kind' = 'network-tightened' and context->>'wf_conn' = '$W::/48'")" "1 true"
+check "L4 Q5: and it names the people who completed sign-ins in the /48" \
+  "$(sql "select (select string_agg(x::text, ',' order by x::int) from jsonb_array_elements_text(context->'wf_affected_pks') x) from authentik_events_event where action = 'custom_workforce_password_alert' and context->>'wf_kind' = 'network-tightened' and context->>'wf_conn' = '$W::/48'")" \
+  "$(printf '%s\n' "$PAT_PK" "$SAM_PK" "$KIM_PK" | sort -n | paste -sd, -)"
 has "L4: a /64 never seen before: refused, with the network's words" "$(via "$W:88::1" kim "$PW_KIM")" "$NETWORK"
 check "L4: staff on a proven /64 carry on (a whole sign-in)" "$(complete s "$IN" "$(xff "$W:3::5")" kim "$PW_KIM" totp-kim.key)" "$DONE"
 # Abusive: a proven /64 (pat signed in there; that right password moved back 20 minutes) with five wrong and no right.
@@ -720,11 +738,16 @@ age_net "$W::/48" "14 minutes 50 seconds"
 has "L4: 14 min 50 s after the newest counted try: still tightened" "$(via "$W:88::1" kim "$PW_KIM")" "$NETWORK"
 age_net "$W::/48" "15 minutes 1 second"
 has "L4: 15 minutes after it: lifted" "$(via "$W:88::1" kim "$PW_KIM")" "next:ak-stage-authenticator-"
-# An ordinary /48 (one person signs in there): thirty from rotating /64s tighten it.
+# An ordinary /48: three people complete sign-ins on three of its /64s, which makes them proven and the /48 no
+# workplace network (the owner's Q3); thirty from rotating /64s tighten it.
 O=2001:db8:200
-check "L4 ordinary /48: kim completes a sign-in on one /64" "$(complete s "$IN" "$(xff "$O:1::5")" kim "$PW_KIM" totp-kim.key)" "$DONE"
+for who in "kim $PW_KIM totp-kim.key 1" "pat $PW_PAT totp.key 2" "sam $PW_SAM totp-sam.key 3"; do
+  set -- $who
+  check "L4 ordinary /48: $1 completes a sign-in on /64 $4" "$(complete s "$IN" "$(xff "$O:$4::5")" "$1" "$2" "$3")" "$DONE"
+done
 fc s "$IN" many 30 "l4o-%d" wrong "$O:%x::1" 1 16 > "$WORK/l4o.json"
 check "L4 ordinary /48: thirty from thirty /64s, all checked" "$(count_checked "$WORK/l4o.json")" 30
+check "L4 Q3: three people's completed sign-ins made no workplace network: tightened at 30" "$(sql "select count(*) || ' ' || min(context->>'wf_workplace') from authentik_events_event where action = 'custom_workforce_password_alert' and context->>'wf_kind' = 'network-tightened' and context->>'wf_conn' = '$O::/48'")" "1 false"
 has "L4 ordinary /48: a never-seen /64 is refused, with the network's words" "$(via "$O:ff::1" kim "$PW_KIM")" "$NETWORK"
 has "L4 ordinary /48: the proven, quiet /64 carries on" "$(via "$O:1::5" kim "$PW_KIM")" "next:ak-stage-authenticator-"
 age_net "$O::/48" "15 minutes 1 second"
@@ -736,7 +759,11 @@ for kind in connection-spread throttled workplace-throttled network-tightened; d
   has "alerts: $kind among them" "$(printf '%s' "$r" | j 'sorted(set(a["kind"] for a in d["alerts"]))')" "'$kind'"
 done
 check "alerts: the workplace's names the people who sign in there" "$(printf '%s' "$r" | j '[sorted(a["affectedPks"]) for a in d["alerts"] if a["kind"] == "workplace-throttled"][0]')" "$(python3 -c 'import sys; print(sorted(int(x) for x in sys.argv[1:]))' "$PAT_PK" "$SAM_PK" "$KIM_PK")"
-check "alerts: no typed name in them" "$(printf '%s' "$r" | grep -c -E 'stranger|visitor|kate|l4m-|wp-|nobody')" 0
+check "alerts: no typed name in them" "$(printf '%s' "$r" | grep -c -E 'stranger|visitor|kate|l4m-|wp-|office-|nobody')" 0
+check "alerts Q5: a throttled source where people completed sign-ins names them, and is no workplace (Q3)" \
+  "$(printf '%s' "$r" | j '[(a["workplace"], sorted(a["affectedPks"])) for a in d["alerts"] if a["kind"] == "throttled" and a["source"] == "'"$WP"'"][0]')" \
+  "(False, $(python3 -c 'import sys; print(sorted(int(x) for x in sys.argv[1:]))' "$PAT_PK" "$SAM_PK" "$KIM_PK"))"
+check "alerts Q5: one where nobody did names nobody" "$(printf '%s' "$r" | j '[a["affectedPks"] for a in d["alerts"] if a["kind"] == "throttled" and a["source"] == "'"$H"'"][0]')" "[]"
 FIRST="$(st "$SVC_PK" '{"wf_op": "alerts", "wf_limit": 1}')"
 NEXT="$(printf '%s' "$FIRST" | j 'd["next"]')"
 check "alerts: one at a time, the cursor moves on" "$(st "$SVC_PK" "{\"wf_op\": \"alerts\", \"wf_limit\": 1, \"wf_after\": \"$NEXT\"}" | j 'd["alerts"][0]["id"]')" "$(printf '%s' "$r" | j 'd["alerts"][1]["id"]')"

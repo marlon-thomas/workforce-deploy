@@ -175,15 +175,16 @@ changes nothing, and requests sent at the same moment are counted one at a time.
   until 15 minutes after the tenth ("Too many wrong passwords from this connection…"). Refused requests aren't
   counted, so someone who keeps sending can't stretch it: to hold it again they need ten more counted after it ends.
   A **workplace connection** has a higher limit, never none: `SIGN_IN_WORKPLACE_SOURCE_LIMIT` wrong passwords in 15
-  minutes (50 unless set; 20 to 100). A connection is a workplace one only if you list it in
-  `CLIENT_ADDRESSES_CONFIRMED` (§7a), or if three or more different staff **completed** a sign-in there (the right
-  password and the right code) in the last 30 days. No visitor can choose or claim it: nothing the browser sends is
-  read, a forged forwarding header gets the forger's own address, and one person's sign-ins count once. But someone
-  who holds three accounts (three staff records whose email they control, say) can make their own connection a
-  workplace one by completing a sign-in with each; the owner is asked whether to keep this learned rule or rely on
-  confirmed addresses only (Workforce issue 462, question Q3).
+  minutes (50 unless set; 20 to 100). A connection is a workplace one **only if you list it** in
+  `CLIENT_ADDRESSES_CONFIRMED` (§7a: an address, or a range no wider than an IPv4 /24 or an IPv6 /64). Nothing else
+  makes one: not staff signing in there, however many (the owner's decision of 15 November 2026), and nothing the
+  browser sends (a forged forwarding header gets the forger's own address). So list your offices, or each office
+  connection keeps the ordinary limit of ten. A connection where someone completed a sign-in (the right password and
+  the right code) in the last 30 days is *known*, which matters only for the network's tightening below; it never
+  gets the workplace limit.
 - **The network's tightening (IPv6).** Thirty wrong passwords from one /48 within 15 minutes (for a workplace
-  network, `SIGN_IN_WORKPLACE_NETWORK_LIMIT`, 300 unless set; 100 to 1000; it must be above the connection limit)
+  network, a /48 holding an IPv6 range of yours from a /48 to a /63 in `CLIENT_ADDRESSES_CONFIRMED`:
+  `SIGN_IN_WORKPLACE_NETWORK_LIMIT`, 300 unless set; 100 to 1000; it must be above the connection limit)
   **tighten** that /48, never hold it all: connections in it where someone completed a sign-in in the last 30 days
   carry on as normal; connections nobody has signed in from (including any new /64, which is how someone rotating
   through /64s is stopped) and connections with five or more wrong passwords in their own 15 minutes are refused
@@ -193,8 +194,8 @@ changes nothing, and requests sent at the same moment are counted one at a time.
   completed a sign-in from in 30 days, typically a phone on mobile data whose /64 changes, or a new starter's home.
   They are refused for as long as the tightening lasts, and someone who keeps sending wrong passwords from fresh /64s
   can keep it going in 15-minute renewals; the way out is another connection (the workplace Wi-Fi, a home
-  broadband), and once they have completed a sign-in from a /64 it carries on there. Whether this is acceptable is the
-  owner's question Q2 (Workforce issue 462).
+  broadband), and once they have completed a sign-in from a /64 it carries on there. The owner accepted this on 15
+  November 2026 (Workforce issue 462, Q2): it is what stops someone who rotates through /64s.
 - **Codes** keep their own count: five wrong codes for an account within 15 minutes, then 15 minutes' wait from the
   fifth ("That code was wrong too many times…"). Only someone with the password reaches the code step.
 
@@ -207,8 +208,11 @@ against someone who stops: a program that sends its ten wrong passwords the mome
 connection within a second, so colleagues there practically can't sign in from it at all. While someone there
 keeps sending that many wrong passwords every 15 minutes, the connection stays held for as long as they keep it up;
 each hold is an alert (Today in Workforce within 5 minutes, and this server's health email), naming the connection
-and the times, so the office's IT can find the device. Nobody, a manager or you, can lift a connection's hold early
-in this release (an unlock would lift it for the attacker too).
+and the times, so the office's IT can find the device (Workforce shows a connection's address only to an
+organisation whose own people completed a sign-in from it; any other organisation whose people were tried is told
+only that a connection tried that many of its people). Nobody, a manager or you, can lift a connection's hold early
+in this release (an unlock would lift it for the attacker too); an audited control for the operator is planned
+(Workforce issue 486).
 
 **What lifts a pause:** time; a new password ("Forgot your password?" never skips the code); **Unlock sign-in** on
 the person's record in Workforce (a registered manager or director; a data administrator if the organisation
@@ -349,7 +353,8 @@ connection** (§6: 50 wrong passwords in 15 minutes before it is held, instead o
 `SIGN_IN_WORKPLACE_SOURCE_LIMIT`), and a right password typed there excuses it in a tightened network; an IPv6 range
 from a /48 to a /63 makes its /48 a **workplace network** (the higher network limit) but none of its /64s a workplace
 connection; anything wider confirms the check only and raises no limit (a provider's whole range would otherwise give
-everyone in it the higher limit). `update.sh` says how many entries set the limits, and the "sign-in limits" row
+everyone in it the higher limit). This list is the only thing that makes a workplace connection or network: staff
+signing in somewhere never does. `update.sh` says how many entries set the limits, and the "sign-in limits" row
 lists them. It never lets anyone in or skips a limit. Change these settings in `.env`, then `./bin/update.sh <running
 version>`, which refuses a value out of range. The TEST appliance confirms its tailnet (`100.64.0.0/10`,
 `environments/test.env`) for the check only, so testers signing in as several people from one device don't turn the

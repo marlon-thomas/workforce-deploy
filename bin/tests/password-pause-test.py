@@ -45,6 +45,8 @@ for case in vectors["cases"]:
     want = case["expect"]
     check("vector: " + case["name"], (d["paused"], d["throttled"], d["until"], d["rule"]),
           (want["paused"], want["throttled"], T(want["until"]) if want["until"] else None, want.get("rule")))
+    if "workplace" in want:
+        check("vector: " + case["name"] + ": workplace", d["workplace"], want["workplace"])
 
 # ---- which requests are counted: exactly those the password stage checks
 pr = g("wf_password_request")
@@ -166,14 +168,17 @@ for who, marker in (("u:1", None), ("u:2", base - 60), ("n:" + "e" * 32, None)):
     answers.add((d["paused"], d["throttled"], d["until"]))
 check("throttled: the same answer for a known account, one just unlocked and an unknown name", answers,
       set([(False, True, base + 9 + 900)]))
-for n in (2, 3):
+# The owner's Q3 (15 November 2026): completed sign-ins never make a workplace, however many people's; they make a
+# source proven only (spared its /48's tightening), and proven never raises a cap.
+for n in (1, 3, 10):
     ev2 = ev + [{"at": base - 86400, "kind": "signed", "account": "u:%d" % k, "conn": "192.0.2.50"} for k in range(1, n + 1)]
     d = g("wf_decide")(ev2, "n:" + "e" * 32, "192.0.2.50", {}, base + 20)
-    check("%d accounts with a completed sign-in there: %s" % (n, "a workplace, its cap is 50" if n == 3 else "not yet a workplace"),
-          d["throttled"], n != 3)
+    check("%d accounts with a completed sign-in there: proven, no workplace, held at 10 (Q3)" % n,
+          (g("wf_proven")(ev2, "192.0.2.50", L({}), base + 20), d["workplace"], d["throttled"], d["rule"]), (True, False, True, "source"))
 cfg0 = L({})
-check("unknown names never make a workplace", g("wf_workplace")([{"at": base, "kind": "signed", "account": "n:%d" % i,
-      "conn": "192.0.2.50"} for i in range(5)], "192.0.2.50", False, cfg0, base + 1), False)
+check("the learned rule is gone (Q3): no WF_WORKPLACE_ACCOUNTS", "WF_WORKPLACE_ACCOUNTS" in ns, False)
+check("a workplace is decided from the operator's list alone, no records read", g("wf_workplace").__code__.co_varnames[:3],
+      ("key", "network", "cfg"))
 
 # ---- the settings (contract R.3, R.4): read from the sign-in server's environment, checked again there
 import ipaddress
@@ -202,18 +207,18 @@ check("a /64 holding a confirmed address is", wc("2001:db8:9::/64", c["confirmed
 # Review of 15 November 2026, findings 3 and 17: an entry raises a limit only where it is no wider than what it makes a
 # workplace. A confirmed address or /64 never makes its whole /48 a workplace network; an entry from a /48 to a /63
 # makes its /48 one and nothing more; wider ones (and IPv4 wider than a /24) are for the readiness check only.
-check("a confirmed address doesn't make its /48 a workplace network", wpl([], "2001:db8:9::/48", True, c, base), False)
+check("a confirmed address doesn't make its /48 a workplace network", wpl("2001:db8:9::/48", True, c), False)
 c = L({"CLIENT_ADDRESSES_CONFIRMED": "2001:db8:a::/48 2001:db8:b:100::/56,2001:db8::/32 198.51.0.0/16 10.0.0.0/8 198.51.7.0/24"})
 check("a /48 and a /56 confirm networks; a /32 and IPv4 wider than a /24 confirm the readiness check only",
       ([str(n) for n in c["confirmed"]], [str(n) for n in c["confirmed_networks"]], c["readiness_only"], c["warnings"]),
       (["198.51.7.0/24"], ["2001:db8:a::/48", "2001:db8:b:100::/56"], 3, []))
-check("a confirmed /48 is a workplace network", wpl([], "2001:db8:a::/48", True, c, base), True)
-check("and so is the /48 holding a confirmed /56", wpl([], "2001:db8:b::/48", True, c, base), True)
-check("but none of their /64s is a workplace source", [wpl([], k, False, c, base) for k in ("2001:db8:a:1::/64", "2001:db8:b:100::/64")],
+check("a confirmed /48 is a workplace network", wpl("2001:db8:a::/48", True, c), True)
+check("and so is the /48 holding a confirmed /56", wpl("2001:db8:b::/48", True, c), True)
+check("but none of their /64s is a workplace source", [wpl(k, False, c) for k in ("2001:db8:a:1::/64", "2001:db8:b:100::/64")],
       [False, False])
 check("nor proven", g("wf_proven")([], "2001:db8:a:1::/64", c, base), False)
-check("an address in a confirmed /16 is no workplace source", wpl([], "198.51.8.1", False, c, base), False)
-check("one in a confirmed /24 is", wpl([], "198.51.7.200", False, c, base), True)
+check("an address in a confirmed /16 is no workplace source", wpl("198.51.8.1", False, c), False)
+check("one in a confirmed /24 is", wpl("198.51.7.200", False, c), True)
 check("an IPv4 range never confirms an IPv6 source", wc("::ffff:0:0/96", c["confirmed"]), False)
 check("nothing that isn't an address", wc("nonsense", c["confirmed"]), False)
 
@@ -236,6 +241,20 @@ al = [a for a in sp(proven6 + v6 + [last], "n:%032x" % 29, "2001:db8:7:ff::/64",
 check("the 30th wrong in an ordinary /48: network-tightened for the /48, naming who signs in there",
       [(a["wf_conn"], a["wf_workplace"], a["wf_affected_pks"], a["wf_wrong"], a["wf_connections"]) for a in al],
       [("2001:db8:7::/48", False, [51], 30, 30)])
+# The owner's Q5: every alert about a source or a /48 names the accounts with a completed sign-in from there (the
+# application shows the address only to an organisation with one of its own people among them); a plain source's too.
+plain = [{"at": base + i, "kind": "try", "try": "q%d" % i, "account": "n:%032x" % i, "conn": "198.51.100.60"} for i in range(10)]
+seen_there = [{"at": base - 3600, "kind": "signed", "account": "u:%d" % k, "conn": "198.51.100.60"} for k in (61, 62, 63)]
+al = sp(seen_there + plain, "n:%032x" % 9, "198.51.100.60", None, base + 10, before=seen_there + plain[:-1])
+check("Q5: the 10th at a source where three people completed sign-ins: throttled (no workplace, Q3), naming them",
+      sorted((a["wf_kind"], a["wf_workplace"], a["wf_affected_pks"]) for a in al),
+      [("connection-spread", False, [61, 62, 63]), ("throttled", False, [61, 62, 63])])
+al = sp(plain, "n:%032x" % 9, "198.51.100.60", None, base + 10, before=plain[:-1])
+check("Q5: and where nobody did, nobody", sorted((a["wf_kind"], a["wf_affected_pks"]) for a in al),
+      [("connection-spread", []), ("throttled", [])])
+other = [{"at": base - 3600, "kind": "signed", "account": "u:64", "conn": "198.51.100.61"}]
+al = sp(other + plain, "n:%032x" % 9, "198.51.100.60", None, base + 10, before=other + plain[:-1])
+check("Q5: sign-ins from another source don't count", [a["wf_affected_pks"] for a in al], [[], []])
 check("every alert has the same keys", sorted(al[0].keys()), sorted(["wf_kind", "wf_conn", "wf_user_pk", "wf_user_pks", "wf_accounts",
       "wf_connections", "wf_wrong", "wf_window", "wf_workplace", "wf_affected_pks"]))
 

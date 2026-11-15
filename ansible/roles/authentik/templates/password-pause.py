@@ -24,15 +24,20 @@
 #   the fifth (after the account's marker: its last password change or its last unlock, R.7.4);
 # - source: 10 wrong tries from one source within 15 minutes, every name together (username, email, unknown, any
 #   spelling), refuse every name there until 15 minutes after the tenth; a workplace source's cap is
-#   SIGN_IN_WORKPLACE_SOURCE_LIMIT (default 50, 20 to 100): higher, never unlimited;
+#   SIGN_IN_WORKPLACE_SOURCE_LIMIT (default 50, 20 to 100; the owner's Q1): higher, never unlimited;
 # - network (IPv6): 30 wrong tries from one /48 within 15 minutes (SIGN_IN_WORKPLACE_NETWORK_LIMIT for a workplace
 #   network, default 300, 100 to 1000) tighten the /48: only its unproven sources (nobody completed a sign-in there in
 #   30 days) and its abusive ones (5 or more wrong in its own window, each for at most 15 minutes after its own
-#   newest; a right password excuses only a source the operator confirmed) are refused; quiet, proven sources carry on;
-# - a workplace source: confirmed by the operator (CLIENT_ADDRESSES_CONFIRMED: an IPv4 address or range of a /24 or
-#   narrower, an IPv6 address or range of a /64 or narrower) or 3 or more different accounts completed a sign-in there
-#   (the right password and the right code) in the last 30 days. Nothing from the browser is read to decide it, so no
-#   visitor can choose or claim it; holders of 3 accounts can make one by signing in there (contract R.4, owner Q3).
+#   newest; a right password excuses only a source the operator confirmed) are refused, quiet unproven ones too, for at
+#   most 15 minutes after the /48's newest counted try (the owner's Q2); quiet, proven sources carry on;
+# - a workplace source: ONLY one the operator confirmed (CLIENT_ADDRESSES_CONFIRMED: an IPv4 address or range of a /24
+#   or narrower, an IPv6 address or range of a /64 or narrower); a workplace network, only a /48 holding a confirmed
+#   entry from a /48 to a /63. Nothing else makes either: not completed sign-ins, however many people's (the owner's
+#   Q3, 15 November 2026, removed that learned rule), and nothing from the browser, so no user can choose or claim it.
+# - proven is not workplace: a source is proven when someone completed a sign-in there (the right password and the
+#   right code) in the last 30 days, or it is confirmed. Being proven only keeps a quiet source out of its /48's
+#   tightening and shows its address to the organisations whose people signed in there (the alerts' affected
+#   accounts, the owner's Q5); it never raises a cap.
 
 WF_PAUSE_AFTER = 5                 # wrong passwords for one pair within WF_WINDOW
 WF_SOURCE_AFTER = 10               # wrong passwords from one ordinary source, every name, within WF_WINDOW (fixed)
@@ -42,10 +47,9 @@ WF_NETWORK_AFTER = 30              # wrong passwords from one IPv6 /48 that tigh
 WF_WORKPLACE_NETWORK_AFTER = 300   # the same for a workplace network: SIGN_IN_WORKPLACE_NETWORK_LIMIT's default
 WF_WORKPLACE_NETWORK_RANGE = (100, 1000)
 WF_ABUSIVE_AFTER = 5               # wrong passwords, and no right one, that make a source abusive in a tightened /48
-WF_WORKPLACE_ACCOUNTS = 3          # different accounts with a completed sign-in make a source (or /48) a workplace
 WF_WINDOW = 15 * 60                # every count is over this, and a hold lasts this long after the try that reached it
 WF_LOOK_BACK = 30 * 60             # how far back tries are read for a decision (a window plus its wait)
-WF_KNOWN_FOR = 30 * 86400          # how far back completed sign-ins count (proven, workplace)
+WF_KNOWN_FOR = 30 * 86400          # how far back completed sign-ins count (proven; alerts' affected accounts)
 WF_FUTURE = 120                    # a marker more than this far ahead is ignored (a clock gone wrong)
 WF_SPREAD_HOUR = 3600              # spread detection: one source, many names; one account, many sources
 WF_SPREAD_ACCOUNTS = 5
@@ -302,7 +306,8 @@ def wf_held_until(times, limit, now):
 
 def wf_signed_accounts(events, key, network, now):
     """Different real accounts with a completed sign-in (a "signed" record) from here (a source key, or with `network`
-    a /48) in the last WF_KNOWN_FOR. One account counts once, however often it signed in."""
+    a /48) in the last WF_KNOWN_FOR. One account counts once, however often it signed in. Used for proven (any) and
+    for the alerts' affected accounts; never for workplace (the owner's Q3)."""
     accounts = set()
     for e in events:
         if e.get("kind") != "signed" or not str(e.get("account") or "").startswith("u:"):
@@ -315,16 +320,17 @@ def wf_signed_accounts(events, key, network, now):
 
 
 def wf_proven(events, conn, cfg, now):
-    """A proven source: someone completed a sign-in from it in the last 30 days, or the operator confirmed it."""
+    """A proven source: someone completed a sign-in from it in the last 30 days, or the operator confirmed it. Proven
+    only spares a source its /48's tightening (wf_network_refusal); it is never a workplace and never raises a cap."""
     return wf_confirmed(conn, cfg["confirmed"]) or bool(wf_signed_accounts(events, conn, False, now))
 
 
-def wf_workplace(events, key, network, cfg, now):
-    """A workplace source (or, with `network`, a workplace /48): confirmed by the operator (a source by an entry no wider
-    than a source, a /48 by an entry from a /48 to a /63), or 3 or more different accounts completed a sign-in there in
-    the last 30 days. Never depends on a typed name or anything the browser sends."""
+def wf_workplace(key, network, cfg):
+    """A workplace source (or, with `network`, a workplace /48): confirmed by the operator, and only that (the owner's
+    Q3): a source by an entry no wider than a source, a /48 by an entry from a /48 to a /63. No record is read, so no
+    sign-in, typed name or anything the browser sends can make one."""
     listed = cfg.get("confirmed_networks", []) if network else cfg["confirmed"]
-    return wf_confirmed(key, listed) or len(wf_signed_accounts(events, key, network, now)) >= WF_WORKPLACE_ACCOUNTS
+    return wf_confirmed(key, listed)
 
 
 def wf_paused_until(events, right, account, conn, marker, now):
@@ -341,14 +347,14 @@ def wf_source_times(events, right, key, network, now):
 
 def wf_source_until(events, right, conn, cfg, now):
     """The source cap (contract R.3): (the hold's end or None, whether it is a workplace source)."""
-    workplace = wf_workplace(events, conn, False, cfg, now)
+    workplace = wf_workplace(conn, False, cfg)
     limit = cfg["source"] if workplace else WF_SOURCE_AFTER
     return wf_held_until(wf_source_times(events, right, conn, False, now), limit, now), workplace
 
 
 def wf_network_until(events, right, net, cfg, now):
     """The network's tightening (contract R.6): (its end or None, whether it is a workplace network)."""
-    workplace = wf_workplace(events, net, True, cfg, now)
+    workplace = wf_workplace(net, True, cfg)
     limit = cfg["network"] if workplace else WF_NETWORK_AFTER
     return wf_held_until(wf_source_times(events, right, net, True, now), limit, now), workplace
 
@@ -402,9 +408,11 @@ def wf_decide(events, account, conn, markers, now, cfg=None):
 def wf_spread(events, account, conn, user_pk, now, before=None, cfg=None):
     """Alerts the newest try (already in `events`) raises: connection-spread (one source, or one IPv6 /48, many
     names), account-spread, and, with `before` (the events without it), a hold that has just begun: throttled (an
-    ordinary source's cap), workplace-throttled (a workplace source's), network-tightened (a /48). `events` must reach
-    back WF_SPREAD_DAY, and WF_KNOWN_FOR for "signed" records. Each alert is a dict of the record's context. Alerts
-    only: nothing here changes a decision."""
+    ordinary source's cap), workplace-throttled (a workplace source's), network-tightened (a /48). Every alert about a
+    source or a /48 names, as wf_affected_pks, the accounts with a completed sign-in from there in the last 30 days (at
+    most WF_ALERT_MOST_PKS): the application shows the place's address only to an organisation with one of its own
+    people among them (the owner's Q5). `events` must reach back WF_SPREAD_DAY, and WF_KNOWN_FOR for "signed" records.
+    Each alert is a dict of the record's context. Alerts only: nothing here changes a decision."""
     cfg = cfg if cfg is not None else wf_limits({})
     conn = wf_connection_key(conn)
     right = wf_right_tries(events)
@@ -429,7 +437,7 @@ def wf_spread(events, account, conn, user_pk, now, before=None, cfg=None):
         names = set(e.get("account") for e in from_here)
         if len(names) >= WF_SPREAD_ACCOUNTS:
             alerts.append(alert("connection-spread", key, None, names, len(set(e.get("conn") for e in from_here)),
-                                len(from_here), WF_SPREAD_HOUR))
+                                len(from_here), WF_SPREAD_HOUR, False, wf_signed_accounts(events, key, network, now)))
     if user_pk is not None:
         # The person, whichever of their names was typed (each counts apart for the pause, never for an alert).
         def mine(e):
@@ -450,7 +458,7 @@ def wf_spread(events, account, conn, user_pk, now, before=None, cfg=None):
             times = [e for e in events if wf_is_wrong(e, right, now, now - WF_LOOK_BACK) and e.get("conn") == conn]
             names = set(e.get("account") for e in times)
             alerts.append(alert("workplace-throttled" if workplace else "throttled", conn, None, names, 1, len(times),
-                                WF_WINDOW, workplace, wf_signed_accounts(events, conn, False, now) if workplace else ()))
+                                WF_WINDOW, workplace, wf_signed_accounts(events, conn, False, now)))
         if ":" in conn:
             net = wf_network_key(conn)
             held, workplace = wf_network_until(events, right, net, cfg, now)
@@ -717,7 +725,7 @@ def wf_ak_rows(action, since, within=None, most=None, **context):
 
 
 def wf_ak_signed_rows(since, most, within=None, **context):
-    """For proven and workplace (wf_signed_accounts): one "signed" record per account that completed a sign-in here
+    """For proven and the alerts' affected accounts (wf_signed_accounts): one "signed" record per account that completed a sign-in here
     since a time (its newest), at most `most` of them, so a busy office's month of sign-ins isn't read for every
     try."""
     from django.db.models import Max
@@ -775,7 +783,8 @@ WF_MOST_ROWS = 2000                # newest records of one kind read for one sou
 
 
 def wf_ak_proven_now(conn, cfg, now):
-    """Is this source proven (wf_proven) now: confirmed, or someone completed a sign-in from it in the last 30 days?
+    """Is this source proven (wf_proven, never a workplace) now: confirmed, or someone completed a sign-in from it in
+    the last 30 days?
     One indexed read, before the try's locks are taken (wf_ak_try_locks)."""
     from datetime import datetime, timezone as tz
     if wf_confirmed(conn, cfg["confirmed"]):
@@ -785,16 +794,16 @@ def wf_ak_proven_now(conn, cfg, now):
 
 def wf_ak_events(conn, account, user, now, spread):
     """The records a decision (and, with `spread`, the alerts) needs, and the markers: tries from this source (and its
-    /48) in the look-back (an hour for alerts) and the right records that mark them; this pair's own tries; the
-    completed sign-ins that make this source proven or a workplace, and its /48 a workplace network (with `spread`,
-    up to WF_ALERT_MOST_PKS accounts, for the alerts' affected accounts); and for alerts this account's tries of the
-    last day."""
+    /48) in the look-back (an hour for alerts) and the right records that mark them; this pair's own tries; whether
+    someone completed a sign-in from this source (proven: one record is enough; never a workplace, which only the
+    operator's list makes); with `spread`, up to WF_ALERT_MOST_PKS accounts with a completed sign-in from this source
+    and from its /48, for the alerts' affected accounts, and this account's tries of the last day."""
     from datetime import datetime, timezone as tz
 
     def at(seconds):
         return datetime.fromtimestamp(seconds, tz.utc)
     back = WF_SPREAD_HOUR if spread else WF_LOOK_BACK
-    most = WF_ALERT_MOST_PKS if spread else WF_WORKPLACE_ACCOUNTS
+    most = WF_ALERT_MOST_PKS if spread else 1
     tries = wf_ak_rows(WF_TRY, at(now - back), most=WF_MOST_ROWS, wf_conn=conn)
     rights = wf_ak_rows(WF_RIGHT, at(now - back), most=WF_MOST_ROWS, wf_conn=conn)
     # The pair's own tries (the newest WF_MOST_ROWS of the source above can't hide a pause; a pause needs 5).
@@ -804,8 +813,9 @@ def wf_ak_events(conn, account, user, now, spread):
         net = wf_network_key(conn)
         tries = tries + wf_ak_rows(WF_TRY, at(now - back), within=net, most=WF_MOST_ROWS)
         rights = rights + wf_ak_rows(WF_RIGHT, at(now - back), within=net, most=WF_MOST_ROWS)
-        # The /48's accounts stand at the /48's key: they count for a workplace network, never for a source.
-        signed += [(t, pk, net) for t, pk in wf_ak_signed_rows(at(now - WF_KNOWN_FOR), most, within=net)]
+        if spread:
+            # The /48's accounts stand at the /48's key: they are a network alert's affected accounts, never a source's.
+            signed += [(t, pk, net) for t, pk in wf_ak_signed_rows(at(now - WF_KNOWN_FOR), most, within=net)]
     if spread and user is not None:
         # The person's tries of the day, under any of their names.
         tries = tries + wf_ak_rows(WF_TRY, at(now - WF_SPREAD_DAY), most=WF_MOST_ROWS, wf_user_pk=int(user.pk))

@@ -562,13 +562,14 @@ entries:
   #   15 minutes after the fifth. Every name alike, the emergency administrator included; an unknown name is counted
   #   exactly as a real one (authentik's "pretend the account exists"), under a keyed digest of the name, never the name.
   # - Source (order 15): ten wrong passwords from one source within 15 minutes, every name together (username, email,
-  #   unknown, any spelling), refuse every name there until 15 minutes after the tenth. A workplace source (confirmed in
-  #   CLIENT_ADDRESSES_CONFIRMED, or where 3 or more accounts completed a sign-in, the right password and the right
-  #   code, in the last 30 days) has a higher cap, SIGN_IN_WORKPLACE_SOURCE_LIMIT (50 unless set; 20 to 100): never none.
+  #   unknown, any spelling), refuse every name there until 15 minutes after the tenth. A workplace source (only one
+  #   the operator confirmed in CLIENT_ADDRESSES_CONFIRMED; completed sign-ins never make one, the owner's Q3) has a
+  #   higher cap, SIGN_IN_WORKPLACE_SOURCE_LIMIT (50 unless set; 20 to 100): never none.
   # - Network (order 16, IPv6): thirty wrong passwords from one /48 within 15 minutes (SIGN_IN_WORKPLACE_NETWORK_LIMIT,
-  #   300 unless set, for a workplace /48) tighten it: its unproven sources (nobody completed a sign-in there in 30
-  #   days, which is how /64s rotated through are stopped) and its abusive ones (5 or more wrong, no right) are refused;
-  #   quiet, proven sources carry on. It ends 15 minutes after the newest counted try.
+  #   300 unless set, for a /48 holding a confirmed /48 to /63) tighten it: its unproven sources (nobody completed a
+  #   sign-in there in 30 days, which is how /64s rotated through are stopped) and its abusive ones (5 or more wrong, no
+  #   right) are refused; quiet, proven sources carry on (proven spares a source the tightening only: it is never a
+  #   workplace). It ends 15 minutes after the newest counted try.
   # - Each try is recorded before the password is checked (custom_workforce_password_try), under PostgreSQL advisory
   #   locks on the source, its /48 and the pair, so requests at the same moment are taken one at a time; it counts as
   #   wrong until the flow reaches the step after the password (24), which marks it right. A refused request is never
@@ -1227,8 +1228,8 @@ entries:
             paused = wf_codes_paused(tries, right, now) is not None
             if marked and not paused and wf_signs_in(person, plan):
                 # A completed sign-in (contract R.2): the right password (23 let it past) and now the right code. It
-                # makes this source proven, and with two other people's a workplace (R.4): never anything the browser
-                # sends, and one person counts once however often they sign in.
+                # makes this source proven (spared its /48's tightening; its address shown to this person's
+                # organisation in alerts, the owner's Q5), never a workplace (only the operator's list makes one, Q3).
                 wf_ak_record(WF_SIGNED, WF_KEEP_SIGNED, address, person, wf_user_pk=int(pk), wf_conn=conn)
         return paused
   - model: authentik_stages_deny.denystage
