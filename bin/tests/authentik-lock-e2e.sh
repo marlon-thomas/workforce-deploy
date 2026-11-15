@@ -82,6 +82,7 @@ trap cleanup EXIT
 PASS=0; FAILN=0
 check() { if [ "$2" = "$3" ]; then PASS=$((PASS+1)); else FAILN=$((FAILN+1)); printf 'FAIL: %s: expected [%s] got [%s]\n' "$1" "$3" "$2"; fi; }
 has() { case "$2" in *"$3"*) PASS=$((PASS+1)) ;; *) FAILN=$((FAILN+1)); printf 'FAIL: %s: [%s] not in [%s]\n' "$1" "$3" "$2" ;; esac; }
+section() { echo "$(date +%T) section $1 (so far: ${PASS} passed, ${FAILN} failed)"; }
 die() { echo "authentik-lock-e2e: $*" >&2; docker logs --tail 40 "$P-server" 2>&1 | grep -v '"level": "debug"' | tail -20 >&2; exit 1; }
 j() { python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); print(eval(sys.argv[1], {"d": d}))' "$1"; }
 
@@ -248,6 +249,7 @@ result() { j 'd["result"] + ":" + d.get("component","") + ":" + d.get("message",
 PAUSED="Too many wrong passwords for this name, from this connection"
 THROTTLED="Too many wrong passwords from this connection. Wait 15 minutes, or use another connection"
 
+section 1
 # ---- 1. the address: never chosen by a forwarded header
 FORGED='{"X-Forwarded-For": "198.51.100.11, 198.51.100.12", "X-Real-IP": "198.51.100.13", "Forwarded": "for=198.51.100.14", "X-authentik-remote-ip": "198.51.100.15", "True-Client-IP": "198.51.100.16", "X-Client-IP": "198.51.100.17", "CF-Connecting-IP": "198.51.100.18"}'
 check "through the gateway: the client's own address" "$(fc a "$OUT" address | j 'd["message"]')" "workforce-client-address=$A"
@@ -268,6 +270,7 @@ check "the readiness probe through the real gateway: OK" "$?:$PROBE_OUT" "0:the 
 check "its record" "$(j 'str(d["ok"]) + " " + str(d["forgedIgnored"]) + " " + str(d["seen"] == d["probeAddress"])' < "$WORK/status/client-address.json")" "True True True"
 check "the probe signs nobody in and records nothing" "$(sql "select count(*) from authentik_events_event where action like 'custom_workforce_%'")" 0
 
+section 2
 # ---- 2. five wrong passwords pause one account on one connection, whatever the headers say
 for i in 1 2 3 4 5; do
   r="$(fc a "$OUT" signin --headers "{\"X-Forwarded-For\": \"$B\"}" pat "wrong-$i" | result)"
@@ -287,6 +290,7 @@ check "the refusal is recorded, once a minute at most" "$(sql "select string_agg
 
 check "a real account's tries carry it as the event's user" "$(sql "select distinct \"user\"->>'username' from authentik_events_event where action = 'custom_workforce_password_try' and context->>'wf_account' = 'u:$PAT_PK'")" pat
 
+section 3
 # ---- 3. a name nobody has: the same answers, the same pause
 for i in 1 2 3 4 5; do
   r="$(fc c "$OUT" signin nobody-here "wrong-$i" | result)"
@@ -296,6 +300,7 @@ r="$(fc c "$OUT" signin nobody-here wrong-6 | result)"
 has "unknown name, sixth: the same refusal" "$r" "denied:ak-stage-access-denied:$PAUSED"
 check "an unknown name's tries carry no user" "$(sql "select distinct \"user\"::text from authentik_events_event where action = 'custom_workforce_password_try' and context->>'wf_account' like 'n:%'")" "{}"
 check "the typed name is never stored" "$(sql "select count(*) from authentik_events_event where action like 'custom_workforce_%' and (context::text like '%nobody-here%' or \"user\"::text like '%nobody-here%')")" 0
+section 3b
 # ---- 3b. review finding 1: every spelling of a name counts as authentik's lookup finds it, for real names and unknown
 # ones alike, and a real account's other name (its email) counts apart like any name. A container inside the trusted
 # range stands in for the gateway (section 1), so each pair below has a connection of its own.
@@ -330,6 +335,7 @@ check "no typed name is stored" "$(sql "select count(*) from authentik_events_ev
 r="$(fc c "$OUT" raw pat '{"component": "ak-stage-password", "password": ""}' | result)"
 check "an empty password isn't checked, and isn't counted" "$(tries "u:$PAT_PK" "$C")" 0
 
+section 4
 # ---- 4. twenty at the same moment: exactly five checked
 fc b "$OUT" burst 20 kim wrong-burst > "$WORK/burst.json"
 check "twenty at once for (kim, B): exactly five recorded" "$(tries "u:$KIM_PK" "$B")" 5
@@ -339,6 +345,7 @@ check "and fifteen refused, with the pause's words, the password unchecked" \
 # gives up on a sign-in once the name's reputation fell by five meanwhile). Nobody gets further.
 check "none of the twenty gets past the password" "$(j 'sum(1 for x in d if not x or x["result"] == "next")' < "$WORK/burst.json")" 0
 
+section 5
 # ---- 5. a continued attack: refusals aren't recorded, and the pause still ends 15 minutes after the fifth
 # age_records <account> <connection> <interval>: the pair's records moved back so that its newest try was that long ago.
 # (kim's password was set when the test began, which is its marker: moved back too, so that the tries still count.)
@@ -390,6 +397,7 @@ age_net() { sql "update authentik_events_event set created = created - ((interva
 count_words() { WORDS="$2" j 'sum(1 for x in d if x and x.get("result") == "denied" and x.get("message", "").startswith(__import__("os").environ["WORDS"]))' < "$1"; }
 count_checked() { j 'sum(1 for x in d if x and x.get("result") == "error")' < "$1"; }
 
+section 6
 # ---- 6. the sign-in status interface (contract R.7) and the unlock; L7 on a fresh install; L5; L6
 # An email as authentik records every one it sends (email_sent, its whole body), with a code and a reset link in it.
 EV="$(akshell "
@@ -500,6 +508,7 @@ check "L6: after a code email and a reset link, no answer carries the code, the 
   "$(printf '%s' "$ANSWERS" | grep -c -e E2E-CODE -e E2E-LINK -e "${LINK_TOKEN:-no-link}" -e 'lee@example.org' -e 'Your code')" 0
 check "L6: (a link was made)" "$([ "${#LINK_TOKEN}" -gt 20 ] && echo yes)" yes
 
+section 7
 # ---- 7. the source's cap: ten wrong from one source hold every name there alike, and an unlock doesn't lift it
 fc e "$OUT" signin pat "$PW_PAT" >/dev/null     # pat: the right password from E once (no exemption by name)
 for i in 1 2 3 4 5 6 7 8 9 10; do fc e "$OUT" signin "stranger-$i" wrong >/dev/null; done
@@ -525,6 +534,7 @@ fc s "$IN" spray 25 8 2001:db8:7 wrong > "$WORK/spray.json"
 check "25, then eight at once from one /48's /64s: exactly thirty recorded" "$(sql "select count(*) from authentik_events_event where action = 'custom_workforce_password_try' and client_ip <<= '2001:db8:7::/48'")" 30
 check "and three refused, with the network's words" "$(count_words "$WORK/spray.json" "$NETWORK")" 3
 
+section 8
 # ---- 8. wrong codes: their own count, by account; passwords aren't touched
 # authentik's own code step also slows down after wrong codes (django-otp: 16 s after the fifth), so the right code is
 # typed once that has passed: the code step accepts it, and the check after it (31) still refuses.
@@ -542,6 +552,7 @@ fc a "$OUT" code pat "$PW_PAT" @wait31 @totp > "$WORK/code-ok.json"
 check "after the wait, the right code signs pat in" "$(j 'd[-1]["result"] + ":" + d[-1]["component"]' < "$WORK/code-ok.json")" "next:xak-flow-redirect"
 check "and only that code is marked right (the flow plan keeps the try; the one typed while paused counts nowhere)" "$(sql "select count(*) from authentik_events_event where action = 'custom_workforce_code_right' and (context->>'wf_user_pk')::int = $PAT_PK")" 1
 
+section 9
 # ---- 9. the emergency administrator: its password rule in the real flows; reset-admin.sh lifts its pause
 LINK="$(fc d "$IN" api POST "/api/v3/core/users/$ADMIN_PK/recovery/" "$TOKEN" '{}' | j 'd["body"]["link"]')"
 FT="${LINK##*flow_token=}"
@@ -622,6 +633,7 @@ check "reset-admin.sh: no account carries the old unlock attribute" "$(sql "sele
 check "after reset-admin.sh, admin signs in from F" "$(fc f "$OUT" signin admin "$RESET_PW" | j 'd["result"]')" next
 
 
+section 10
 # ---- 10. L2 (the owner's decision 2): a username and its email counted apart, inside the source's cap of 10
 # answers <source> <name> <n>: n wrong passwords for one name, one answer a line
 answers() { local i; for i in $(seq 1 "$3"); do via "$1" "$2" "wrong-$i"; done; }
@@ -682,6 +694,7 @@ echo "     L2 password step, median of 7 (real name, unknown name, real email, u
 check "L2: an unknown name and email take as long as real ones (medians within 25%, all under 10 s)" \
   "$(python3 -c 'import sys; r, u, re_, ue = (float(x) for x in sys.argv[1:]); print(max(r, u, re_, ue) < 10 and max(r, u) <= 1.25 * min(r, u) and max(re_, ue) <= 1.25 * min(re_, ue))' $L2_MEDIANS)" True
 
+section 11
 # ---- 11. L3 (decision 1): what "connection" means; forged headers can't claim a workplace; requests at one moment
 fc h "$OUT" many 10 "l3-%d" wrong > "$WORK/l3.json"
 check "L3: through the gateway, ten tries, each a new TCP connection, cookie jar and flow: all checked" "$(count_checked "$WORK/l3.json")" 10
@@ -695,6 +708,7 @@ fc s "$IN" burstnames --headers "$(xff 192.0.2.170)" 25 "sim-%d" wrong > "$WORK/
 check "L3: 25 names at one moment from one source: exactly 10 recorded" "$(trycount 192.0.2.170)" 10
 check "L3: 10 checked, 15 refused, none further" "$(count_checked "$WORK/sim.json") $(j 'sum(1 for x in d if x and x["result"] == "denied")' < "$WORK/sim.json") $(j 'sum(1 for x in d if not x or x["result"] == "next")' < "$WORK/sim.json")" "10 15 0"
 
+section 12
 # ---- 12. L1 (the owner's instruction B): a colleague behind the same address while someone there attacks
 fc j "$OUT" many 9 "l1-%d" wrong >/dev/null
 check "L1: nine wrong from J (through the gateway, any names)" "$(trycount "$J")" 9
@@ -757,6 +771,7 @@ check "L1 confirmed office: alert workplace-throttled, naming the people who sig
   "$(sql "select context->>'wf_workplace' || ' ' || (select string_agg(x::text, ',' order by x::int) from jsonb_array_elements_text(context->'wf_affected_pks') x) from authentik_events_event where action = 'custom_workforce_password_alert' and context->>'wf_kind' = 'workplace-throttled' and context->>'wf_conn' = '$CO'")" \
   "true $(printf '%s\n' "$PAT_PK" "$SAM_PK" "$KIM_PK" | sort -n | paste -sd, -)"
 
+section 13
 # ---- 13. L4 (decision 1, instruction C): a large workplace /48, one malicious source, then rotating /64s. The /48 is a
 # workplace network only through the operator's confirmed /56 (2001:db8:100::/56; the owner's Q3), whose /64s are
 # neither workplace nor proven sources for that: staff's /64s are proven by their own completed sign-ins.
@@ -827,6 +842,7 @@ has "L4 ordinary /48: the proven, quiet /64 carries on" "$(via "$O:1::5" kim "$P
 age_net "$O::/48" "15 minutes 1 second"
 has "L4 ordinary /48: 15 minutes after the newest counted try: lifted" "$(via "$O:ff::1" kim "$PW_KIM")" "next:ak-stage-authenticator-"
 
+section 14
 # ---- 14. the alerts, as the application reads them (contract R.7.2 "alerts"), and doctor.sh's counts (contract 2.3 b)
 r="$(st "$SVC_PK" '{"wf_op": "alerts", "wf_limit": 200}')"
 for kind in connection-spread throttled workplace-throttled network-tightened; do
@@ -851,6 +867,7 @@ has "the forwarded sign-in counted" "$CA_LIVE" "WFFWD 1 $A"
 check "the alerts counted, workplace and network ones too" "$(printf '%s\n' "$CA_LIVE" | grep -c '^WFALERTS [1-9][0-9]* [0-9]* [1-9][0-9]* [1-9][0-9]* [1-9][0-9]*$')" 1
 check "no name in it" "$(printf '%s\n' "$CA_LIVE" | grep -c -E 'pat|sam|kim|nobody|stranger|visitor')" 0
 
+section 15
 # ---- 15. L7 on an upgraded install: a build that granted view_event (ab1d474's script), then this one
 OLD_SA="$(git -C "$REPO" show ab1d474:ansible/roles/authentik/files/invite-service-account.py 2>/dev/null)"
 if [ -z "$OLD_SA" ]; then
@@ -908,6 +925,7 @@ print('leak removed')" >/dev/null
 check "L7: and passes once it is gone" "$(converge_sa "$NEW_SA" | grep -c 'workforce-invites converged')" 1
 check "L7: and doctor.sh's program finds nothing again" "$(docker exec -i "$P-server" ak shell -c "$CA_PROGRAM" 2>/dev/null | sed -n 's/^WFCRED //p')" ok
 
+section 16
 # ---- 16. L8: the status interface broken, then deleted: the sign-in decisions don't change
 SAM_SRC=192.0.2.190
 for i in 1 2 3 4 5; do via "$SAM_SRC" sam "wrong-$i" >/dev/null; done
@@ -929,6 +947,7 @@ has "L8: a paused pair is still refused" "$(via "$SAM_SRC" sam "$PW_SAM")" "$PAU
 has "L8: a right password elsewhere still goes on" "$(via 192.0.2.192 sam "$PW_SAM")" "next:ak-stage-authenticator-"
 check "L8: and this build's script refuses to carry on without the status code" "$(converge_sa "$NEW_SA" | grep -c 'sign-in status code (workforce-sign-in-status-code) is missing')" 1
 
+section 17
 # ---- 17. Workforce issue 474: a sign-in held between its password step and the login can't outlive a password change.
 # flow-client.py's hold sends the password, doesn't follow its answer, and waits for a go-ahead before going on, so the
 # password is replaced while the sign-in is past the password step and short of the login. Each from a fresh source.
@@ -1015,6 +1034,7 @@ check "474: 99 put back" "$(swap474 workforce-no-first-run-page workforce-passwo
 check "474: and admin signs in with its new password" "$(fc s "$IN" signin --headers "$(xff 192.0.2.205)" admin "$ADMIN_474B" | j 'd["result"] + ":" + d["component"]')" \
   "next:xak-flow-redirect"
 
+section 18
 # ---- 18. Workforce issue 474 review, findings 1 and 2: an error refuses. In authentik 2026.8.5 an error inside an
 # expression policy is "fails" (failure_result covers PolicyException only), so each policy's own guard answers the
 # refusing value. Each policy below is made to raise inside its guard (a line just after its "try:"), then a sign-in
