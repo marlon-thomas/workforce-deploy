@@ -192,6 +192,50 @@ check("the address check: a flow anyone may open, with no stages", "authenticati
 check("whose one policy always refuses with the address", bound("wf-client-address-flow", "wf-client-address-policy")
       and any("id: wf-client-address-policy" in e and "return False" in e and "workforce-client-address=" in e for e in entries))
 
+# Workforce issue 474: a sign-in held between the password step and the login can't finish once the password changed.
+seen_b = bound("wf-password-right-binding", "wf-password-seen")
+check("474: 24 records what the password step saw (an error leaves no record, never shows the pause's words)",
+      order(right) == 24 and "order: 1," in seen_b and "failure_result: false" in seen_b and "negate" not in seen_b)
+check("474: before the code step, the only stage that could replace the plan's account",
+      order(right) < order(binding("default-authentication-flow", "default-authentication-mfa-validation")) == 30)
+seen_p = next((e for e in entries if "id: wf-password-seen\n" in e), "")
+seen_ak = "\n".join(l for l in seen_p.split("---- the authentik part ----")[-1].splitlines() if not l.strip().startswith("#"))
+check("474: from the flow plan's account (the backend's own, as checked), never the database",
+      'person = plan.context.get("pending_user")' in seen_ak and 'getattr(person, "password", None)' in seen_ak
+      and "objects" not in seen_ak)
+check("474: recorded once, only once a password was checked, and it never refuses",
+      'not plan.context.get("user_backend") or WF_PLAN_SEEN in plan.context' in seen_ak and "return True" not in seen_ak)
+replaced_p = next((e for e in entries if "id: wf-password-replaced\n" in e), "")
+check("474: the check compares with the account as the primary database has it now",
+      'User.objects.using("default").filter(pk=seen["pk"]).values_list("pk", "password", "is_active").first()' in replaced_p
+      and "return wf_password_replaced(seen, pending_pk, current) is not None" in replaced_p)
+check("474: no flow plan refuses", "if plan is None:\n            return True" in replaced_p)
+for key in ("wf-password-seen", "wf-password-replaced"):
+    e = next((x for x in entries if "id: " + key + "\n" in x), "")
+    check("474: " + key + " includes the rule", "{% include 'password-unchanged.py' %}" in e)
+deny_474 = binding("default-authentication-flow", "wf-password-replaced-stage")
+check("474: 99, just before the login, re-checked when reached, an error refusing", order(deny_474) == 99
+      and "re_evaluate_policies: true" in deny_474 and "evaluate_on_plan: false" in deny_474
+      and "failure_result: true" in bound("wf-password-replaced-binding", "wf-password-replaced"))
+login_b = binding("default-authentication-flow", "default-authentication-login")
+check("474: the login step's own binding: 100, re-checked when reached, all its policies",
+      order(login_b) == 100 and "re_evaluate_policies: true" in login_b and "evaluate_on_plan: false" in login_b
+      and "policy_engine_mode: all" in login_b and "id: wf-login-binding\n" in login_b)
+login_pb = bound("wf-login-binding", "wf-password-replaced")
+check("474: the same check there, negated, an error skipping the login",
+      "negate: true" in login_pb and "failure_result: false" in login_pb)
+others = [order(e) for e in entries if "flowstagebinding" in e and "slug, default-authentication-flow]" in e
+          and "state: absent" not in e and e not in (deny_474, login_b)]
+check("474: nothing else between the check and the login", bool(others) and max(others) < 99)
+words_474 = " ".join(next((x for x in entries if "id: wf-password-replaced-stage\n" in x), "").split())
+check("474: authentik's own words for a wrong password, whatever the reason",
+      "deny_message: >- Invalid password. Please sign in again." in words_474
+      and not any(w in words_474.lower() for w in ("changed", "account", "admin", "exist", "reset")))
+check("474: no other flow here signs anyone in (enrolment and reset links don't)",
+      not any("flowstagebinding" in e and "state: absent" not in e and "slug, default-authentication-flow]" not in e
+              and any(s in e for s in ("wf-enrollment-login", "default-authentication-login", "userloginstage"))
+              for e in entries))
+
 # Second review of the controller bundle, findings 1 and 6: whoever chooses the emergency administrator's password
 # (a reset link, the change-password page) needs at least 16 characters zxcvbn rates hard to guess; authentik's own
 # change-password page, with authentik's 8-character rule, refuses that account.

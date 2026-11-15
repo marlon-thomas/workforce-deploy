@@ -226,6 +226,14 @@ attempts (one connection trying five or more names in an hour, one account tried
 an hour or twenty times in a day) and every hold are recorded as alerts, never locks: Workforce shows each
 organisation its own on Today, and `doctor.sh` counts them ("sign-in attacks").
 
+**A new password stops sign-ins in progress** (Workforce issue 474). A sign-in that is past the password step but
+not finished yet (for staff, while they type their code) finishes only if the account's password is still the one
+that was checked. If it changes in between (the person's own change, a reset link, `./bin/reset-admin.sh`, the
+controller setting `admin`'s first password, or the password disabled), that sign-in is refused with "Invalid
+password. Please sign in again.", the same words as for any wrong password, and nobody is signed in; signing in again
+with the new password works at once. Choosing the same password again counts as a change. Every account alike,
+`admin` included. Sessions already signed in are not ended by this.
+
 **What Workforce can see** (contract R.7): whether a person is paused, until when and on how many connections,
 through a narrow status interface on the sign-in server that only Workforce's own service account may ask, about one
 person at a time, and only for someone the asker may reset. Workforce shows "paused", "not paused" or "couldn't

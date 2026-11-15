@@ -1275,6 +1275,104 @@ entries:
     identifiers: { target: !KeyOf wf-too-many-tries-after-code-binding, policy: !KeyOf wf-codes-paused }
     attrs: { order: 0, enabled: true, failure_result: true }
 
+  # ---------- Workforce issue 474: a sign-in in progress can't outlive a password change ----------
+  # The password is checked at 20 and the person signed in at 100, one or more requests later. A sign-in held in
+  # between used to finish after the password was replaced (by the person, a reset link, an operator, reset-admin.sh
+  # or the controller's first password, Workforce issue 463). The rule is password-unchanged.py (tested on its own by
+  # bin/tests/password-pause-test.sh); bin/tests/authentik-lock-e2e.sh holds real sign-ins while the password changes.
+  # - 24, workforce-password-seen: records in the flow plan what the password stage checked (a digest of the hash of
+  #   the account its backend returned, which the stage put in the plan; never re-read from the database). Bound on the
+  #   24 binding beside workforce-password-right; it always fails, so that deny stage never shows. Before the code step
+  #   (30), the only stage that could replace the plan's account. An error leaves no record, and 99 then refuses.
+  # - 99, workforce-password-replaced: just before the login, compares that record with the account's hash now, and
+  #   refuses on any difference (or no record, or the account gone or inactive) with authentik's words for a wrong
+  #   password, whatever the reason, so the page says nothing a wrong password wouldn't. Evaluated in the same request
+  #   as the login (authentik runs the next stages' re-checks one after another until a stage answers); an error
+  #   refuses.
+  # - 100, the login step's own binding: the same policy, negated, re-checked when the login is reached (a last check,
+  #   for a login step that would ever wait for an answer, such as "remember me"). If it fails the login step is
+  #   skipped and nobody is signed in; an error skips it too. The 99 deny stage normally refuses first, with words.
+  # Every account alike, the emergency administrator included. Neither enrolment nor a password reset signs anyone in
+  # (finding 1 above), so the ordinary sign-in is the only flow here that ends in a login after a password.
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-password-seen
+    identifiers: { name: workforce-password-seen }
+    attrs:
+      name: workforce-password-seen
+      expression: |
+{% filter indent(8, true) %}
+{% include 'password-unchanged.py' %}
+{% endfilter %}
+        # ---- the authentik part ----
+        plan = request.context.get("flow_plan")
+        if plan is None or not plan.context.get("user_backend") or WF_PLAN_SEEN in plan.context:
+            return False
+        # The account authentik's backend returned at the password step (password stage: pending_user), as kept in
+        # the flow plan since: its hash is the one the step checked, whatever the database holds now.
+        person = plan.context.get("pending_user")
+        seen = wf_password_seen(getattr(person, "pk", None), getattr(person, "password", None),
+                                plan.context.get("user_backend"))
+        if seen is not None:
+            plan.context[WF_PLAN_SEEN] = seen
+        return False
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-password-right-binding, policy: !KeyOf wf-password-seen }
+    attrs: { order: 1, enabled: true, failure_result: false }
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-password-replaced
+    identifiers: { name: workforce-password-replaced }
+    attrs:
+      name: workforce-password-replaced
+      expression: |
+{% filter indent(8, true) %}
+{% include 'password-unchanged.py' %}
+{% endfilter %}
+        # ---- the authentik part ----
+        from authentik.core.models import User
+        plan = request.context.get("flow_plan")
+        if plan is None:
+            return True
+        seen = plan.context.get(WF_PLAN_SEEN)
+        pending_pk = getattr(plan.context.get("pending_user"), "pk", None)
+        current = None
+        if isinstance(seen, dict) and isinstance(seen.get("pk"), int):
+            # The primary database (never a read replica, which could still hold the old hash).
+            current = User.objects.using("default").filter(pk=seen["pk"]).values_list("pk", "password", "is_active").first()
+        return wf_password_replaced(seen, pending_pk, current) is not None
+  - model: authentik_stages_deny.denystage
+    id: wf-password-replaced-stage
+    identifiers: { name: workforce-password-replaced }
+    attrs:
+      name: workforce-password-replaced
+      deny_message: >-
+        Invalid password. Please sign in again.
+  - model: authentik_flows.flowstagebinding
+    id: wf-password-replaced-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !KeyOf wf-password-replaced-stage
+    attrs:
+      order: 99
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-password-replaced-binding, policy: !KeyOf wf-password-replaced }
+    attrs: { order: 0, enabled: true, failure_result: true }
+  # authentik's own login binding (100, as its default flow has it), now re-checked when it is reached.
+  - model: authentik_flows.flowstagebinding
+    id: wf-login-binding
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+      stage: !Find [authentik_stages_user_login.userloginstage, [name, default-authentication-login]]
+    attrs:
+      order: 100
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+      policy_engine_mode: all
+  - model: authentik_policies.policybinding
+    identifiers: { target: !KeyOf wf-login-binding, policy: !KeyOf wf-password-replaced }
+    attrs: { order: 0, enabled: true, negate: true, failure_result: false }
+
   # Second security review (finding 1): authentik's first-run page (initial-setup) sets akadmin's password with no
   # code. The flow itself is closed, as authentik closes it after its own setup: only a superuser may run it, and
   # every policy bound to it must pass. (A flow needs ANY of its policies by default, and authentik's own

@@ -217,6 +217,39 @@ def main():
             out.append(dict(outcome(s.post(executor("default-authentication-flow"), json={
                 "component": "ak-stage-authenticator-validate", "code": c}, timeout=30)), step="code"))
         print(json.dumps(out))
+    elif cmd == "hold":                       # hold <name> <password> <mark> [<key file>]: a sign-in held after
+        # its password step (Workforce issue 474). The password's answer (a redirect to the next step) isn't followed;
+        # /state/<mark>.held is written, and the client waits (at most 120 s) for /state/<mark>.go, then goes on: the
+        # next step, the code step with the key's next code when a key is given, and then who this session is signed
+        # in as (the API's own answer: 200 and the username, or 403 when nobody is).
+        import os
+        import time
+        name, pw, mark = args[0], args[1], args[2]
+        key = args[3] if len(args) > 3 else None
+        s, first = start(name)
+        out = [dict(first, step="name")]
+        r = s.post(executor("default-authentication-flow"), json={"component": "ak-stage-password", "password": pw},
+                   timeout=30, allow_redirects=False)
+        out.append({"step": "password", "status": r.status_code})     # 302: accepted, on to the next step
+        open("/state/%s.held" % mark, "w").write("held")
+        deadline = time.time() + 120
+        while not os.path.exists("/state/%s.go" % mark) and time.time() < deadline:
+            time.sleep(0.2)
+        nxt = dict(outcome(s.get(executor("default-authentication-flow"), timeout=30)), step="after")
+        out.append(nxt)
+        if key and nxt.get("component") == "ak-stage-authenticator-validate":
+            out.append(dict(outcome(s.post(executor("default-authentication-flow"), json={
+                "component": "ak-stage-authenticator-validate", "code": totp(open("/t/" + key).read().strip())},
+                timeout=30)), step="code"))
+        me = s.get(BASE + "/api/v3/core/users/me/", timeout=30)
+        who = None
+        if me.status_code == 200:
+            try:
+                who = (me.json().get("user") or {}).get("username")
+            except ValueError:
+                who = None
+        out.append({"step": "me", "status": me.status_code, "username": who})
+        print(json.dumps(out))
     elif cmd == "address":                    # address: what the sign-in server sees as this client's address
         r = session().get(executor("workforce-client-address"), timeout=30)
         print(json.dumps(outcome(r)))

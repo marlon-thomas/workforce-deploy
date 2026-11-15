@@ -46,7 +46,12 @@
 #     build that granted it (ab1d474's script: the grant is shown working, then revoked, objects included); the
 #     application's token joining a group with it is seen by doctor.sh's program (review finding 5);
 #   - L8: the status interface broken, then deleted: the sign-in decisions don't change;
-#   - wrong codes have their own count, by account; the emergency administrator's password rule and its recovery.
+#   - wrong codes have their own count, by account; the emergency administrator's password rule and its recovery;
+#   - Workforce issue 474: a sign-in held between its password step and the login, while the password is replaced
+#     (reset-admin.sh's program, the same password chosen again, the password disabled), is refused with authentik's
+#     words for a wrong password and nobody is signed in, the emergency administrator and staff (after their code)
+#     alike; one held while nothing changes signs in; with the check before the login (99) taken away, the login
+#     step's own check still signs nobody in.
 # Needs Docker (pulls the pinned images) and python3 with jinja2 (Ansible's). Fifteen to forty-five minutes (the blueprint's
 # two applies take most of it on a busy machine). Every container and
 # network it makes is removed at the end. Exit 0 = all pass.
@@ -854,6 +859,75 @@ check "L8: deleted: no answer" "$(st "$SAM_PK" '{"wf_op": "status"}' | j 'd.get(
 has "L8: a paused pair is still refused" "$(via "$SAM_SRC" sam "$PW_SAM")" "$PAUSED"
 has "L8: a right password elsewhere still goes on" "$(via 192.0.2.192 sam "$PW_SAM")" "next:ak-stage-authenticator-"
 check "L8: and this build's script refuses to carry on without the status code" "$(converge_sa "$NEW_SA" | grep -c 'sign-in status code (workforce-sign-in-status-code) is missing')" 1
+
+# ---- 17. Workforce issue 474: a sign-in held between its password step and the login can't outlive a password change.
+# flow-client.py's hold sends the password, doesn't follow its answer, and waits for a go-ahead before going on, so the
+# password is replaced while the sign-in is past the password step and short of the login. Each from a fresh source.
+REPLACED="Invalid password. Please sign in again."
+HELD_PID=""
+hold() { # hold <mark> <source> <name> <password> [<key file>]: started in the background, waits until it is held
+  local mark="$1" at="$2"; shift 2
+  fc s "$IN" hold --headers "$(xff "$at")" "$1" "$2" "$mark" ${3:+"$3"} > "$WORK/$mark.json" &
+  HELD_PID=$!
+  for _ in $(seq 1 300); do [ -f "$WORK/state/$mark.held" ] && return 0; sleep 0.2; done
+  die "the held sign-in $mark never reached its hold"
+}
+release() { touch "$WORK/state/$1.go"; wait "$HELD_PID"; }
+# held_end <mark>: the password step's answer, the last step's result and words, and who the session is signed in as
+held_end() { j '"%s|%s|%s|%s:%s" % (d[1]["status"], d[-2]["result"], d[-2].get("message", ""), d[-1]["status"], d[-1]["username"])' < "$WORK/$1.json"; }
+admin_set() { # admin_set <new password>: reset-admin.sh's program, exactly as the script passes it to the container
+  docker exec -e WF_NEW_PW="$1" "$P-server" sh -c "$(cat "$WORK/reset.sh-c")" 2>&1 | tail -1
+}
+hold h474a 192.0.2.201 admin "$RESET_PW"
+release h474a
+check "474: held, nothing changed: admin signs in" "$(held_end h474a)" "302|next||200:admin"
+hold h474b 192.0.2.202 admin "$RESET_PW"
+ADMIN_474="reset-$(openssl rand -hex 12)"
+check "474: held, then reset-admin.sh sets a new password" "$(admin_set "$ADMIN_474")" OK
+release h474b
+check "474: the held sign-in is refused, with a wrong password's words, and nobody is signed in" "$(held_end h474b)" \
+  "302|denied|$REPLACED|403:None"
+check "474: the new password signs admin in" "$(fc s "$IN" signin --headers "$(xff 192.0.2.202)" admin "$ADMIN_474" | j 'd["result"] + ":" + d["component"]')" \
+  "next:xak-flow-redirect"
+# Staff, held before the code step: the same password chosen again (a new salt) is a change too.
+hold h474c 192.0.2.203 pat "$PW_PAT" totp.key
+akshell "
+from authentik.core.models import User
+u = User.objects.get(username='pat'); u.set_password('$PW_PAT'); u.save()
+print('same password again')" >/dev/null
+release h474c
+check "474: pat, held, the same password set again: refused after the code, nobody signed in" "$(j '[x.get("step") for x in d]' < "$WORK/h474c.json")/$(held_end h474c)" \
+  "['name', 'password', 'after', 'code', 'me']/302|denied|$REPLACED|403:None"
+check "474: and pat signs in with it afresh" "$(complete s "$IN" "$(xff 192.0.2.203)" pat "$PW_PAT" totp.key)" "$DONE"
+# The password disabled meanwhile (authentik's "no usable password").
+hold h474d 192.0.2.204 admin "$ADMIN_474"
+akshell "
+from authentik.core.models import User
+u = User.objects.get(username='admin'); u.set_unusable_password(); u.save()
+print('disabled')" >/dev/null
+release h474d
+check "474: admin, held, its password disabled: refused, nobody signed in" "$(held_end h474d)" "302|denied|$REPLACED|403:None"
+ADMIN_474="reset-$(openssl rand -hex 12)"
+check "474: reset-admin.sh gives it a password again" "$(admin_set "$ADMIN_474")" OK
+# The login step's own check (100): with the check at 99 bound to a policy that never refuses, a held sign-in whose
+# password changed still signs nobody in (the login step is skipped), then 99 is put back.
+swap474() { akshell "
+from authentik.flows.models import FlowStageBinding
+from authentik.policies.models import PolicyBinding
+from authentik.policies.expression.models import ExpressionPolicy
+b = FlowStageBinding.objects.get(target__slug='default-authentication-flow', order=99)
+pb = PolicyBinding.objects.get(target=b, policy__name='$1')
+pb.policy = ExpressionPolicy.objects.get(name='$2'); pb.save()
+print('SWAPPED')" | grep -c '^SWAPPED$'; }
+check "474: 99 set aside" "$(swap474 workforce-password-replaced workforce-no-first-run-page)" 1
+hold h474e 192.0.2.205 admin "$ADMIN_474"
+ADMIN_474B="reset-$(openssl rand -hex 12)"
+check "474: held, then a new password" "$(admin_set "$ADMIN_474B")" OK
+release h474e
+check "474: 99 aside, the login step's own check: nobody signed in" "$(j 'd[-1]["status"]' < "$WORK/h474e.json")" 403
+check "474: 99 put back" "$(swap474 workforce-no-first-run-page workforce-password-replaced)" 1
+check "474: and admin signs in with its new password" "$(fc s "$IN" signin --headers "$(xff 192.0.2.205)" admin "$ADMIN_474B" | j 'd["result"] + ":" + d["component"]')" \
+  "next:xak-flow-redirect"
 
 echo "authentik lock on the pinned authentik ($AK_IMAGE): ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]

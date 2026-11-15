@@ -1,8 +1,10 @@
 # Self-test for the sign-in server's wrong-password pause, connection throttle, alerts and wrong-code count (Workforce
 # issue 462, contract section R of 15 November 2026): the decision in ansible/roles/authentik/templates/password-pause.py
 # and code-tries.py, with python3 alone, against password-pause-vectors.json (kept here only since 15 November: the
-# application asks the sign-in server instead of computing a pause). The authentik part (the lock, the records, real
-# requests at the same moment, the status interface) runs on the pinned authentik in bin/tests/authentik-lock-e2e.sh.
+# application asks the sign-in server instead of computing a pause); and the password re-checked before the login
+# (issue 474, password-unchanged.py and its two policies' authentik parts, with fakes). The authentik part (the lock,
+# the records, real requests at the same moment, the status interface, a sign-in held while the password changes) runs
+# on the pinned authentik in bin/tests/authentik-lock-e2e.sh.
 import json
 import os
 import re
@@ -389,8 +391,148 @@ check("four are not", cp(codes[:4], set(), base + 300), None)
 check("a right one doesn't count", cp(codes, {"c2"}, base + 300), None)
 check("over after 15 minutes", cp(codes, set(), base + 240 + 900), None)
 
+# ---- Workforce issue 474: a sign-in can't outlive a password change (password-unchanged.py), on its own: it is
+# included alone in its two policies, so it is loaded alone here too.
+un = {}
+exec(compile(open(os.path.join(TEMPLATES, "password-unchanged.py"), encoding="utf-8").read(), "password-unchanged.py",
+             "exec"), un)
+INBUILT, LDAP = "authentik.core.auth.InbuiltBackend", "authentik.sources.ldap.auth.LDAPBackend"
+H1 = "argon2$argon2id$v=19$m=65536,t=3,p=4$c2FsdDE$aGFzaDE"     # stored hashes as authentik keeps them (fakes)
+H1_RESALTED = "argon2$argon2id$v=19$m=65536,t=3,p=4$c2FsdDI$aGFzaDI"  # the same password chosen again: a new salt
+NO_PW = "!Xk3b9QmB0t1c7aPz2LrVw8sYdE5fGhJ4nM6qU1o"           # authentik's "no usable password"
+dg, seen_of, why = un["wf_password_digest"], un["wf_password_seen"], un["wf_password_replaced"]
+check("474: the digest is a sha256 hex", (len(dg(H1)), dg(H1) == dg(H1)), (64, True))
+check("474: the digest isn't the hash", H1 in dg(H1), False)
+check("474: the same password chosen again is another digest", dg(H1) == dg(H1_RESALTED), False)
+check("474: no hash, and an empty one, are one digest, and not a real one's", (dg(None) == dg(""), dg("") == dg(H1)),
+      (True, False))
+check("474: usable", [un["wf_password_usable"](x) for x in (H1, NO_PW, "", None, "!")], [True, False, False, False, False])
+s7 = seen_of(7, H1, INBUILT)
+check("474: what the password step saw", s7, {"pk": 7, "digest": dg(H1), "backend": INBUILT, "usable": True})
+check("474: an unsaved account (pretend_user_exists) records nothing", [seen_of(x, H1, INBUILT) for x in (None, True, "7")],
+      [None, None, None])
+check("474: unchanged: signs in", why(s7, 7, (7, H1, True)), None)
+check("474: changed: refused", why(s7, 7, (7, H1_RESALTED, True)), "changed")
+check("474: password disabled since: refused", why(s7, 7, (7, NO_PW, True)), "no-usable-password")
+check("474: no hash at all now: refused", why(s7, 7, (7, None, True)), "no-usable-password")
+check("474: deactivated since: refused", why(s7, 7, (7, H1, False)), "inactive")
+check("474: is_active must be exactly true", why(s7, 7, (7, H1, 1)), "inactive")
+check("474: deleted since: refused", why(s7, 7, None), "gone")
+check("474: another account's row: refused", why(s7, 7, (8, H1, True)), "gone")
+check("474: the plan now names another account: refused", why(s7, 8, (7, H1, True)), "other-account")
+check("474: nothing recorded (an error at 24, or no password checked): refused", why(None, 7, (7, H1, True)), "not-seen")
+check("474: a damaged record: refused", [why(x, 7, (7, H1, True)) for x in (
+    {}, {"pk": "7", "digest": dg(H1)}, {"pk": True, "digest": dg(H1)}, {"pk": 7}, {"pk": 7, "digest": "x"}, [7, dg(H1)])],
+    ["not-seen"] * 6)
+# The emergency administrator: the same rule (its first password, reset-admin.sh, a reset link are all changes).
+sa = seen_of(1, H1, INBUILT)
+check("474: admin, unchanged: signs in", why(sa, 1, (1, H1, True)), None)
+check("474: admin, reset by reset-admin.sh or the controller meanwhile: refused", why(sa, 1, (1, H1_RESALTED, True)),
+      "changed")
+# No usable password, consistently: authentik's own backend never accepts one, so a record of one is refused; another
+# backend (LDAP, Kerberos) doesn't use the local hash, and finishes while that local value is unchanged.
+check("474: inbuilt, no usable password seen: refused", why(seen_of(7, NO_PW, INBUILT), 7, (7, NO_PW, True)),
+      "no-usable-password")
+check("474: another backend, local value unchanged: signs in", why(seen_of(7, NO_PW, LDAP), 7, (7, NO_PW, True)), None)
+check("474: another backend, local value changed: refused", why(seen_of(7, NO_PW, LDAP), 7, (7, H1, True)), "changed")
+check("474: disabled twice is two values (each a new random one)", why(seen_of(7, NO_PW, LDAP), 7,
+      (7, "!" + NO_PW[1:][::-1], True)), "changed")
+
+# The two policies' authentik parts, taken from the blueprint and run as authentik runs an expression (the body of a
+# function of `request`), with fakes for the flow plan, the account and the database.
+import types
+bp_text = open(os.path.join(TEMPLATES, "workforce-app.yaml.j2"), encoding="utf-8").read()
+def policy_body(name):
+    m = re.search(r"\n      name: " + name + r"\n      expression: \|\n\{% filter indent\(8, true\) %\}\n"
+                  r"\{% include 'password-unchanged.py' %\}\n\{% endfilter %\}\n(.*?)\n  - model:", bp_text, re.S)
+    if not m:
+        return None
+    lines = m.group(1).split("\n")
+    return "\n".join(l[8:] if l.startswith("        ") else l for l in lines)
+DB = {}
+class Rows:
+    def __init__(self, rows): self.rows = rows
+    def first(self): return self.rows[0] if self.rows else None
+class Query:
+    def using(self, alias):
+        check("474: the check reads the primary database", alias, "default")
+        return self
+    def filter(self, pk):
+        self.pk = pk
+        return self
+    def values_list(self, *fields):
+        row = DB.get(self.pk)
+        return Rows([tuple(row[f] for f in fields)] if row else [])
+fake_models = types.ModuleType("authentik.core.models")
+fake_models.User = type("User", (), {"objects": Query()})
+for mod in ("authentik", "authentik.core"):
+    sys.modules.setdefault(mod, types.ModuleType(mod))
+sys.modules["authentik.core.models"] = fake_models
+def compiled(name):
+    body = policy_body(name)
+    if body is None:
+        check("474: " + name + " is in the blueprint, including password-unchanged.py", False, True)
+        return lambda request: None
+    src = open(os.path.join(TEMPLATES, "password-unchanged.py"), encoding="utf-8").read() + "\n" + body
+    code = "def policy(request):\n" + "\n".join("    " + l for l in src.split("\n"))
+    scope = {}
+    exec(compile(code, name, "exec"), scope)
+    return scope["policy"]
+seen_policy, replaced_policy = compiled("workforce-password-seen"), compiled("workforce-password-replaced")
+class Person:
+    def __init__(self, pk, password):
+        self.pk, self.password = pk, password
+class Req:
+    def __init__(self, plan): self.context = {"flow_plan": plan}
+def sign_in(pk, at_check, backend=INBUILT):
+    """A plan just past the password step: the backend's account (its hash as it was checked) and the backend."""
+    return Plan({"pending_user": Person(pk, at_check), "user_backend": backend})
+DB.clear(); DB[7] = {"pk": 7, "password": H1, "is_active": True}; DB[1] = {"pk": 1, "password": H1, "is_active": True}
+p = sign_in(7, H1)
+check("474 policy: 24 always fails (its deny stage never shows)", seen_policy(Req(p)), False)
+check("474 policy: and records what the step saw", p.context.get("wf_password_seen"), seen_of(7, H1, INBUILT))
+check("474 policy: unchanged: 99 lets it through", replaced_policy(Req(p)), False)
+DB[7]["password"] = H1_RESALTED
+check("474 policy: changed after 24: 99 refuses", replaced_policy(Req(p)), True)
+# The race itself: the password changes after the password step but before 24 runs (the next request). 24 records the
+# plan's copy, not the database, so 99 still refuses.
+p = sign_in(7, H1)
+seen_policy(Req(p))
+check("474 policy: changed before 24 ran: recorded from the plan's copy", p.context["wf_password_seen"]["digest"], dg(H1))
+check("474 policy: and refused at 99", replaced_policy(Req(p)), True)
+# Recorded once: a later stage that replaced the plan's account with a fresh copy (a security key at the code step)
+# doesn't move the record.
+p.context["pending_user"] = Person(7, H1_RESALTED)
+seen_policy(Req(p))
+check("474 policy: the record isn't overwritten", p.context["wf_password_seen"]["digest"], dg(H1))
+check("474 policy: still refused", replaced_policy(Req(p)), True)
+# A hash upgrade during the check: the backend's account carries the upgraded hash, saved too: not a change.
+DB[7]["password"] = H1_RESALTED
+p = sign_in(7, H1_RESALTED)
+seen_policy(Req(p))
+check("474 policy: a hash upgrade at the check isn't a change", replaced_policy(Req(p)), False)
+p = Plan({"pending_user": Person(7, H1_RESALTED)})
+check("474 policy: no password checked: nothing recorded", (seen_policy(Req(p)), "wf_password_seen" in p.context), (False, False))
+check("474 policy: and 99 refuses", replaced_policy(Req(p)), True)
+check("474 policy: no flow plan: refused", replaced_policy(Req(None)), True)
+check("474 policy: no flow plan: nothing recorded, and no error", seen_policy(Req(None)), False)
+p = sign_in(None, H1)
+seen_policy(Req(p))
+check("474 policy: an unsaved account: nothing recorded, refused", ("wf_password_seen" in p.context, replaced_policy(Req(p))),
+      (False, True))
+p = sign_in(1, H1)
+seen_policy(Req(p))
+check("474 policy: the emergency administrator, unchanged: through", replaced_policy(Req(p)), False)
+DB[1]["password"] = H1_RESALTED
+check("474 policy: and refused once its password is set meanwhile", replaced_policy(Req(p)), True)
+DB[7]["password"] = H1; p = sign_in(7, H1); seen_policy(Req(p))
+DB[7]["is_active"] = False
+check("474 policy: deactivated meanwhile: refused", replaced_policy(Req(p)), True)
+del DB[7]
+check("474 policy: deleted meanwhile: refused", replaced_policy(Req(p)), True)
+
 # ---- the files are Jinja includes: nothing that Jinja would read as its own
-for name in ("password-pause.py", "code-tries.py"):
+for name in ("password-pause.py", "code-tries.py", "password-unchanged.py"):
     src = open(os.path.join(TEMPLATES, name), encoding="utf-8").read()
     check(name + " has no Jinja delimiters", re.findall(r"\{\{|\}\}|\{%|%\}|\{#|#\}", src), [])
 bp = open(os.path.join(TEMPLATES, "workforce-app.yaml.j2"), encoding="utf-8").read()

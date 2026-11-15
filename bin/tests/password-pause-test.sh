@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Self-test for the sign-in server's wrong-password pause, connection throttle, alerts and wrong-code count (Workforce
-# issue 462): the decision, against the vectors the application shares. Hermetic: python3 only.
+# issue 462): the decision, against the vectors the application shares; and the password re-checked before the login
+# (issue 474). Hermetic: python3 only.
 #   ./bin/tests/password-pause-test.sh      exit 0 = all pass
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
