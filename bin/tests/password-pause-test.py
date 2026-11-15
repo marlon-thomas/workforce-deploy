@@ -204,23 +204,23 @@ check("confirmed addresses, keys and ranges as sources; nonsense named; the whol
 wc = g("wf_confirmed")
 wpl = g("wf_workplace")
 check("an address in a confirmed range is confirmed", wc("198.51.100.77", c["confirmed"]), True)
-check("one outside isn't", wc("198.51.101.1", c["confirmed"]), False)
+check("one outside isn't", wc("203.0.113.200", c["confirmed"]), False)
 check("a /64 holding a confirmed address is", wc("2001:db8:9::/64", c["confirmed"]), True)
 # Review of 15 November 2026, findings 3 and 17: an entry raises a limit only where it is no wider than what it makes a
 # workplace. A confirmed address or /64 never makes its whole /48 a workplace network; an entry from a /48 to a /63
 # makes its /48 one and nothing more; wider ones (and IPv4 wider than a /24) are for the readiness check only.
 check("a confirmed address doesn't make its /48 a workplace network", wpl("2001:db8:9::/48", True, c), False)
-c = L({"CLIENT_ADDRESSES_CONFIRMED": "2001:db8:a::/48 2001:db8:b:100::/56,2001:db8::/32 198.51.0.0/16 10.0.0.0/8 198.51.7.0/24"})
+c = L({"CLIENT_ADDRESSES_CONFIRMED": "2001:db8:a::/48 2001:db8:b:100::/56,2001:db8::/32 198.18.0.0/16 10.0.0.0/8 198.18.7.0/24"})
 check("a /48 and a /56 confirm networks; a /32 and IPv4 wider than a /24 confirm the readiness check only",
       ([str(n) for n in c["confirmed"]], [str(n) for n in c["confirmed_networks"]], c["readiness_only"], c["warnings"]),
-      (["198.51.7.0/24"], ["2001:db8:a::/48", "2001:db8:b:100::/56"], 3, []))
+      (["198.18.7.0/24"], ["2001:db8:a::/48", "2001:db8:b:100::/56"], 3, []))
 check("a confirmed /48 is a workplace network", wpl("2001:db8:a::/48", True, c), True)
 check("and so is the /48 holding a confirmed /56", wpl("2001:db8:b::/48", True, c), True)
 check("but none of their /64s is a workplace source", [wpl(k, False, c) for k in ("2001:db8:a:1::/64", "2001:db8:b:100::/64")],
       [False, False])
 check("nor proven", g("wf_proven")([], "2001:db8:a:1::/64", c, base), False)
-check("an address in a confirmed /16 is no workplace source", wpl("198.51.8.1", False, c), False)
-check("one in a confirmed /24 is", wpl("198.51.7.200", False, c), True)
+check("an address in a confirmed /16 is no workplace source", wpl("198.18.8.1", False, c), False)
+check("one in a confirmed /24 is", wpl("198.18.7.200", False, c), True)
 check("an IPv4 range never confirms an IPv6 source", wc("::ffff:0:0/96", c["confirmed"]), False)
 check("nothing that isn't an address", wc("nonsense", c["confirmed"]), False)
 
@@ -591,7 +591,22 @@ class Logger:
     def __init__(self): self.lines = []
     def warning(self, msg, **kw): self.lines.append((msg, kw))
 policies = rendered_policies()
-policies.pop("workforce-sign-in-status-code", None)   # bound nowhere; its own try/except (blueprint-test.sh)
+SHARED_CODE = policies.pop("workforce-sign-in-code", None)   # bound nowhere: loaded by name (below)
+STATUS_CODE = policies.pop("workforce-sign-in-status-code", None)   # bound nowhere; its own try/except (blueprint-test.sh)
+# The shared code as the policies load it (final review of the controller bundle, findings 1 and 5): a fake of
+# authentik's ExpressionPolicy model that answers workforce-sign-in-code with the blueprint's own copy.
+class SharedCode:
+    missing = False
+    def get(self, name):
+        check("the shared code is loaded by its name", name, "workforce-sign-in-code")
+        if self.missing:
+            raise LookupError("ExpressionPolicy matching query does not exist.")
+        return types.SimpleNamespace(expression=SHARED_CODE)
+for mod in ("authentik.policies", "authentik.policies.expression"):
+    sys.modules.setdefault(mod, types.ModuleType(mod))
+fake_policies = types.ModuleType("authentik.policies.expression.models")
+fake_policies.ExpressionPolicy = type("ExpressionPolicy", (), {"objects": SharedCode()})
+sys.modules["authentik.policies.expression.models"] = fake_policies
 policies.pop("workforce-no-first-run-page", None)      # "return False" alone
 check("474 errors: every policy the blueprint binds has a refusing value here", sorted(policies), sorted(REFUSING))
 for name, src in sorted(policies.items()):
@@ -604,7 +619,7 @@ for name, src in sorted(policies.items()):
     check(name + ": an error inside its guard refuses (" + str(want) + ")",
           as_authentik(name, injected)(Req(None), {}, lambda m: None, log, lambda *a, **k: False), want)
     check(name + ": and says so in the log, by name, without values", [(kw.get("policy"), kw.get("error")) for m, kw in log.lines],
-          [(name, "RuntimeError: injected inside the guard")])
+          [(name, "RuntimeError")])   # the kind of error only: its text may quote values (final review, finding 7)
     check(name + ": a request that raises everywhere, and a logger that raises too: refuses (" + str(want) + ")",
           as_authentik(name, src)(Raises(), Raises(), Raises(), Raises(), Raises()), want)
     # The guard is what makes the difference: without it the same error leaves the policy, which authentik answers
@@ -623,11 +638,71 @@ for name in ("password-pause.py", "code-tries.py", "password-unchanged.py"):
     src = open(os.path.join(TEMPLATES, name), encoding="utf-8").read()
     check(name + " has no Jinja delimiters", re.findall(r"\{\{|\}\}|\{%|%\}|\{#|#\}", src), [])
 bp = open(os.path.join(TEMPLATES, "workforce-app.yaml.j2"), encoding="utf-8").read()
-for policy in ("workforce-password-paused", "workforce-password-may-try", "workforce-password-right",
-               "workforce-client-address", "workforce-code-try", "workforce-codes-paused", "workforce-network-tightened",
-               "workforce-password-not-checked-network", "workforce-sign-in-status-code"):
-    m = re.search(r"name: " + policy + r"\n(      execution_logging: false\n)?      expression: \|\n\{% filter indent\(8, true\) %\}\n\{% include 'password-pause.py' %\}", bp)
-    check(policy + " includes the decision", bool(m), True)
+# ---- final review of the controller bundle, findings 1 and 5: the shared code kept once, loaded by name
+import symtable, builtins
+check("the shared code holds password-pause.py and code-tries.py, and nothing else", SHARED_CODE,
+      "".join(open(os.path.join(TEMPLATES, n), encoding="utf-8").read().rstrip("\n") + "\n"
+              for n in ("password-pause.py", "code-tries.py")))
+LOAD = 'globals().update((k, v) for k, v in wf_shared.items() if k[:3] in ("wf_", "WF_"))\n'
+EVALUATOR = {"ak_logger", "ak_message", "ak_is_group_member", "ak_call_policy", "ak_create_event", "ak_user_by",
+             "ak_user_has_authenticator", "ak_send_email", "ip_address", "ip_network", "regex_match", "regex_replace",
+             "request", "context"}
+shared_ns = {}
+exec(compile(SHARED_CODE, "workforce-sign-in-code", "exec"), shared_ns)
+loading = dict(STATUS_CODE and {"workforce-sign-in-status-code": STATUS_CODE} or {},
+               **{k: v for k, v in policies.items() if LOAD in v})
+check("the policies that load it", sorted(loading), sorted([
+    "workforce-password-throttled", "workforce-network-tightened", "workforce-password-paused", "workforce-password-may-try",
+    "workforce-password-right", "workforce-password-not-checked-throttled", "workforce-password-not-checked-network",
+    "workforce-client-address", "workforce-sign-in-status-code", "workforce-code-try", "workforce-codes-paused"]))
+for name, src in sorted(loading.items()):
+    # Every name the policy reads that it doesn't set itself: authentik's, Python's, or the shared code's.
+    table = symtable.symtable("def handler(request, context, ak_message, ak_logger, ak_is_group_member):\n"
+                              + "\n".join("    " + l for l in src.split("\n")), name, "exec")
+    wanted = set()
+    def walk(t):
+        for c in t.get_children():
+            wanted.update(x.get_name() for x in c.get_symbols() if x.is_global())
+            walk(c)
+    walk(table)
+    unknown = sorted(n for n in wanted if n not in EVALUATOR and not hasattr(builtins, n) and n not in shared_ns)
+    check(name + ": every name it reads is authentik's, Python's or the shared code's", unknown, [])
+    needed = sorted(n for n in wanted if n in shared_ns)
+    # Run as authentik runs it, stopped just after the load: each of those names is there.
+    probe = src.replace(LOAD, LOAD + "    return [n for n in %r if n not in globals()]\n" % needed, 1)
+    check(name + ": once loaded, every shared name it uses is there (%d)" % len(needed),
+          as_authentik(name, probe)(Req(None), {}, lambda m: None, Logger(), lambda *a, **k: False), [])
+SharedCode.missing = True
+for name, want in (("workforce-password-may-try", False), ("workforce-password-paused", True), ("workforce-code-try", True)):
+    log = Logger()
+    check(name + ": the shared code missing: refuses (" + str(want) + ")",
+          as_authentik(name, policies[name])(Req(None), {}, lambda m: None, log, lambda *a, **k: False), want)
+    check(name + ": and logs the kind of error", [kw.get("error") for m, kw in log.lines], ["LookupError"])
+SharedCode.missing = False
+
+# ---- final review of the controller bundle, findings 2 and 6: while attributes.workforce.recovery_mail_held is set
+# (reset-admin.sh, or the controller's recovery, after admin's password and recovery mailbox were both lost), the
+# sign-in server itself makes no reset link for the account: the recovery flow's policy refuses it, whatever the
+# application's version. Anything there but an absent or null value holds, as the application's own check
+# (AuthentikRecovery.mailResetHeld); a "workforce" attribute that isn't a mapping holds nothing.
+def recovery_link_for(attributes, username="admin", superuser=False, admins=False, kind="internal"):
+    user = types.SimpleNamespace(username=username, type=kind, is_superuser=superuser, attributes=attributes)
+    req = types.SimpleNamespace(user=user, context={})
+    log = Logger()
+    got = as_authentik("workforce-recovery-staff-only", policies["workforce-recovery-staff-only"])(
+        req, {}, lambda m: None, log, lambda u, name=None: admins)
+    return got, [kw.get("error") for m, kw in log.lines]
+HELD = {"recovery": "0b8f9c1e-3d0a-4c55-9a43-7f1d2e6b5a10", "at": "2026-11-15T10:00:00.000000Z"}
+check("recovery link: an ordinary account", recovery_link_for({}), (True, []))
+check("recovery link: admin, no hold", recovery_link_for({"workforce": {"phone": "x"}}), (True, []))
+check("recovery link: admin while resets by email are held: refused", recovery_link_for({"workforce": {"recovery_mail_held": HELD}}),
+      (False, []))
+check("recovery link: any value but null holds", recovery_link_for({"workforce": {"recovery_mail_held": False}}), (False, []))
+check("recovery link: null holds nothing", recovery_link_for({"workforce": {"recovery_mail_held": None}}), (True, []))
+check("recovery link: a workforce attribute that isn't a mapping holds nothing", recovery_link_for({"workforce": "x"}), (True, []))
+check("recovery link: no attributes at all", recovery_link_for(None), (True, []))
+check("recovery link: still never for authentik's admins", recovery_link_for({}, admins=True), (False, []))
+check("recovery link: or a superuser", recovery_link_for({}, superuser=True), (False, []))
 
 print("password pause self-test: %d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

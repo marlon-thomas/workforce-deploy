@@ -198,7 +198,7 @@ check "limits: nonsense refused" "$(lim "" "" "office" | grep -c 'is not an addr
 clc() { CLIENT_ADDRESSES_CONFIRMED="$1" confirmed_limit_counts; }
 check "confirmed for the limits: none" "$(clc "")" "0 0 0"
 check "an address, a /24 and a /64 make workplace connections; a /56 and a /48 workplace networks; a /16, the TEST tailnet's /10 and an IPv6 /32 raise no limit" \
-  "$(clc "203.0.113.7 198.51.100.0/24,2001:db8:1:2::/64 [2001:db8:9::5] 2001:db8:3::/56 2001:db8:4::/48 198.51.0.0/16 100.64.0.0/10 2001:db8::/32")" "4 2 3"
+  "$(clc "203.0.113.7 198.51.100.0/24,2001:db8:1:2::/64 [2001:db8:9::5] 2001:db8:3::/56 2001:db8:4::/48 198.18.0.0/16 100.64.0.0/10 2001:db8::/32")" "4 2 3"
 check "unreadable entries aren't counted" "$(clc "office 2001:db8:1:2::/64")" "1 0 0"
 
 echo "client address self-test: ${PASS} passed, ${FAILN} failed"

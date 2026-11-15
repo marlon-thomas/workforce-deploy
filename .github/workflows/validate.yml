@@ -45,8 +45,9 @@ jobs:
       - name: Release signatures end to end (a local registry, the pinned cosign)
         run: ./bin/tests/verify-image-e2e.sh
       # Second review of the controller bundle (findings 2, 4 and 6): the sign-in policies that use authentik's own
-      # code, and reset-admin.sh's program, run on the pinned authentik image (an error in the lock refuses everyone).
-      - name: The sign-in policies and reset-admin.sh on the pinned authentik
+      # code run on the pinned authentik image, with fakes for the database. reset-admin.sh's program runs on a real
+      # database in the live job below (authentik-lock-e2e.sh, section 9), not here (final review, finding 8).
+      - name: The sign-in policies on the pinned authentik
         run: ./bin/tests/authentik-policies-e2e.sh
       # Workforce issue 462: the gateway decides each client's address (every gateway file, on the pinned Caddy, with
       # forged headers and named proxies), and the wrong-password pause, the throttle, workplaces, unlocks, wrong codes
@@ -54,7 +55,7 @@ jobs:
       # applied twice), signing in through its real flow executor and the real gateway. One live authentik at a time.
       - name: Client addresses through every gateway file (the pinned Caddy)
         run: ./bin/tests/gateway-client-address-e2e.sh
-      - name: Wrong passwords, the throttle and unlocks on a live authentik (the pin, through the gateway)
+      - name: Wrong passwords, the throttle, unlocks and reset-admin.sh on a live authentik (the pin, through the gateway)
         run: |
           python3 -c 'import jinja2' 2>/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q python3-jinja2; }
           ./bin/tests/authentik-lock-e2e.sh

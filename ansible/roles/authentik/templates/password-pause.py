@@ -6,11 +6,13 @@
 # alone, against bin/tests/password-pause-vectors.json (the vectors live here only since 15 November: the
 # application no longer computes a pause, it asks the sign-in server, contract R.7).
 #
-# workforce-app.yaml.j2 includes this file at the top of the expression policies that decide and record, of the
-# client-address probe and of the sign-in status code, and adds the authentik part below it (the lock, the records,
-# the request). authentik runs an expression as the body of a function, so this file holds only constants and
-# functions; nothing in it runs on its own. It is a Jinja include: never write two braces, or a brace and a percent
-# or hash sign, side by side here.
+# workforce-app.yaml.j2 keeps this file (and code-tries.py after it) ONCE, in the unbound expression policy
+# workforce-sign-in-code; the policies that decide and record, the client-address probe and the sign-in status code
+# each load it by name, run it as a module of its own (exec), and take its wf_ and WF_ names (final review of the
+# controller bundle, findings 1 and 5: a copy in each policy made every policy's result too large for authentik's
+# 64 KiB pipe, and sign-ins hung). So this file holds only constants and functions, every one named wf_ or WF_ and
+# needing nothing from the policy around it; nothing in it runs on its own. It is a Jinja include: never write two
+# braces, or a brace and a percent or hash sign, side by side here.
 #
 # Words (contract R.2). A source is what the owner calls a connection: the address the gateway alone decides (an IPv4
 # address; an IPv4-mapped IPv6 address as its IPv4; any other IPv6 address as its /64). Never a TCP connection, a

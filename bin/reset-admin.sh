@@ -19,11 +19,14 @@
 #     server's own clock; source and network holds are untouched;
 #   - password resets by email held (attributes.workforce.recovery_mail_held), so a mailbox the organisation has lost
 #     can't reset the account again; lift the hold with `./bin/reset-admin.sh --allow-reset-mail` once the mailbox is
-#     the organisation's again, or the recovery address has been changed;
+#     the organisation's again, or the recovery address has been changed. The sign-in server enforces the hold itself
+#     (the Workforce blueprint's workforce-recovery-staff-only refuses a reset link while it is set, final review of
+#     the controller bundle, findings 2 and 6); the script checks that the installed set-up does, and says so if it
+#     doesn't (an older set-up: then only a Workforce version that checks the hold would);
 #   - a record of this recovery (custom_workforce_admin_recovery).
 # After the commit it looks three more times, a second apart, and ends anything a request already under way added.
 # Unlike the controller it doesn't end admin's sessions inside Workforce itself (the application's own database):
-# sign admin out there, or let them expire.
+# sign admin out there, or let them expire (Workforce issue 493).
 #
 #   ./bin/reset-admin.sh                          prints a verification phrase
 #   ./bin/reset-admin.sh --confirm <phrase>       the recovery
@@ -42,9 +45,10 @@ use_docker_socket
 
 # The program run inside authentik-server (`python -c`, the image's python as its PATH finds it: a fixed path broke
 # when authentik moved its venv, second review of the controller bundle, finding 2). Its first line on stdin says what
-# to do: "reset" (then the password and this recovery's id) or "allow-mail" (then a request id). It prints its counts,
-# then one last line: OK, NOT_HELD, NONE, REFUSED, FAILED <kind of error> (nothing changed) or UNSURE (the time limit
-# struck while committing). Never the password.
+# to do: "reset" (then the password and this recovery's id) or "allow-mail" (then a request id). It prints its counts
+# (and, after a reset, "mail hold: enforced", "not enforced" or "unknown"), then one last line: OK, NOT_HELD, NONE,
+# REFUSED, FAILED <kind of error> (nothing changed) or UNSURE (the time limit struck while committing). Never the
+# password.
 # bin/tests/authentik-lock-e2e.sh runs it on the pinned authentik, with a real database.
 RESET_PY="$(cat <<'PYEOF'
 import os, signal, sys, time
@@ -141,6 +145,18 @@ def record(action, u, at, **context):
     e.user = {"pk": int(u.pk), "username": str(u.username)}
     e.save()
 
+def mail_hold_enforced():
+    """Whether this sign-in server itself refuses a reset link while the hold is set: every brand's recovery flow has
+    an enabled, not negated binding of an expression policy that reads it (the Workforce blueprint's
+    workforce-recovery-staff-only, since the final review of the controller bundle). No recovery flow: no link at all."""
+    from authentik.brands.models import Brand
+    from authentik.policies.expression.models import ExpressionPolicy
+    from authentik.policies.models import PolicyBinding
+    flows = [b.flow_recovery for b in Brand.objects.exclude(flow_recovery=None)]
+    return all(ExpressionPolicy.objects.filter(
+        pk__in=PolicyBinding.objects.filter(target__pbm_uuid=f.pbm_uuid, enabled=True, negate=False).values("policy_id"),
+        expression__contains='wf.get("recovery_mail_held") is not None').exists() for f in flows)
+
 def said(counts):
     return ", ".join("%s %d" % (k, v) for k, v in sorted(counts.items()) if v) or "none"
 
@@ -194,6 +210,10 @@ try:
             print("still there: " + said(sign_ins(User.objects.get(pk=first.pk))))
         except Exception as e:
             print("looking again after the change failed (%s): run this again to be sure" % type(e).__name__)
+        try:
+            print("mail hold: " + ("enforced" if mail_hold_enforced() else "not enforced"))
+        except Exception:
+            print("mail hold: unknown")
         print("OK")
     elif mode == "allow-mail":
         rid = sys.stdin.readline().strip()
@@ -279,15 +299,26 @@ case "$(printf '%s\n' "$OUT" | tail -1)" in
   *) echo "Reset failed ($(printf '%s\n' "$OUT" | tail -1)): nothing was changed. Send ./bin/doctor.sh output to support."
      exit 1 ;;
 esac
-printf '%s\n' "$OUT" | sed '$d' | sed 's/^/  /'
+printf '%s\n' "$OUT" | sed '$d' | grep -v '^mail hold: ' | sed 's/^/  /'
+if printf '%s\n' "$OUT" | grep -qx 'mail hold: enforced'; then
+  HOLD="Password resets by email
+for 'admin' are held: the sign-in server makes no reset link for it until you run
+./bin/reset-admin.sh --allow-reset-mail (do that once its email address is one
+only your organisation reads)."
+else
+  HOLD="Password resets by email
+for 'admin' are recorded as held, BUT this sign-in server's set-up doesn't enforce
+that itself (it is older than this script, or couldn't be checked): whoever reads
+admin's recovery email address may still be sent a reset link. Bring the set-up
+up to date now (./bin/update.sh), and until then change admin's email address in
+Workforce to one only your organisation reads."
+fi
 
 cat <<EOF
 
 Done. Every sign-in method on the account has been removed (add an authenticator
 app again from Workforce if you want one), its sessions and tokens at the sign-in
-server ended, and any pause after wrong passwords lifted. Password resets by email
-for 'admin' are held until you run ./bin/reset-admin.sh --allow-reset-mail (do that
-once its email address is one only your organisation reads). Workforce's own
+server ended, and any pause after wrong passwords lifted. ${HOLD} Workforce's own
 sessions for 'admin' aren't ended by this: sign it out there.
 
 The administrator password is now:

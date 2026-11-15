@@ -239,7 +239,7 @@ entries:
   # (that covers authentik's PolicyException only): the evaluator answers "fails" (PolicyResult(False)), and a negated
   # binding turns that into "passes". On a deny stage's binding, or on a binding that runs a step that must run, "fails"
   # lets the sign-in through. So every policy bound here keeps its own code inside one guard,
-  #     try: ... except Exception: (a log line, without values) return <the answer that refuses>
+  #     try: ... except Exception: (a log line naming the kind of error only) return <the answer that refuses>
   # with the answer written out: True on a deny stage's binding and on a step that must run (the code step), False on a
   # gate (a flow, the password step, the login step) and on a check of a typed password. No binding is negated: a check
   # that must hold is a policy answering yes for "go on" (workforce-password-may-try at 20, workforce-password-unchanged
@@ -258,15 +258,26 @@ entries:
       name: workforce-recovery-staff-only
       # The link is planned for one person (pending_user). Never for this server's own
       # administrators or service accounts: the app's credential must not open a way in here.
+      # Nor while the account's password resets by email are held (final review of the controller bundle, findings 2
+      # and 6): reset-admin.sh and the controller's recovery set attributes.workforce.recovery_mail_held when
+      # admin's password and recovery mailbox were both lost, and whoever holds that mailbox must not reset an account
+      # that has just lost its second factor. authentik plans this flow, and so runs this policy, when the link is
+      # made (POST /core/users/{pk}/recovery/ refuses: "Recovery flow not applicable to user"), so the hold doesn't
+      # depend on the application's version. Anything there but an absent or null value holds, as the application's
+      # own check (AuthentikRecovery.mailResetHeld). Only reset-admin.sh --allow-reset-mail or the controller page
+      # lifts it (the application's credential could write the attribute too, but it decides about links anyway).
       expression: |
         try:
             user = request.user
+            wf = (getattr(user, "attributes", None) or {}).get("workforce")
+            if isinstance(wf, dict) and wf.get("recovery_mail_held") is not None:
+                return False
             return (getattr(user, "type", "") == "internal" and not user.is_superuser
                     and not ak_is_group_member(user, name="authentik Admins"))
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-recovery-staff-only",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return False
@@ -301,7 +312,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-emergency-password",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return False
@@ -495,7 +506,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-not-the-emergency-administrator",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -532,7 +543,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="default-authentication-flow-authenticator-validate-stage",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -596,7 +607,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-codes-not-ready",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -642,7 +653,8 @@ entries:
   # - Each try is recorded before the password is checked (custom_workforce_password_try), under PostgreSQL advisory
   #   locks on the source, its /48 and the pair, so requests at the same moment are taken one at a time; it counts as
   #   wrong until the flow reaches the step after the password (24), which marks it right. A refused request is never
-  #   recorded, so it can't stretch any hold. A completed sign-in is recorded at 31 (custom_workforce_signed_in).
+  #   recorded, so it can't stretch any hold. A completed sign-in is recorded at 31 (custom_workforce_signed_in;
+  #   before 99 and 100 re-check the password, so a sign-in refused there is still recorded: Workforce issue 494).
   # - Wrong passwords before the account's marker no longer count for its pairs: its last password change, or its last
   #   "Unlock sign-in" in Workforce, which only the sign-in status interface below records (custom_workforce_password_
   #   unlock, by this server's clock). No account attribute is read: the application's credential can write those.
@@ -650,9 +662,9 @@ entries:
   # - Alerts (custom_workforce_password_alert), never a lock: one source (or /48) trying five or more names within an
   #   hour; one account tried from three or more sources within an hour, or twenty wrong passwords in a day; a source
   #   held (throttled, workplace-throttled); a /48 tightened (network-tightened). Each at most once an hour.
-  # The decision is ansible/roles/authentik/templates/password-pause.py (included in each policy below; tested on its
-  # own by bin/tests/password-pause-test.sh), and the whole thing runs on the pinned authentik in
-  # bin/tests/authentik-lock-e2e.sh. Any error refuses (each policy's guard: see "Errors refuse" above).
+  # The decision is ansible/roles/authentik/templates/password-pause.py (tested on its own by
+  # bin/tests/password-pause-test.sh), kept once in workforce-sign-in-code below, and the whole thing runs on the pinned
+  # authentik in bin/tests/authentik-lock-e2e.sh. Any error refuses (each policy's guard: see "Errors refuse" above).
   - model: authentik_policies_reputation.reputationpolicy
     identifiers: { name: workforce-too-many-tries }
     state: absent
@@ -661,6 +673,27 @@ entries:
   - model: authentik_policies_expression.expressionpolicy
     identifiers: { name: workforce-too-many-tries-by-account }
     state: absent
+  # The shared code (password-pause.py and code-tries.py, about 64 KB), kept ONCE (final review of the controller bundle,
+  # findings 1 and 5). authentik 2026.8.5 runs each policy of a binding in the request's own thread and sends its result
+  # down a pipe before anything reads it; that result (a pickled PolicyResult) carries the binding and so the policy's
+  # whole expression, and one over 64 KiB blocks the thread for good: a sign-in that never answers, and a few dozen of
+  # them leave authentik answering nobody. So no bound policy holds this code: each policy below that needs it loads it
+  # by name as the first thing inside its guard (a missing or broken copy is an error there, which refuses), and its
+  # own expression stays a few KB (bin/tests/blueprint-test.sh: 32 KiB at most; authentik-lock-e2e.sh measures the
+  # pickled results live). This policy is bound nowhere, so authentik never runs it as a policy or sends it down a
+  # pipe. It is the server's own code, under the same control as every other policy here: only authentik's admins can
+  # change a policy.
+  - model: authentik_policies_expression.expressionpolicy
+    id: wf-sign-in-code
+    identifiers: { name: workforce-sign-in-code }
+    attrs:
+      name: workforce-sign-in-code
+      execution_logging: false
+      expression: |
+{% filter indent(8, true) %}
+{% include 'password-pause.py' %}
+{% include 'code-tries.py' %}
+{% endfilter %}
   # Orders 15, 16 and 17 (once a sign-in reaches them, after the name): the source held (15), the /48 tightened and this
   # source refused by it (16), the pair paused (17). Each has its own words (contract 3.8, R.6.5); the source's and the
   # network's win when they hold, since an unlock doesn't lift them. Decide only.
@@ -670,17 +703,18 @@ entries:
     attrs:
       name: workforce-password-throttled
       expression: |
-{% filter indent(8, true) %}
-{% include 'password-pause.py' %}
-{% endfilter %}
         # ---- the authentik part ----
         try:
+            from authentik.policies.expression.models import ExpressionPolicy as WfShared
+            wf_shared = dict()
+            exec(WfShared.objects.get(name="workforce-sign-in-code").expression, wf_shared)
+            globals().update((k, v) for k, v in wf_shared.items() if k[:3] in ("wf_", "WF_"))
             decision, http, person, account, conn, address, now = wf_ak_decide(request)
             return decision["source"] and wf_ak_refused(decision, address, person, account, conn, now)
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-password-throttled",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -690,17 +724,18 @@ entries:
     attrs:
       name: workforce-network-tightened
       expression: |
-{% filter indent(8, true) %}
-{% include 'password-pause.py' %}
-{% endfilter %}
         # ---- the authentik part ----
         try:
+            from authentik.policies.expression.models import ExpressionPolicy as WfShared
+            wf_shared = dict()
+            exec(WfShared.objects.get(name="workforce-sign-in-code").expression, wf_shared)
+            globals().update((k, v) for k, v in wf_shared.items() if k[:3] in ("wf_", "WF_"))
             decision, http, person, account, conn, address, now = wf_ak_decide(request)
             return decision["rule"] == "network" and wf_ak_refused(decision, address, person, account, conn, now)
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-network-tightened",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -710,17 +745,18 @@ entries:
     attrs:
       name: workforce-password-paused
       expression: |
-{% filter indent(8, true) %}
-{% include 'password-pause.py' %}
-{% endfilter %}
         # ---- the authentik part ----
         try:
+            from authentik.policies.expression.models import ExpressionPolicy as WfShared
+            wf_shared = dict()
+            exec(WfShared.objects.get(name="workforce-sign-in-code").expression, wf_shared)
+            globals().update((k, v) for k, v in wf_shared.items() if k[:3] in ("wf_", "WF_"))
             decision, http, person, account, conn, address, now = wf_ak_decide(request)
             return decision["paused"] and wf_ak_refused(decision, address, person, account, conn, now)
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-password-paused",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -737,11 +773,12 @@ entries:
     attrs:
       name: workforce-password-may-try
       expression: |
-{% filter indent(8, true) %}
-{% include 'password-pause.py' %}
-{% endfilter %}
         # ---- the authentik part ----
         try:
+            from authentik.policies.expression.models import ExpressionPolicy as WfShared
+            wf_shared = dict()
+            exec(WfShared.objects.get(name="workforce-sign-in-code").expression, wf_shared)
+            globals().update((k, v) for k, v in wf_shared.items() if k[:3] in ("wf_", "WF_"))
             from datetime import datetime, timezone as tz
             from uuid import uuid4
             from django.db import connections, transaction
@@ -793,7 +830,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-password-may-try",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return False
@@ -806,11 +843,12 @@ entries:
     attrs:
       name: workforce-password-right
       expression: |
-{% filter indent(8, true) %}
-{% include 'password-pause.py' %}
-{% endfilter %}
         # ---- the authentik part ----
         try:
+            from authentik.policies.expression.models import ExpressionPolicy as WfShared
+            wf_shared = dict()
+            exec(WfShared.objects.get(name="workforce-sign-in-code").expression, wf_shared)
+            globals().update((k, v) for k, v in wf_shared.items() if k[:3] in ("wf_", "WF_"))
             from datetime import datetime, timezone as tz
             from django.db import connections, transaction
             from django.utils import timezone
@@ -846,7 +884,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-password-right",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -858,11 +896,12 @@ entries:
     attrs:
       name: workforce-password-not-checked-throttled
       expression: |
-{% filter indent(8, true) %}
-{% include 'password-pause.py' %}
-{% endfilter %}
         # ---- the authentik part ----
         try:
+            from authentik.policies.expression.models import ExpressionPolicy as WfShared
+            wf_shared = dict()
+            exec(WfShared.objects.get(name="workforce-sign-in-code").expression, wf_shared)
+            globals().update((k, v) for k, v in wf_shared.items() if k[:3] in ("wf_", "WF_"))
             plan = request.context.get("flow_plan")
             if plan is not None and plan.context.get("user_backend"):
                 return False
@@ -871,7 +910,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-password-not-checked-throttled",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -882,11 +921,12 @@ entries:
     attrs:
       name: workforce-password-not-checked-network
       expression: |
-{% filter indent(8, true) %}
-{% include 'password-pause.py' %}
-{% endfilter %}
         # ---- the authentik part ----
         try:
+            from authentik.policies.expression.models import ExpressionPolicy as WfShared
+            wf_shared = dict()
+            exec(WfShared.objects.get(name="workforce-sign-in-code").expression, wf_shared)
+            globals().update((k, v) for k, v in wf_shared.items() if k[:3] in ("wf_", "WF_"))
             plan = request.context.get("flow_plan")
             if plan is not None and plan.context.get("user_backend"):
                 return False
@@ -895,7 +935,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-password-not-checked-network",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -997,7 +1037,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="default-authentication-flow-password-stage",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -1060,7 +1100,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-password-not-checked",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -1117,18 +1157,19 @@ entries:
     attrs:
       name: workforce-client-address
       expression: |
-{% filter indent(8, true) %}
-{% include 'password-pause.py' %}
-{% endfilter %}
         # ---- the authentik part ----
         try:
+            from authentik.policies.expression.models import ExpressionPolicy as WfShared
+            wf_shared = dict()
+            exec(WfShared.objects.get(name="workforce-sign-in-code").expression, wf_shared)
+            globals().update((k, v) for k, v in wf_shared.items() if k[:3] in ("wf_", "WF_"))
             from authentik.root.middleware import ClientIPMiddleware
             ak_message("workforce-client-address=" + wf_connection_key(ClientIPMiddleware.get_client_ip(request.http_request)))
             return False
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-client-address",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return False
@@ -1164,11 +1205,12 @@ entries:
       name: workforce-sign-in-status-code
       execution_logging: false
       expression: |
-{% filter indent(8, true) %}
-{% include 'password-pause.py' %}
-{% endfilter %}
         # ---- the authentik part ----
         try:
+            from authentik.policies.expression.models import ExpressionPolicy as WfShared
+            wf_shared = dict()
+            exec(WfShared.objects.get(name="workforce-sign-in-code").expression, wf_shared)
+            globals().update((k, v) for k, v in wf_shared.items() if k[:3] in ("wf_", "WF_"))
             return wf_ak_status_answer(request)
         except Exception:
             return {"v": 1, "known": False, "why": "error"}
@@ -1218,7 +1260,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-nobody",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return False
@@ -1258,7 +1300,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-emergency-password-not-here",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return False
@@ -1305,7 +1347,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-only-the-emergency-administrator",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return False
@@ -1341,12 +1383,12 @@ entries:
     attrs:
       name: workforce-code-try
       expression: |
-{% filter indent(8, true) %}
-{% include 'password-pause.py' %}
-{% include 'code-tries.py' %}
-{% endfilter %}
         # ---- the authentik part ----
         try:
+            from authentik.policies.expression.models import ExpressionPolicy as WfShared
+            wf_shared = dict()
+            exec(WfShared.objects.get(name="workforce-sign-in-code").expression, wf_shared)
+            globals().update((k, v) for k, v in wf_shared.items() if k[:3] in ("wf_", "WF_"))
             from datetime import datetime, timezone as tz
             from uuid import uuid4
             from django.db import connections, transaction
@@ -1384,7 +1426,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-code-try",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -1397,12 +1439,12 @@ entries:
     attrs:
       name: workforce-codes-paused
       expression: |
-{% filter indent(8, true) %}
-{% include 'password-pause.py' %}
-{% include 'code-tries.py' %}
-{% endfilter %}
         # ---- the authentik part ----
         try:
+            from authentik.policies.expression.models import ExpressionPolicy as WfShared
+            wf_shared = dict()
+            exec(WfShared.objects.get(name="workforce-sign-in-code").expression, wf_shared)
+            globals().update((k, v) for k, v in wf_shared.items() if k[:3] in ("wf_", "WF_"))
             from datetime import datetime, timezone as tz
             from django.db import connections, transaction
             from django.utils import timezone
@@ -1435,7 +1477,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-codes-paused",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -1532,7 +1574,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-password-seen",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -1564,7 +1606,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-password-replaced",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return True
@@ -1627,7 +1669,7 @@ entries:
         except Exception as wf_error:
             try:
                 ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="workforce-password-unchanged",
-                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))
+                                  error=type(wf_error).__name__)
             except Exception:
                 pass
             return False

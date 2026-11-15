@@ -99,6 +99,10 @@ STATUS_NAME = "workforce-sign-in-status"
 code = ExpressionPolicy.objects.filter(name="workforce-sign-in-status-code").values_list("expression", flat=True).first()
 if not code or "wf_ak_status_answer" not in code:
     raise SystemExit("the sign-in status code (workforce-sign-in-status-code) is missing: apply the Workforce blueprint first")
+# The status code loads the shared sign-in code by name when it runs (final review of the controller bundle, findings 1
+# and 5); without it every answer is an error, so a converge that can't find it stops here.
+if not ExpressionPolicy.objects.filter(name="workforce-sign-in-code", expression__contains="def wf_ak_status_answer(").exists():
+    raise SystemExit("the shared sign-in code (workforce-sign-in-code) is missing: apply the Workforce blueprint first")
 PropertyMapping.objects.filter(name=STATUS_NAME).exclude(pk=STATUS_PK).delete()
 mapping, _ = PropertyMapping.objects.update_or_create(pk=STATUS_PK, defaults={"name": STATUS_NAME, "expression": code})
 if type(PropertyMapping.objects.select_subclasses().get(pk=STATUS_PK)) is not PropertyMapping:

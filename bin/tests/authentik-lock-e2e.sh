@@ -72,7 +72,7 @@ WORK="$(mktemp -d)"
 NETS=("$P-front" "$P-back" "$P-data" "$P-untrusted")
 cleanup() {
   if [ "${E2E_KEEP:-}" = 1 ]; then echo "kept for debugging: $P-* (remove them by hand)"; return; fi
-  docker rm -f "$P-pg" "$P-server" "$P-worker" "$P-gateway" "$P-a" "$P-b" "$P-c" "$P-d" "$P-e" "$P-f" "$P-g" "$P-s" \
+  docker rm -f -v "$P-pg" "$P-server" "$P-worker" "$P-gateway" "$P-a" "$P-b" "$P-c" "$P-d" "$P-e" "$P-f" "$P-g" "$P-s" \
     "$P-h" "$P-i" "$P-j" "$P-k" >/dev/null 2>&1 || true
   for n in "${NETS[@]}"; do docker network rm "$n" >/dev/null 2>&1 || true; done
   rm -rf "$WORK"
@@ -194,6 +194,26 @@ echo "$(date +%T) applied again"
 case "$out" in *"Blueprint invalid"*) rc=9 ;; esac
 check "and again" "$rc" 0
 check "the old by-account lock is gone" "$(sql "select count(*) from authentik_policies_expression_expressionpolicy p join authentik_policies_policy b on b.policy_uuid = p.policy_ptr_id where b.name = 'workforce-too-many-tries-by-account'")" 0
+# Final review of the controller bundle, findings 1 and 5: authentik 2026.8.5 sends each policy's result (a pickled
+# PolicyResult, carrying its binding and so the policy's whole expression) down a pipe before anything reads it, and a
+# result over 64 KiB blocks the request's thread for good. Every binding of an expression policy, its result built as
+# authentik's PolicyProcess builds it (the policy loaded whole, three long messages), must pickle to 48 KiB or less.
+SIZES="$(akshell "
+import pickle
+from authentik.policies.expression.models import ExpressionPolicy
+from authentik.policies.models import PolicyBinding
+from authentik.policies.types import PolicyResult
+worst, n = (0, ''), 0
+for b in PolicyBinding.objects.filter(policy__in=ExpressionPolicy.objects.all()):
+    b.policy = ExpressionPolicy.objects.get(pk=b.policy_id)
+    r = PolicyResult(True, 'm' * 300, 'm' * 300, 'm' * 300)
+    r.source_binding = b
+    worst, n = max(worst, (len(pickle.dumps(r)), b.policy.name)), n + 1
+print('WORST', n, worst[0], worst[1])" | sed -n 's/^WORST //p')"
+echo "     bindings of expression policies, the largest pickled result: $SIZES"
+check "every expression policy's pickled result stays well under the 64 KiB pipe (48 KiB at most)" \
+  "$(printf '%s' "$SIZES" | awk '{print ($1 > 20 && $2 > 0 && $2 <= 48 * 1024)}')" 1
+check "and the shared code is bound nowhere" "$(sql "select count(*) from authentik_policies_policybinding b join authentik_policies_policy p on p.policy_uuid = b.policy_id where p.name = 'workforce-sign-in-code'")" 0
 
 # ---- people: three staff with an authenticator app (codes by email set up too), and others; the application's service account
 TOTP_KEY="$(openssl rand -hex 20)"; printf '%s' "$TOTP_KEY" > "$WORK/t/totp.key"
@@ -578,12 +598,15 @@ short-$(openssl rand -hex 4)
 $(uuid4)
 ")" REFUSED
 RESET_PW="reset-$(openssl rand -hex 12)"
-check "reset-admin.sh: OK" "$(reset_py "reset
-$RESET_PW
-$(uuid4)
-")" OK
+RESET_OUT="$(printf 'reset\n%s\n%s\n' "$RESET_PW" "$(uuid4)" | docker exec -i -w / "$P-server" python -c "$(cat "$WORK/reset-admin.py")" 2>&1 | grep -v '^{')"
+check "reset-admin.sh: OK" "$(printf '%s\n' "$RESET_OUT" | tail -1)" OK
 check "reset-admin.sh: every sign-in method removed, every session and token ended, password resets by email held" \
   "$(admin_left)" "LEFT 0 0 0 True"
+# Final review of the controller bundle, findings 2 and 6: the sign-in server itself makes no reset link while the hold
+# is set (the recovery flow's policy), and the script finds that and says so.
+check "reset-admin.sh: finds the hold enforced by this sign-in server" "$(printf '%s\n' "$RESET_OUT" | grep -c '^mail hold: enforced$')" 1
+check "while held, no reset link for admin (the recovery flow refuses it)" \
+  "$(fc d "$IN" api POST "/api/v3/core/users/$ADMIN_PK/recovery/" "$TOKEN" '{}' | j 'd["status"]')" 400
 check "reset-admin.sh: its recovery recorded" "$(sql "select count(*) from authentik_events_event where action = 'custom_workforce_admin_recovery' and (context->>'wf_removed')::jsonb <> '{}'")" 1
 check "reset-admin.sh --allow-reset-mail: the hold lifted" "$(reset_py "allow-mail
 $(uuid4)
@@ -592,6 +615,8 @@ check "reset-admin.sh --allow-reset-mail: again, nothing held" "$(reset_py "allo
 $(uuid4)
 ")" NOT_HELD
 check "reset-admin.sh --allow-reset-mail: admin's hold is gone" "$(admin_left)" "LEFT 0 0 0 False"
+check "and a reset link for admin can be made again" \
+  "$(fc d "$IN" api POST "/api/v3/core/users/$ADMIN_PK/recovery/" "$TOKEN" '{}' | j 'd["status"]')" 200
 check "reset-admin.sh: an unlock record is written for admin (contract R.7.4), by the server's clock" "$(sql "select count(*) from authentik_events_event where action = 'custom_workforce_password_unlock' and (context->>'wf_user_pk')::int = $ADMIN_PK and context->>'wf_at' like '20%Z'")" 1
 check "reset-admin.sh: no account carries the old unlock attribute" "$(sql "select count(*) from authentik_core_user where attributes->'workforce' ? 'password_unlocked_at'")" 0
 check "after reset-admin.sh, admin signs in from F" "$(fc f "$OUT" signin admin "$RESET_PW" | j 'd["result"]')" next

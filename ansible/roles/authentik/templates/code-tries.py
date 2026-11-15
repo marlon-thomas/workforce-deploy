@@ -5,7 +5,8 @@
 # An unlock in Workforce doesn't lift it (it lifts wrong passwords only); a new password doesn't either.
 #
 # workforce-app.yaml.j2 includes this file (after password-pause.py, whose WF_WINDOW, wf_held_until and
-# wf_code_request it uses) in the expression policies workforce-code-try and workforce-codes-paused. Plain Python;
+# wf_code_request it uses) in workforce-sign-in-code, which workforce-code-try and workforce-codes-paused load (final
+# review of the controller bundle, findings 1 and 5: the shared code is kept once). Plain Python;
 # bin/tests/password-pause-test.sh tests it with python3 alone. A Jinja include: never two braces, or a brace and a
 # percent or hash sign, side by side. Since 15 November 2026 a right code also completes a sign-in (wf_signs_in),
 # which the policy records as custom_workforce_signed_in (contract R.2, R.4).

@@ -266,7 +266,10 @@ server: a new password of 24 random characters, shown once; every other sign-in 
 recovery codes, security keys and passkeys, email, text-message, Duo and device methods); everything signed in as it
 ended (its sessions and any sign-in part way through, its tokens, links to outside sign-ins, OAuth and SAML grants);
 the pause on the name `admin` lifted by an unlock record; and password resets by email held, so whoever has the lost
-mailbox can't reset the account again.
+mailbox can't reset the account again. The sign-in server enforces that hold itself: while it is set, it makes no
+reset link for `admin`, whatever Workforce asks. `./bin/reset-admin.sh` checks that the installed sign-in set-up does
+this and says plainly if it doesn't (a set-up older than the script: bring it up to date with `./bin/update.sh`, and
+until then change `admin`'s email address in Workforce to one only your organisation reads).
 
 A recovery lifts the pause on the **name** `admin` only. A hold on a whole **connection or network** after many wrong
 passwords for any name is not lifted: it ends by itself 15 minutes after the last of those tries, or sign in from

@@ -307,8 +307,8 @@ for e in entries:
         continue
     key = (re.search(r"\n    id: ([\w-]+)\n", "\n" + e) or [None, None])[1]
     name = re.search(r"\n      name: ([\w-]+)\n", e).group(1)
-    if key == "wf-sign-in-status-code":
-        continue   # bound nowhere (checked above), with its own try/except
+    if key in ("wf-sign-in-status-code", "wf-sign-in-code"):
+        continue   # bound nowhere (checked above and below); the status code has its own try/except, the shared code none
     if key in CONSTANT:
         check(key + ": a constant refusal", e.rstrip().endswith("expression: |\n        return False"))
         continue
@@ -329,10 +329,68 @@ for e in entries:
     check(name + ": whose except answers the refusing value (%s), whatever its log line does" % v,
           lines[-6:] == ["            try:",
                          '                ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="%s",' % name,
-                         '                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))',
+                         # Final review, finding 7: the kind of error only, never its text (which may quote values).
+                         '                                  error=type(wf_error).__name__)',
                          "            except Exception:", "                pass", "            return %s" % v])
     guarded += 1
 check("every guarded policy counted (23)", guarded == 23)
+check("no guard logs an error's text (finding 7)", "str(wf_error)" not in text)
+
+# Final review of the controller bundle, findings 1 and 5: authentik 2026.8.5 runs each policy of a binding in the
+# request's own thread and sends its result (a pickled PolicyResult, which carries the binding and with it the policy's
+# whole expression) down a pipe before anything reads it, so a result over 64 KiB blocks that thread for good: a hung
+# sign-in, and enough of them leave authentik answering nobody. Every expression is measured here as Ansible's Jinja
+# renders it (its includes put in); each must stay at 32 KiB or less, leaving the rest of the pipe for the binding, the
+# messages and the log lines (about 1.5 to 3 KB measured live). authentik-lock-e2e.sh measures the pickled results.
+import os
+TEMPLATES = os.path.dirname(sys.argv[1])
+def rendered_expression(e):
+    """The expression of this entry as authentik holds it (YAML's indent removed, the includes put in)."""
+    out = []
+    for l in e.split("expression: |\n", 1)[1].split("\n"):
+        inc = re.match(r"\{% include '([\w.-]+)' %\}$", l)
+        if inc:
+            out.extend(open(os.path.join(TEMPLATES, inc.group(1)), encoding="utf-8").read().rstrip("\n").split("\n"))
+        elif l.startswith("{%"):
+            continue
+        elif l.startswith("        ") or l == "":
+            out.append(l[8:])
+        else:
+            break
+    return "\n".join(out).rstrip("\n") + "\n"
+LIMIT = 32 * 1024
+SHARED = "wf-sign-in-code"
+sizes = {}
+for e in entries:
+    if "authentik_policies_expression.expressionpolicy" in e and "state: absent" not in e:
+        key = (re.search(r"\n    id: ([\w-]+)\n", "\n" + e) or [None, None])[1] \
+            or re.search(r"\n      name: ([\w-]+)\n", e).group(1)
+        sizes[key] = len(rendered_expression(e).encode("utf-8"))
+print("expression sizes (bytes, largest first):", sorted(sizes.items(), key=lambda kv: -kv[1])[:4])
+for key, size in sorted(sizes.items()):
+    if key != SHARED:
+        check("%s: its expression is %d bytes, at most %d (the 64 KiB pipe, findings 1 and 5)" % (key, size, LIMIT), size <= LIMIT)
+# The shared code is kept once, in a policy that is never bound (so never run as a policy, and never sent down a
+# pipe): every policy that needs it loads it by name, inside its guard (an error there refuses like any other).
+shared = ids.get(SHARED, "")
+check("the shared sign-in code is kept once, in workforce-sign-in-code", "name: workforce-sign-in-code\n" in shared
+      and "execution_logging: false" in shared and "{% include 'password-pause.py' %}\n{% include 'code-tries.py' %}\n" in shared
+      and "# ---- the authentik part" not in shared)
+check("which is bound nowhere", not any("policybinding" in e and SHARED in e for e in entries)
+      and not any(SHARED in e for e in entries if "validation_policies:" in e))
+check("and no other entry includes password-pause.py or code-tries.py", [k for k, e in ids.items() if k != SHARED
+      and ("include 'password-pause.py'" in e or "include 'code-tries.py'" in e)] == [])
+LOAD = ('''            from authentik.policies.expression.models import ExpressionPolicy as WfShared
+            wf_shared = dict()
+            exec(WfShared.objects.get(name="workforce-sign-in-code").expression, wf_shared)
+            globals().update((k, v) for k, v in wf_shared.items() if k[:3] in ("wf_", "WF_"))
+''')
+loaders = sorted(k for k, e in ids.items() if LOAD in e)
+check("the policies that use it load it, as the first thing inside their guard: %s" % loaders,
+      loaders == sorted(["wf-password-throttled", "wf-network-tightened", "wf-password-paused", "wf-password-may-try",
+                         "wf-password-right", "wf-password-not-checked-throttled", "wf-password-not-checked-network",
+                         "wf-client-address-policy", "wf-sign-in-status-code", "wf-code-try", "wf-codes-paused"])
+      and all(("        try:\n" + LOAD) in re.sub(r"\n            # [^\n]*", "", ids[k]) for k in loaders))
 
 print("blueprint self-test: %d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
@@ -361,6 +419,15 @@ check "all of it in one transaction, under issue 462's lock on the account" \
   "$(grep -c 'with transaction.atomic():' "$RESET")/$(grep -c 'pg_advisory_xact_lock(%s, %s)", \[WF_LOCK_ACCOUNT' "$RESET")" 2/2
 check "and holds password resets by email until --allow-reset-mail" \
   "$(grep -c 'wf\["recovery_mail_held"\] = {"recovery": rid' "$RESET")/$(grep -c -- '--allow-reset-mail)\|"--allow-reset-mail" \]' "$RESET")" 1/1
+# Final review of the controller bundle, findings 2 and 6: the hold is enforced by the sign-in server itself (the recovery
+# flow's policy refuses a link while it is set), and the script says the hold is in force only when it finds that.
+BP="$REPO/ansible/roles/authentik/templates/workforce-app.yaml.j2"
+check "the recovery flow's policy refuses a reset link while resets by email are held" \
+  "$(awk '/name: workforce-recovery-staff-only$/{on=1} on && /if isinstance\(wf, dict\) and wf.get\("recovery_mail_held"\) is not None:/{print "yes"; exit}' "$BP")" yes
+check "reset-admin.sh looks for exactly that check on the recovery flow" \
+  "$(grep -c "expression__contains='wf.get(\"recovery_mail_held\") is not None')" "$RESET")" 1
+check "and says the hold is in force only when it finds it" \
+  "$(grep -c "^  HOLD=\"Password resets by email$" "$RESET")/$(grep -c "grep -qx 'mail hold: enforced'" "$RESET")" 2/1
 check "the new password: on stdin only, never on disk, in the environment or on a command line (issue 487)" \
   "$(grep -c 'secrets/\|WF_NEW_PW\| -e ' "$RESET")/$(grep -c "printf 'reset\\\\n%s\\\\n%s\\\\n' \"\$NEW_PW\" \"\$(uuid)\" | run_py" "$RESET")" 0/1
 # Workforce issue 462 (contract R.8): the application's service account gets no event access, and loses any it had.
@@ -372,7 +439,7 @@ check "the status interface: object permissions on that one mapping only" \
   "$(grep -c 'role.assign_perms(\["authentik_core.view_propertymapping", "authentik_core.add_propertymapping"\], mapping)' "$INVITE")" 1
 check "and the old unlock attribute is removed from every account" "$(grep -c 'wf.pop("password_unlocked_at", None)' "$INVITE")" 1
 # Second review of the controller bundle, finding 4: the lock's policy reads authentik's own models, so a new authentik
-# pin needs bin/tests/authentik-policies-e2e.sh run against it (it also runs reset-admin.sh's program there).
+# pin needs bin/tests/authentik-policies-e2e.sh run against it (reset-admin.sh's program: authentik-lock-e2e.sh, section 9).
 VERIFIED="$(sed -n 's/^VERIFIED_AUTHENTIK=//p' "$HERE/authentik-policies-e2e.sh")"
 check "authentik-policies-e2e.sh was run on the pinned authentik (set VERIFIED_AUTHENTIK once it passes)" \
   "$(grep -c "image: ghcr.io/goauthentik/server:${VERIFIED}@sha256:" "$REPO/compose.yaml")" 2

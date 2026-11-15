@@ -113,8 +113,9 @@ this server. If the recovery mailbox is lost too, recover the account on the ser
 `./bin/reset-admin.sh`: run it bare to get a one-time verification phrase
 (`care-angels-XXXXXX`), then `./bin/reset-admin.sh --confirm <phrase>`. Either sets a
 fresh password (shown once, written to no file), removes every other sign-in method,
-ends the account's sessions and tokens and holds password resets by email
-(the controller page, or `./bin/reset-admin.sh --allow-reset-mail`, lifts that). The two-step
+ends the account's sessions and tokens and holds password resets by email, which the
+sign-in server itself enforces (the controller page, or
+`./bin/reset-admin.sh --allow-reset-mail`, lifts that). The two-step
 phrase gate exists because the script is also the support procedure for
 customer appliances — identity is verified on the call before the phrase is
 accepted.
