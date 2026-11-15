@@ -273,6 +273,11 @@ client_address_read() {
 #   WFALERTS <connection-spread> <account-spread> <throttled> <workplace-throttled> <network-tightened>
 #                                              alerts of the last day (contract 3.6, R.3; the last two since
 #                                              15 November 2026)
+#   WFCRED <ok|missing|reason,…>               Workforce's own account at the sign-in server (workforce-invites) is
+#                                              still what invite-service-account.py made: no superuser, no
+#                                              authentik_events.view_event (globally or on any object), no group but
+#                                              its own (review of 15 November 2026, finding 5: its change_user lets it
+#                                              join a group, so this is checked on every run, not only on update)
 #   WFCONN <key> <in|try> <accounts> <days>    a connection sign-ins (in) or password tries (try) came from: every
 #                                              one outside the public internet (this server's own networks are
 #                                              there; at most 500), then the public sign-in ones, most accounts
@@ -329,6 +334,11 @@ print("WFFWD", len(fwd), ",".join(sorted(set(c.replace(" ", "") for cs in fwd.va
 alerts = Event.objects.filter(created__gte=t - timedelta(days=1), action="custom_workforce_password_alert")
 kinds = [str((c or {}).get("wf_kind")) for c in alerts.values_list("context", flat=True)]
 print("WFALERTS", kinds.count("connection-spread"), kinds.count("account-spread"), kinds.count("throttled"), kinds.count("workplace-throttled"), kinds.count("network-tightened"))
+from authentik.core.models import User
+from guardian.models import RoleObjectPermission
+svc = User.objects.filter(username="workforce-invites").first()
+bad = [] if svc is None else [w for w, on in (("superuser", svc.is_superuser), ("view_event", svc.has_perm("authentik_events.view_event") or RoleObjectPermission.objects.filter(role__in=svc.all_roles(), permission__codename="view_event").exists()), ("groups", svc.ak_groups.exclude(name="workforce-invites").exists())) if on]
+print("WFCRED", "missing" if svc is None else ",".join(bad) or "ok")
 inside = sorted((c, k, len(w), len(d)) for (c, k), (w, d) in seen.items() if not public(c))
 outside = sorted(((len(w), c, len(d)) for (c, k), (w, d) in seen.items() if k == "in" and public(c)), key=lambda x: (-x[0], x[1]))
 for c, k, n, d in inside[:500]:
@@ -338,10 +348,12 @@ for n, c, d in outside[:500]:
 
 # client_addresses_confirmed <key> — the operator confirmed this address as an office's own connection
 # (CLIENT_ADDRESSES_CONFIRMED: addresses, connection keys or ranges, separated by commas or spaces). Used by the
-# readiness check's concentration and forwarding rules, and (since 15 November 2026, contract R.4) by the sign-in
-# server, where it makes a source a workplace one (a higher, still bounded, cap: SIGN_IN_WORKPLACE_SOURCE_LIMIT) and
-# proven (never refused by its tightened /48); never by the gateway, and it never lets anyone in. A range confirms
-# every connection inside it (the TEST appliance confirms its tailnet, 100.64.0.0/10: environments/test.env).
+# readiness check's concentration and forwarding rules, where a range confirms every connection inside it (the TEST
+# appliance confirms its tailnet, 100.64.0.0/10: environments/test.env). Since 15 November 2026 (contract R.4) the
+# sign-in server reads it too, more narrowly (confirmed_limit_counts): an entry no wider than one connection's
+# neighbourhood (an IPv4 /24, an IPv6 /64) makes the connections in it workplace ones (a higher, still bounded, cap:
+# SIGN_IN_WORKPLACE_SOURCE_LIMIT); an IPv6 /48 to /63 makes its /48 a workplace network; anything wider raises no
+# limit. Never read by the gateway, and it never lets anyone in.
 client_address_confirmed() {
   local c list="${CLIENT_ADDRESSES_CONFIRMED:-}"
   for c in ${list//,/ }; do
@@ -358,12 +370,34 @@ client_address_confirmed() {
   return 1
 }
 
+# confirmed_limit_counts — what CLIENT_ADDRESSES_CONFIRMED does for the sign-in limits, as the sign-in server reads it
+# (password-pause.py's wf_limits; review of 15 November 2026, findings 3 and 17): "<sources> <networks> <readiness
+# only>": entries making workplace connections (IPv4 /24 or narrower, IPv6 /64 or narrower), entries making an IPv6
+# /48 a workplace network (/48 to /63), and wider ones, which confirm the readiness check only. Unreadable entries
+# aren't counted (sign_in_limits_problem names them).
+confirmed_limit_counts() {
+  local c b list="${CLIENT_ADDRESSES_CONFIRMED:-}" src=0 net=0 wide=0
+  for c in ${list//,/ }; do
+    c="${c#[}"; c="${c/]/}"
+    case "$c" in
+      *:*) b="$(cidr6_split "$c" | cut -d' ' -f2)" || continue
+           [ -n "$b" ] || continue
+           if [ "$b" -ge 64 ]; then src=$((src+1)); elif [ "$b" -ge 48 ]; then net=$((net+1)); else wide=$((wide+1)); fi ;;
+      *)   b="$(cidr4_split "$c" | cut -d' ' -f2)" || continue
+           [ -n "$b" ] || continue
+           if [ "$b" -ge 24 ]; then src=$((src+1)); else wide=$((wide+1)); fi ;;
+    esac
+  done
+  echo "$src $net $wide"
+}
+
 # sign_in_limits_problem — why the sign-in limits' settings (Workforce issue 462, contract R.3 and R.4) can't be used,
 # or nothing. install.sh and update.sh refuse them; doctor.sh's "sign-in limits" row warns, because the sign-in
 # server would use its defaults instead (its policy checks the same: password-pause.py's wf_limits).
 #   SIGN_IN_WORKPLACE_SOURCE_LIMIT   a workplace source's cap, a whole number from 20 to 100 (empty: 50)
 #   SIGN_IN_WORKPLACE_NETWORK_LIMIT  a workplace /48's tightening, from 100 to 1000 (empty: 300), above the source's
 #   CLIENT_ADDRESSES_CONFIRMED       addresses, IPv6 /64 keys or ranges; none wider than an IPv4 /8 or an IPv6 /32
+#                                    (only narrower ones raise a limit: confirmed_limit_counts)
 sign_in_limits_problem() {
   local s="${SIGN_IN_WORKPLACE_SOURCE_LIMIT:-}" n="${SIGN_IN_WORKPLACE_NETWORK_LIMIT:-}" c list="${CLIENT_ADDRESSES_CONFIRMED:-}" b
   s="${s// /}"; n="${n// /}"

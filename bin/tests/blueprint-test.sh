@@ -46,6 +46,15 @@ check("the lock is before the password", lock and 10 < order(lock) < 20)
 codes_lock = binding("default-authentication-flow", "wf-too-many-tries-codes")
 check("and again before the code step", codes_lock and order(codes_lock) < 30)
 
+# Workforce issue 462 review of 15 November 2026, finding 1: the password stage checks a password with exactly one
+# hash for a real name and for one nobody has. authentik 2026.8.5's TokenBackend hashes again for an unknown name only
+# (an oracle for which names exist), so it is never among the backends.
+pw_stage = next((e for e in entries if "authentik_stages_password.passwordstage" in e
+                 and "name: default-authentication-password" in e), "")
+check("the password stage is restated", "authentik.core.auth.InbuiltBackend" in pw_stage)
+check("without TokenBackend (an extra hash for unknown names only)",
+      "authentik.core.auth.TokenBackend" not in pw_stage)
+
 # Finding 7: the emergency administrator's skip decides alone (authentik's default policy is also bound there).
 step = binding("default-authentication-flow", "default-authentication-mfa-validation")
 check("the code step's policies must all pass", "policy_engine_mode: all" in step)
@@ -134,11 +143,13 @@ for key in ("wf-password-paused", "wf-password-try", "wf-password-right", "wf-co
           or "wf_ak_decide(request)" in body)
 try_policy = next((e for e in entries if "id: wf-password-try\n" in e), "")
 check("a try is recorded only for a request the stage checks", "wf_password_request(http.method, http.data)" in try_policy)
-check("under the try's locks (the connection's, its /48's, the pair's)", "wf_ak_lock(cursor, *wf_ak_try_locks(account, conn))" in try_policy)
+check("under the try's locks (the connection's, its /48's unless proven, the pair's)",
+      "wf_ak_lock(cursor, *wf_ak_try_locks(account, conn, proven))" in try_policy
+      and "proven = wf_ak_proven_now(conn, cfg, timezone.now().timestamp())" in try_policy)
 pp = open(sys.argv[1].replace("workforce-app.yaml.j2", "password-pause.py"), encoding="utf-8").read()
 check("the /48's lock, between the connection's and the pair's (review finding 4)",
       'return (WF_LOCK_CONN, "conn:" + conn), net, (WF_LOCK_PAIR, "pair:" + account + "|" + conn)' in pp
-      and 'net = (WF_LOCK_NET, "net:" + wf_network_key(conn)) if ":" in conn else None' in pp)
+      and 'net = (WF_LOCK_NET, "net:" + wf_network_key(conn)) if ":" in conn and not proven else None' in pp)
 check("in one transaction", "transaction.atomic" in try_policy)
 ident = next((e for e in entries if "name: default-authentication-identification }" in e), "")
 check("a name nobody has goes on like a real one", "pretend_user_exists: true" in ident)

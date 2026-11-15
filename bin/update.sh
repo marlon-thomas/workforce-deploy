@@ -41,6 +41,12 @@ GTP_PROBLEM="$(gateway_proxies_problem)"
 # And the sign-in limits' settings (Workforce issue 462, contract R.3 and R.4).
 SIL_PROBLEM="$(sign_in_limits_problem)"
 [ -z "$SIL_PROBLEM" ] || { echo "$SIL_PROBLEM (RUNBOOK §7a). Nothing was changed."; exit 1; }
+# Review of 15 November 2026, finding 17: CLIENT_ADDRESSES_CONFIRMED was the readiness check's only until this release;
+# the sign-in server now gives the narrow entries a workplace's higher cap. Said on every update, so nobody misses it.
+read -r SIL_SRC SIL_NET SIL_WIDE <<< "$(confirmed_limit_counts)"
+if [ $((SIL_SRC + SIL_NET)) -gt 0 ]; then
+  echo "     CLIENT_ADDRESSES_CONFIRMED also sets the sign-in limits: ${SIL_SRC} entr(ies) are workplace connections (${SIGN_IN_WORKPLACE_SOURCE_LIMIT:-50} wrong passwords in 15 minutes, not 10), ${SIL_NET} workplace IPv6 networks. Remove any that isn't your own office (RUNBOOK §7a)."
+fi
 # The TEST appliance confirms its testers' tailnet for the readiness check (environments/test.env; review finding
 # 13): a box installed before that has no line for it, and update.sh never re-renders .env. Added once; a line the
 # operator wrote, even an empty one, is theirs.

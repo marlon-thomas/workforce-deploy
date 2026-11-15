@@ -438,7 +438,7 @@ fi
 GTP_LIST="${GATEWAY_TRUSTED_PROXIES:-}"; for n in ${GTP_LIST//,/ }; do OWN_SET+=("$n"); done
 CA_ASKED=0; SIGNIN_ALERTS=""
 if docker compose ps --status running -q authentik-server 2>/dev/null | grep -q .; then
-  CA_OUT="$(docker compose exec -T authentik-server ak shell -c "$CLIENT_ADDRESS_AK" 2>/dev/null | grep -E '^WF(CONN|SIGNINS|INSUM|FWD|ALERTS) ' | head -n 2000)" || CA_OUT=""
+  CA_OUT="$(docker compose exec -T authentik-server ak shell -c "$CLIENT_ADDRESS_AK" 2>/dev/null | grep -E '^WF(CONN|SIGNINS|INSUM|FWD|ALERTS|CRED) ' | head -n 2000)" || CA_OUT=""
   if printf '%s\n' "$CA_OUT" | grep -q '^WFSIGNINS '; then
     CA_ASKED=1
     client_address_signins "$CA_OUT"
@@ -479,13 +479,26 @@ if [ -n "$SIGNIN_ALERTS" ]; then
     fi
   fi
 fi
+# Workforce's own account at the sign-in server (issue 462 review of 15 November 2026, finding 5): its token may change
+# accounts, its own groups included, so a role an operator adds later could give it every event (sign-in codes and
+# reset links among them). invite-service-account.py refuses that on every update; this row looks on every run.
+SIGNIN_CRED="$(printf '%s\n' "${CA_OUT:-}" | sed -n 's/^WFCRED //p' | tail -n 1)"
+case "$SIGNIN_CRED" in
+  "") ;;
+  ok) row "sign-in server account" ok "Workforce's account there reads no events and is in no other group" ;;
+  missing) row "sign-in server account" warn "Workforce's account at the sign-in server isn't there yet: run ./bin/update.sh <running version>" ;;
+  *) oprow "sign-in server account" fail "Workforce's account at the sign-in server has more than it needs (${SIGNIN_CRED//[^a-z_,]/}): it could read sign-in codes and reset links. Take it out of that group or role in authentik, then run ./bin/update.sh <running version> (RUNBOOK §7a)" ;;
+esac
 # The sign-in limits' settings (Workforce issue 462, contract R.3 and R.4): a value the sign-in server can't use is
 # replaced there by its default (50, 300, or the entry ignored), so say which.
 SIL_PROBLEM="$(sign_in_limits_problem)"
 if [ -n "$SIL_PROBLEM" ]; then
   row "sign-in limits" warn "${SIL_PROBLEM}; the sign-in server uses its default instead (RUNBOOK §7a)"
 else
-  row "sign-in limits" ok "workplace connections ${SIGN_IN_WORKPLACE_SOURCE_LIMIT:-50}, workplace networks ${SIGN_IN_WORKPLACE_NETWORK_LIMIT:-300} wrong passwords in 15 minutes (ordinary: 10 and 30)"
+  read -r SIL_SRC SIL_NET SIL_WIDE <<< "$(confirmed_limit_counts)"
+  SIL_CONF=""
+  [ $((SIL_SRC + SIL_NET + SIL_WIDE)) -eq 0 ] || SIL_CONF="; CLIENT_ADDRESSES_CONFIRMED: ${SIL_SRC} entr(ies) make workplace connections, ${SIL_NET} workplace networks, ${SIL_WIDE} too wide to raise a limit (the readiness check only)"
+  row "sign-in limits" ok "workplace connections ${SIGN_IN_WORKPLACE_SOURCE_LIMIT:-50}, workplace networks ${SIGN_IN_WORKPLACE_NETWORK_LIMIT:-300} wrong passwords in 15 minutes (ordinary: 10 and 30)${SIL_CONF}"
 fi
 
 # --- test-only things on a real install (owner, 8 November 2026): the test inbox and mailpit

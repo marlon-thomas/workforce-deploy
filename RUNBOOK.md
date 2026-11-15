@@ -177,15 +177,24 @@ changes nothing, and requests sent at the same moment are counted one at a time.
   A **workplace connection** has a higher limit, never none: `SIGN_IN_WORKPLACE_SOURCE_LIMIT` wrong passwords in 15
   minutes (50 unless set; 20 to 100). A connection is a workplace one only if you list it in
   `CLIENT_ADDRESSES_CONFIRMED` (§7a), or if three or more different staff **completed** a sign-in there (the right
-  password and the right code) in the last 30 days. Nobody can choose or claim it: nothing the browser sends is read,
-  a forged forwarding header gets the forger's own address, and one person's sign-ins count once.
+  password and the right code) in the last 30 days. No visitor can choose or claim it: nothing the browser sends is
+  read, a forged forwarding header gets the forger's own address, and one person's sign-ins count once. But someone
+  who holds three accounts (three staff records whose email they control, say) can make their own connection a
+  workplace one by completing a sign-in with each; the owner is asked whether to keep this learned rule or rely on
+  confirmed addresses only (Workforce issue 462, question Q3).
 - **The network's tightening (IPv6).** Thirty wrong passwords from one /48 within 15 minutes (for a workplace
   network, `SIGN_IN_WORKPLACE_NETWORK_LIMIT`, 300 unless set; 100 to 1000; it must be above the connection limit)
   **tighten** that /48, never hold it all: connections in it where someone completed a sign-in in the last 30 days
   carry on as normal; connections nobody has signed in from (including any new /64, which is how someone rotating
-  through /64s is stopped) and connections with five or more wrong and no right password are refused ("Too many
-  wrong passwords from this network…"). It ends 15 minutes after the newest counted wrong password. One connection
-  can't cause it alone (its own limit is lower).
+  through /64s is stopped) and connections with five or more wrong passwords in their own 15 minutes are refused
+  ("Too many wrong passwords from this network…"; a right password typed there excuses only a connection you
+  confirmed). It ends 15 minutes after the newest counted wrong password. One connection can't cause it alone (its
+  own limit is lower). **Who is caught by it although they did nothing:** anyone on a /64 of that /48 nobody has
+  completed a sign-in from in 30 days, typically a phone on mobile data whose /64 changes, or a new starter's home.
+  They are refused for as long as the tightening lasts, and someone who keeps sending wrong passwords from fresh /64s
+  can keep it going in 15-minute renewals; the way out is another connection (the workplace Wi-Fi, a home
+  broadband), and once they have completed a sign-in from a /64 it carries on there. Whether this is acceptable is the
+  owner's question Q2 (Workforce issue 462).
 - **Codes** keep their own count: five wrong codes for an account within 15 minutes, then 15 minutes' wait from the
   fifth ("That code was wrong too many times…"). Only someone with the password reaches the code step.
 
@@ -193,7 +202,9 @@ changes nothing, and requests sent at the same moment are counted one at a time.
 connection, so one person there **can** affect the others: once ten wrong passwords (fifty at a workplace
 connection) are counted from it in 15 minutes, nobody can start a password sign-in from it until 15 minutes after
 the one that reached the limit. People already signed in carry on; every other connection, and the same people
-elsewhere, are unaffected. The way out: another connection at once (mobile data, home), or wait. While someone there
+elsewhere, are unaffected. The way out: another connection at once (mobile data, home), or wait. Waiting helps only
+against someone who stops: a program that sends its ten wrong passwords the moment a hold ends re-holds the
+connection within a second, so colleagues there practically can't sign in from it at all. While someone there
 keeps sending that many wrong passwords every 15 minutes, the connection stays held for as long as they keep it up;
 each hold is an alert (Today in Workforce within 5 minutes, and this server's health email), naming the connection
 and the times, so the office's IT can find the device. Nobody, a manager or you, can lift a connection's hold early
@@ -201,7 +212,8 @@ in this release (an unlock would lift it for the attacker too).
 
 **What lifts a pause:** time; a new password ("Forgot your password?" never skips the code); **Unlock sign-in** on
 the person's record in Workforce (a registered manager or director; a data administrator if the organisation
-switched it on), which lets them try again from every connection and changes nothing else; for `admin`,
+switched it on), which lifts their name's pause on every connection and changes nothing else (if their connection
+or its network is held, they are still refused there until that ends: use another connection); for `admin`,
 `./bin/reset-admin.sh`, which sets a new password and lifts its pause the same way. An unlock is recorded by the
 sign-in server itself, with its own clock, and wrong passwords **after** it count again, so an old unlock can't
 clear a later pause. Nothing lifts a connection's hold, a network's tightening or the codes' wait but time. Spread
@@ -328,15 +340,20 @@ sign-in server takes `X-Forwarded-For` only from the stack's own private network
 
 **Your offices.** When most sign-ins come through one or two internet addresses, that looks exactly like a proxy
 nobody named, so the check asks you to say which it is. If they are your offices' own connections, list them in
-`CLIENT_ADDRESSES_CONFIRMED` in `.env`, separated by commas with no spaces, or the whole value in single quotes
-(an IPv6 connection as the check names it, e.g. `2001:db8:1:2::/64`; a range such as `203.0.113.0/29` confirms
-every address in it; nothing wider than an IPv4 /8 or an IPv6 /32). Since 15 November 2026 the sign-in server reads
-it too: each confirmed connection is a **workplace connection** (§6: 50 wrong passwords in 15 minutes before it is
-held, instead of 10, or `SIGN_IN_WORKPLACE_SOURCE_LIMIT`), and a tightened IPv6 network never refuses it. It never
-lets anyone in or skips a limit. Change these settings in `.env`, then `./bin/update.sh <running version>`, which
-refuses a value out of range. The TEST appliance confirms its tailnet (`100.64.0.0/10`, `environments/test.env`),
-so testers signing in as several people from one device don't turn the row red; on an existing TEST box,
-`./bin/update.sh` adds it. (The appliance controller's settings don't offer these yet: a separate issue.)
+`CLIENT_ADDRESSES_CONFIRMED` in `.env`, the whole value in single quotes, separated by spaces (commas work too; the
+controller's "Sign-in addresses" card writes spaces): an IPv6 connection as the check names it, e.g.
+`2001:db8:1:2::/64`; a range such as `203.0.113.0/29` confirms every address in it for the check; nothing wider than
+an IPv4 /8 or an IPv6 /32. Since 15 November 2026 the sign-in server reads it too, more narrowly, and only your own
+offices belong here: an IPv4 address or range of a /24 or narrower, or an IPv6 address or /64, is a **workplace
+connection** (§6: 50 wrong passwords in 15 minutes before it is held, instead of 10, or
+`SIGN_IN_WORKPLACE_SOURCE_LIMIT`), and a right password typed there excuses it in a tightened network; an IPv6 range
+from a /48 to a /63 makes its /48 a **workplace network** (the higher network limit) but none of its /64s a workplace
+connection; anything wider confirms the check only and raises no limit (a provider's whole range would otherwise give
+everyone in it the higher limit). `update.sh` says how many entries set the limits, and the "sign-in limits" row
+lists them. It never lets anyone in or skips a limit. Change these settings in `.env`, then `./bin/update.sh <running
+version>`, which refuses a value out of range. The TEST appliance confirms its tailnet (`100.64.0.0/10`,
+`environments/test.env`) for the check only, so testers signing in as several people from one device don't turn the
+row red, while each device keeps the ordinary limits; on an existing TEST box, `./bin/update.sh` adds it.
 
 **The check** (`./bin/doctor.sh`, row "client addresses"; Workforce's Setup shows it as "Sign-in limits see each
 person's own connection", and only OK is ready):
@@ -471,7 +488,7 @@ update, so neither is failed or rolled back by it); Workforce's Setup treats any
 from many places, connections held, workplace connections held, IPv6 networks tightened): a WARN, never a lock, which
 this email carries to you; Workforce shows each organisation its own on Today. "sign-in limits" warns when
 `SIGN_IN_WORKPLACE_SOURCE_LIMIT`, `SIGN_IN_WORKPLACE_NETWORK_LIMIT` or `CLIENT_ADDRESSES_CONFIRMED` holds a value the
-sign-in server can't use (it then uses its default).
+sign-in server can't use (it then uses its default), and otherwise says how many confirmed entries set the limits.
 
 **What it cannot do.** A server that is off, or has lost its network, cannot send email about
 it. That is what the outside uptime check (§7c) is for.

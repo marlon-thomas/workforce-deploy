@@ -20,16 +20,19 @@
 #     shifting the records back); every spelling counts as authentik's lookup finds it;
 #   - L1 (owner's instruction B): a colleague completes a sign-in (password and code) on the same IPv4 address and the
 #     same IPv6 /64 while someone attacks below the cap; at the cap they are refused, sign in at once elsewhere, and
-#     sign in on the same source 15 minutes after the cap while the attack goes on; a workplace source holds at 50,
+#     sign in on the same source 15 minutes after the cap while a paced attack goes on, but not while an attacker
+#     re-arms the moment it ends (review finding 10: only another connection helps then); a workplace source holds at 50,
 #     not 49 (a learned workplace: three people's completed sign-ins), and a confirmed one isn't held at 10;
 #   - L2 (decision 2): five as a username and five as its email, then the source's cap of 10 for every name; an
-#     unknown name and email get the same answers, byte for byte (the typed name aside), in about the same time;
+#     unknown name and email get the same answers, byte for byte (the typed name aside), and the password step's
+#     median time over seven samples is within 25% of a real name's (review of 15 November 2026, findings 1, 14);
 #   - L3 (decision 1): each try a new TCP connection, cookie jar and flow, through the gateway: the 11th is refused;
 #     25 different names at one moment from one source record exactly 10;
 #   - L4 (decision 1, instruction C): in a large workplace /48 one source is held at its cap and nobody else is; 300
 #     tries from rotating /64s tighten it: a never-seen /64 is refused with the network's words, staff on proven /64s
-#     carry on, a proven /64 with five wrong and no right is refused, and it lifts 15 minutes after the newest try; an
-#     ordinary /48 tightens at 30;
+#     carry on, a proven /64 with five wrong is refused (a right password excuses only a confirmed source: review
+#     finding 2), staff on proven /64s are never refused while the rotation is being counted (findings 4 and 15), and
+#     it lifts 15 minutes after the newest try; an ordinary /48 tightens at 30;
 #   - L5 (instruction D): with the application's real token, generic account updates (attributes, the password change
 #     date) change neither the sign-in decision nor the status; the unlock refuses a stale time, a reused id, another
 #     person's id, the emergency administrator and a service account; a voided id never applies; an unlock at T
@@ -37,7 +40,8 @@
 #   - L6: the status interface answers the application's token only (not anonymous, not a staff token, not a
 #     superuser); that token can't test, read or change anything else; no answer carries a code, a link or an email;
 #   - L7 (decision 3, instruction E): no authentik_events.view_event, on a fresh install and after an upgrade from a
-#     build that granted it (ab1d474's script: the grant is shown working, then revoked, objects included);
+#     build that granted it (ab1d474's script: the grant is shown working, then revoked, objects included); the
+#     application's token joining a group with it is seen by doctor.sh's program (review finding 5);
 #   - L8: the status interface broken, then deleted: the sign-in decisions don't change;
 #   - wrong codes have their own count, by account; the emergency administrator's password rule and its recovery.
 # Needs Docker (pulls the pinned images) and python3 with jinja2 (Ansible's). Fifteen to forty-five minutes (the blueprint's
@@ -578,10 +582,28 @@ check "L2: an unknown username's answers are a real one's, byte for byte (the ty
 has "L2: (the avatar is drawn from the typed name, not the account)" "$(norm "$T_REAL" kim)" "<AVATAR OF NAME>"
 M_REAL="$(fc s "$IN" trace --headers "$(xff 192.0.2.164)" kim@example.org wrong-x)"; M_UNK="$(fc s "$IN" trace --headers "$(xff 192.0.2.165)" kix@example.org wrong-x)"
 check "L2: an unknown email's are a real email's" "$(norm "$M_UNK" kix@example.org)" "$(norm "$M_REAL" kim@example.org)"
-TIMES="$(secs "$T_REAL") $(secs "$T_UNK") $(secs "$M_REAL") $(secs "$M_UNK")"
-echo "     L2 password step, seconds (real name, unknown name, real email, unknown email): $TIMES"
-check "L2: the same timing class (each within a factor of 3 of the others, all under 10 s)" \
-  "$(python3 -c 'import sys; t=[float(x) for x in sys.argv[1:]]; print(max(t) < 10 and max(t) <= 3 * min(t))' $TIMES)" True
+# The time of the password step (review of 15 November 2026, findings 1 and 14): seven samples of each, interleaved,
+# each from a new source (so no pause or cap is reached), compared by their medians. One more password hash for
+# unknown names (authentik's TokenBackend did that until it was taken off the stage) made them about 1.6 times
+# slower; a factor of 3 let that through. Now each pair of medians must be within 25% of each other.
+: > "$WORK/l2-times"
+for n in 1 2 3 4 5 6 7; do
+  k=0
+  for name in kim kimx kim@example.org kix@example.org; do
+    printf '%s %s\n' "$k" "$(secs "$(fc s "$IN" trace --headers "$(xff "192.0.2.$((196 + 4 * n + k))")" "$name" wrong-t)")" >> "$WORK/l2-times"
+    k=$((k + 1))
+  done
+done
+L2_MEDIANS="$(python3 -c '
+import statistics, sys
+t = {}
+for line in open(sys.argv[1]):
+    k, s = line.split()
+    t.setdefault(int(k), []).append(float(s))
+print(" ".join("%.3f" % statistics.median(t[k]) for k in range(4)))' "$WORK/l2-times")"
+echo "     L2 password step, median of 7 (real name, unknown name, real email, unknown email), seconds: $L2_MEDIANS"
+check "L2: an unknown name and email take as long as real ones (medians within 25%, all under 10 s)" \
+  "$(python3 -c 'import sys; r, u, re_, ue = (float(x) for x in sys.argv[1:]); print(max(r, u, re_, ue) < 10 and max(r, u) <= 1.25 * min(r, u) and max(re_, ue) <= 1.25 * min(re_, ue))' $L2_MEDIANS)" True
 
 # ---- 11. L3 (decision 1): what "connection" means; forged headers can't claim a workplace; requests at one moment
 fc h "$OUT" many 10 "l3-%d" wrong > "$WORK/l3.json"
@@ -611,7 +633,14 @@ has "L1: 14 min 50 s after the try that reached the cap: still refused" "$(fc j 
 fc j "$OUT" many 3 "l1-late-%d" wrong >/dev/null
 age_source "$J" "15 minutes 1 second"
 check "L1: 15 min 1 s after it, the attack still going: the colleague completes a sign-in from J" "$(complete j "$OUT" "" pat "$PW_PAT" totp.key)" "$DONE"
-echo "     L1 measured on one IPv4 address: no wait below the cap; at the cap refused until 15 minutes after the try that reached it (refused at 14 min 50 s, in at 15 min 1 s); refused requests never moved it"
+# Review of 15 November 2026, finding 10: that attacker was paced. One that sends again the moment the hold ends
+# re-holds the source within a second, so a colleague there gets in only by winning that race; the way out is another
+# connection (contract R.5: the maximum disruption lasts as long as the attack).
+fc j "$OUT" many 10 "l1-rearm-%d" wrong > "$WORK/rearm.json"
+check "L1: an attacker re-arming the moment it ends: ten counted again at once" "$(count_checked "$WORK/rearm.json")" 10
+has "L1: and the colleague is refused there again straight away" "$(fc j "$OUT" signin pat "$PW_PAT" | result)" "$THROTTLED"
+check "L1: while another connection still signs in" "$(complete k "$OUT" "" pat "$PW_PAT" totp.key)" "$DONE"
+echo "     L1 measured on one IPv4 address: no wait below the cap; at the cap refused until 15 minutes after the try that reached it (refused at 14 min 50 s, in at 15 min 1 s against a paced attacker); refused requests never moved it; an attacker re-arming at expiry re-held it at once, and the colleague got in only from another connection"
 # The same on one IPv6 /64 (two addresses of it), and another /64 of the same /48 at once.
 fc s "$IN" many 9 "l1v6-%d" wrong 2001:db8:a1:1::10 >/dev/null
 check "L1 /64: below the cap, a colleague on another address of the /64 completes a sign-in" "$(complete s "$IN" "$(xff 2001:db8:a1:1::20)" sam "$PW_SAM" totp-sam.key)" "$DONE"
@@ -654,11 +683,21 @@ has "L4: a quiet /64 nobody has used: the right password goes on" "$(via "$W:77:
 check "L4: one source can't tighten the /48" "$(sql "select count(*) from authentik_events_event where action = 'custom_workforce_password_alert' and context->>'wf_kind' = 'network-tightened' and context->>'wf_conn' = '$W::/48'")" 0
 # Rotating /64s: 290 more, ten from each of 29 /64s: each is held at its own 10, and the /48's 300th tightens it.
 # Four clients at once (each /64 in one of them), so that all 290 fall within 15 minutes on a busy machine.
+# Meanwhile (review of 15 November 2026, findings 4 and 15) staff on two proven /64s of the same /48 keep typing their
+# right passwords: none may be refused because the attack's tries are being counted (a lock wait of 5 s, or a slow
+# read, fails closed with the pause's words).
 fc s "$IN" many 80 "l4r0-%d" wrong "$W:%x::1" 10 512 > "$WORK/l4r0.json" &
 fc s "$IN" many 70 "l4r1-%d" wrong "$W:%x::1" 10 520 > "$WORK/l4r1.json" &
 fc s "$IN" many 70 "l4r2-%d" wrong "$W:%x::1" 10 527 > "$WORK/l4r2.json" &
 fc s "$IN" many 70 "l4r3-%d" wrong "$W:%x::1" 10 534 > "$WORK/l4r3.json" &
+( for n in 1 2 3 4 5 6; do
+    t0=$(date +%s.%N); r="$(via "$W:2::5" sam "$PW_SAM")"; printf '%s %s\n' "${r%%:*}:$(printf '%s' "$r" | cut -d: -f2)" "$(awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN {printf "%.2f", b - a}')"
+    t0=$(date +%s.%N); r="$(via "$W:3::5" kim "$PW_KIM")"; printf '%s %s\n' "${r%%:*}:$(printf '%s' "$r" | cut -d: -f2)" "$(awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN {printf "%.2f", b - a}')"
+  done > "$WORK/l4staff" ) &
 wait
+check "L4 load: twelve right passwords on proven /64s while 290 wrong ones were counted in the /48: none refused" \
+  "$(grep -c '^next:ak-stage-authenticator-' "$WORK/l4staff")/$(wc -l < "$WORK/l4staff")" "12/12"
+echo "     L4 load: staff password steps during the flood, slowest $(sort -k2 -n "$WORK/l4staff" | tail -n 1 | cut -d' ' -f2) s; answers: $(cut -d' ' -f1 "$WORK/l4staff" | sort | uniq -c | paste -sd' ' -)"
 check "L4: 290 from 29 rotating /64s, all checked (each /64 holds only at its own 10)" \
   "$(( $(count_checked "$WORK/l4r0.json") + $(count_checked "$WORK/l4r1.json") + $(count_checked "$WORK/l4r2.json") + $(count_checked "$WORK/l4r3.json") ))" 290
 check "L4: the /48's 300th tightens it (a workplace network): one alert" "$(sql "select count(*) || ' ' || min(context->>'wf_workplace') from authentik_events_event where action = 'custom_workforce_password_alert' and context->>'wf_kind' = 'network-tightened' and context->>'wf_conn' = '$W::/48'")" "1 true"
@@ -671,6 +710,12 @@ check "L4: a proven /64's five wrong in the tightened /48: checked (it isn't abu
 has "L4: then it is: refused, with the network's words" "$(via "$W:1::5" pat "$PW_PAT")" "$NETWORK"
 fc s "$IN" many 4 "l4b-%d" wrong "$W:3::9" >/dev/null
 has "L4: another proven /64 with four: carries on" "$(via "$W:3::5" kim "$PW_KIM")" "next:ak-stage-authenticator-"
+# Review of 15 November 2026, finding 2: a right password no longer excuses a source nobody confirmed. Someone with an
+# account who proves a /64 and types their own right password still gets no more than four wrong there.
+has "L4 insider: sam's right password from a proven /64" "$(via "$W:2::5" sam "$PW_SAM")" "next:ak-stage-authenticator-"
+fc s "$IN" many 5 "l4i-%d" wrong "$W:2::9" > "$WORK/l4i.json"
+check "L4 insider: then five wrong there, checked" "$(count_checked "$WORK/l4i.json")" 5
+has "L4 insider: and refused, with the network's words, the right password notwithstanding" "$(via "$W:2::5" sam "$PW_SAM")" "$NETWORK"
 age_net "$W::/48" "14 minutes 50 seconds"
 has "L4: 14 min 50 s after the newest counted try: still tightened" "$(via "$W:88::1" kim "$PW_KIM")" "$NETWORK"
 age_net "$W::/48" "15 minutes 1 second"
@@ -696,7 +741,8 @@ FIRST="$(st "$SVC_PK" '{"wf_op": "alerts", "wf_limit": 1}')"
 NEXT="$(printf '%s' "$FIRST" | j 'd["next"]')"
 check "alerts: one at a time, the cursor moves on" "$(st "$SVC_PK" "{\"wf_op\": \"alerts\", \"wf_limit\": 1, \"wf_after\": \"$NEXT\"}" | j 'd["alerts"][0]["id"]')" "$(printf '%s' "$r" | j 'd["alerts"][1]["id"]')"
 CA_PROGRAM="$(bash -c '. "$1/bin/lib/client-address.sh"; printf "%s" "$CLIENT_ADDRESS_AK"' _ "$REPO")"
-CA_LIVE="$(docker exec -i "$P-server" ak shell -c "$CA_PROGRAM" 2>/dev/null | grep -E '^WF(CONN|SIGNINS|INSUM|FWD|ALERTS) ')"
+CA_LIVE="$(docker exec -i "$P-server" ak shell -c "$CA_PROGRAM" 2>/dev/null | grep -E '^WF(CONN|SIGNINS|INSUM|FWD|ALERTS|CRED) ')"
+check "doctor.sh's program: Workforce's account has no event access and no other group" "$(printf '%s\n' "$CA_LIVE" | grep '^WFCRED ')" "WFCRED ok"
 check "doctor.sh's program: its summaries first (review finding 9)" "$(printf '%s\n' "$CA_LIVE" | head -n 4 | cut -d' ' -f1 | paste -sd' ' -)" "WFSIGNINS WFINSUM WFFWD WFALERTS"
 has "doctor.sh's program: sign-ins from A, by connection key" "$CA_LIVE" "WFCONN $A in "
 has "the IPv6 tries by /64" "$CA_LIVE" "WFCONN 2001:db8:5:1::/64 try "
@@ -729,6 +775,24 @@ from guardian.models import RoleObjectPermission
 u = User.objects.get(username='workforce-invites')
 print('PERM', u.has_perm('authentik_events.view_event'), RoleObjectPermission.objects.filter(role__in=u.all_roles(), permission__codename='view_event').count())" | sed -n 's/^PERM //p')" "False 0"
 check "L7 upgrade: the status interface still answers" "$(st "$LEE_PK" '{"wf_op": "status"}' | j 'd["known"]')" True
+# Review of 15 November 2026, finding 5: the application's token holds change_user, and authentik 2026.8.5 refuses
+# only superuser groups, so the token may add itself to a group an operator made later with view_event. Whatever
+# authentik answers, doctor.sh's "sign-in server account" row (the WFCRED line) must see the result on its next run.
+LEAK_IDS="$(akshell "
+from authentik.core.models import Group
+from authentik.rbac.models import Role
+r, _ = Role.objects.get_or_create(name='e2e-leak'); r.assign_perms('authentik_events.view_event')
+g, _ = Group.objects.get_or_create(name='e2e-leak'); g.roles.add(r)
+print('IDS', g.pk, Group.objects.get(name='workforce-invites').pk)" | sed -n 's/^IDS //p')"
+read -r LEAK_GROUP OWN_GROUP <<< "$LEAK_IDS"
+code="$(fc d "$IN" api PATCH "/api/v3/core/users/$SVC_PK/" "$TOKEN" "{\"groups\": [\"$OWN_GROUP\", \"$LEAK_GROUP\"]}" | j 'd["status"]')"
+echo "     L5 groups: the application's token adding itself to a group with view_event: HTTP $code"
+CRED="$(docker exec -i "$P-server" ak shell -c "$CA_PROGRAM" 2>/dev/null | sed -n 's/^WFCRED //p')"
+if [ "$code" = 200 ]; then
+  check "L5 groups: authentik took it, and doctor.sh's program names it at once" "$CRED" "view_event,groups"
+else
+  check "L5 groups: refused, and doctor.sh's program still finds nothing" "$CRED" ok
+fi
 check "L7: the script fails, rather than carrying on, when another role still gives view_event" "$(akshell "
 from authentik.core.models import Group, User
 from authentik.rbac.models import Role
@@ -741,6 +805,7 @@ from authentik.rbac.models import Role
 Group.objects.filter(name='e2e-leak').delete(); Role.objects.filter(name='e2e-leak').delete()
 print('leak removed')" >/dev/null
 check "L7: and passes once it is gone" "$(converge_sa "$NEW_SA" | grep -c 'workforce-invites converged')" 1
+check "L7: and doctor.sh's program finds nothing again" "$(docker exec -i "$P-server" ak shell -c "$CA_PROGRAM" 2>/dev/null | sed -n 's/^WFCRED //p')" ok
 
 # ---- 16. L8: the status interface broken, then deleted: the sign-in decisions don't change
 SAM_SRC=192.0.2.190

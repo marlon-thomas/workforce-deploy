@@ -177,7 +177,8 @@ check("unknown names never make a workplace", g("wf_workplace")([{"at": base, "k
 
 # ---- the settings (contract R.3, R.4): read from the sign-in server's environment, checked again there
 import ipaddress
-check("defaults", (cfg0["source"], cfg0["network"], cfg0["confirmed"], cfg0["warnings"]), (50, 300, [], []))
+check("defaults", (cfg0["source"], cfg0["network"], cfg0["confirmed"], cfg0["confirmed_networks"], cfg0["warnings"]),
+      (50, 300, [], [], []))
 c = L({"SIGN_IN_WORKPLACE_SOURCE_LIMIT": "100", "SIGN_IN_WORKPLACE_NETWORK_LIMIT": "1000"})
 check("the highest allowed", (c["source"], c["network"], c["warnings"]), (100, 1000, []))
 c = L({"SIGN_IN_WORKPLACE_SOURCE_LIMIT": "19", "SIGN_IN_WORKPLACE_NETWORK_LIMIT": "1001"})
@@ -189,14 +190,30 @@ check("a source limit not below the network's: both defaults (one source could t
 c = L({"SIGN_IN_WORKPLACE_SOURCE_LIMIT": " 60 ", "SIGN_IN_WORKPLACE_NETWORK_LIMIT": "-5"})
 check("spaces are trimmed; a negative isn't a number", (c["source"], c["network"]), (60, 300))
 c = L({"CLIENT_ADDRESSES_CONFIRMED": "203.0.113.7, 2001:db8:1:2::/64 198.51.100.0/24,[2001:db8:9::5],::ffff:192.0.2.9,nonsense,0.0.0.0/0,::/0,10.0.0.0/7"})
-check("confirmed addresses, keys and ranges; nonsense and the whole internet ignored and named",
-      ([str(n) for n in c["confirmed"]], c["warnings"]),
-      (["203.0.113.7/32", "2001:db8:1:2::/64", "198.51.100.0/24", "2001:db8:9::5/128", "192.0.2.9/32"], ["CLIENT_ADDRESSES_CONFIRMED"]))
+check("confirmed addresses, keys and ranges as sources; nonsense named; the whole internet raises no limit",
+      ([str(n) for n in c["confirmed"]], c["confirmed_networks"], c["readiness_only"], c["warnings"]),
+      (["203.0.113.7/32", "2001:db8:1:2::/64", "198.51.100.0/24", "2001:db8:9::5/128", "192.0.2.9/32"], [], 3,
+       ["CLIENT_ADDRESSES_CONFIRMED"]))
 wc = g("wf_confirmed")
+wpl = g("wf_workplace")
 check("an address in a confirmed range is confirmed", wc("198.51.100.77", c["confirmed"]), True)
 check("one outside isn't", wc("198.51.101.1", c["confirmed"]), False)
 check("a /64 holding a confirmed address is", wc("2001:db8:9::/64", c["confirmed"]), True)
-check("its /48 is (a workplace network)", wc("2001:db8:9::/48", c["confirmed"]), True)
+# Review of 15 November 2026, findings 3 and 17: an entry raises a limit only where it is no wider than what it makes a
+# workplace. A confirmed address or /64 never makes its whole /48 a workplace network; an entry from a /48 to a /63
+# makes its /48 one and nothing more; wider ones (and IPv4 wider than a /24) are for the readiness check only.
+check("a confirmed address doesn't make its /48 a workplace network", wpl([], "2001:db8:9::/48", True, c, base), False)
+c = L({"CLIENT_ADDRESSES_CONFIRMED": "2001:db8:a::/48 2001:db8:b:100::/56,2001:db8::/32 198.51.0.0/16 10.0.0.0/8 198.51.7.0/24"})
+check("a /48 and a /56 confirm networks; a /32 and IPv4 wider than a /24 confirm the readiness check only",
+      ([str(n) for n in c["confirmed"]], [str(n) for n in c["confirmed_networks"]], c["readiness_only"], c["warnings"]),
+      (["198.51.7.0/24"], ["2001:db8:a::/48", "2001:db8:b:100::/56"], 3, []))
+check("a confirmed /48 is a workplace network", wpl([], "2001:db8:a::/48", True, c, base), True)
+check("and so is the /48 holding a confirmed /56", wpl([], "2001:db8:b::/48", True, c, base), True)
+check("but none of their /64s is a workplace source", [wpl([], k, False, c, base) for k in ("2001:db8:a:1::/64", "2001:db8:b:100::/64")],
+      [False, False])
+check("nor proven", g("wf_proven")([], "2001:db8:a:1::/64", c, base), False)
+check("an address in a confirmed /16 is no workplace source", wpl([], "198.51.8.1", False, c, base), False)
+check("one in a confirmed /24 is", wpl([], "198.51.7.200", False, c, base), True)
 check("an IPv4 range never confirms an IPv6 source", wc("::ffff:0:0/96", c["confirmed"]), False)
 check("nothing that isn't an address", wc("nonsense", c["confirmed"]), False)
 

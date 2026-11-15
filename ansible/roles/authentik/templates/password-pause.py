@@ -27,11 +27,12 @@
 #   SIGN_IN_WORKPLACE_SOURCE_LIMIT (default 50, 20 to 100): higher, never unlimited;
 # - network (IPv6): 30 wrong tries from one /48 within 15 minutes (SIGN_IN_WORKPLACE_NETWORK_LIMIT for a workplace
 #   network, default 300, 100 to 1000) tighten the /48: only its unproven sources (nobody completed a sign-in there in
-#   30 days) and its abusive ones (5 or more wrong and no right password, each for at most 15 minutes after its own
-#   newest) are refused; quiet, proven sources carry on;
-# - a workplace source: confirmed by the operator (CLIENT_ADDRESSES_CONFIRMED) or 3 or more different accounts
-#   completed a sign-in there (the right password and the right code) in the last 30 days. Nothing from the browser
-#   is read to decide it, so nobody can choose or claim it.
+#   30 days) and its abusive ones (5 or more wrong in its own window, each for at most 15 minutes after its own
+#   newest; a right password excuses only a source the operator confirmed) are refused; quiet, proven sources carry on;
+# - a workplace source: confirmed by the operator (CLIENT_ADDRESSES_CONFIRMED: an IPv4 address or range of a /24 or
+#   narrower, an IPv6 address or range of a /64 or narrower) or 3 or more different accounts completed a sign-in there
+#   (the right password and the right code) in the last 30 days. Nothing from the browser is read to decide it, so no
+#   visitor can choose or claim it; holders of 3 accounts can make one by signing in there (contract R.4, owner Q3).
 
 WF_PAUSE_AFTER = 5                 # wrong passwords for one pair within WF_WINDOW
 WF_SOURCE_AFTER = 10               # wrong passwords from one ordinary source, every name, within WF_WINDOW (fixed)
@@ -56,9 +57,14 @@ WF_ALERT_MOST_PKS = 50             # real accounts named in one alert, at most
 WF_REFUSED_GAP = 60                # a refusal is recorded at most once in this, per pair
 WF_UNLOCK_SKEW = 120               # an unlock asked for more than this far from the server's time is refused (stale)
 WF_ALERTS_MOST = 200               # alerts in one answer of the status interface, at most
-# A confirmed range wider than this is ignored (and the "sign-in limits" health row says so): it would make most of
-# the internet a workplace.
-WF_CONFIRMED_WIDEST = {4: 8, 6: 32}
+# What a confirmed entry (CLIENT_ADDRESSES_CONFIRMED) does for the limits (contract R.4; review of 15 November 2026,
+# findings 3 and 17). An IPv4 entry of a /24 or narrower, or an IPv6 entry of a /64 or narrower, makes the source(s) it
+# lies in workplace sources (and proven). An IPv6 entry from a /48 to a /63 makes its /48 a workplace network only (the
+# higher network limit), never its /64s: every /64 there stays an ordinary, unproven source until someone completes a
+# sign-in from it, so rotating /64s inside a confirmed range are still bounded by the network's limit (R.6.2). A wider
+# entry confirms concentration for the readiness check only (bin/lib/client-address.sh) and never raises a limit.
+WF_CONFIRMED_SOURCE_WIDEST = {4: 24, 6: 64}
+WF_CONFIRMED_NETWORK_WIDEST = 48
 
 # How long each record is kept, whatever authentik's event retention (contract 3.2 and R.0).
 WF_KEEP_TRY = 25 * 3600
@@ -199,8 +205,9 @@ def wf_limits(environ):
     value missing gives the default; one that isn't a whole number in range, or a workplace source limit not below the
     workplace network limit (one source could then tighten a /48 alone), gives the default and is named in
     `warnings` (the health check's "sign-in limits" row checks the same). CLIENT_ADDRESSES_CONFIRMED: addresses,
-    IPv6 source keys or ranges, separated by commas or spaces; an entry that isn't one, or a range wider than
-    WF_CONFIRMED_WIDEST, is ignored and named."""
+    IPv6 source keys or ranges, separated by spaces or commas; an entry that isn't one is ignored and named.
+    `confirmed` holds the entries that make sources workplace sources, `confirmed_networks` those that make a /48 a
+    workplace network, and `readiness_only` counts the wider ones, which raise no limit (WF_CONFIRMED_SOURCE_WIDEST)."""
     import ipaddress
     import re
     env = environ if hasattr(environ, "get") else {}
@@ -221,6 +228,8 @@ def wf_limits(environ):
         warnings += ["SIGN_IN_WORKPLACE_SOURCE_LIMIT", "SIGN_IN_WORKPLACE_NETWORK_LIMIT"]
         source, network = WF_WORKPLACE_SOURCE_AFTER, WF_WORKPLACE_NETWORK_AFTER
     confirmed = []
+    networks = []
+    readiness_only = 0
     for item in re.split(r"[\s,]+", str(env.get("CLIENT_ADDRESSES_CONFIRMED", "") or "").strip()):
         if not item:
             continue
@@ -234,15 +243,20 @@ def wf_limits(environ):
         except ValueError:
             warnings.append("CLIENT_ADDRESSES_CONFIRMED")
             continue
-        if net.prefixlen < WF_CONFIRMED_WIDEST[net.version]:
-            warnings.append("CLIENT_ADDRESSES_CONFIRMED")
-            continue
-        confirmed.append(net)
-    return {"source": source, "network": network, "confirmed": confirmed, "warnings": sorted(set(warnings))}
+        if net.prefixlen >= WF_CONFIRMED_SOURCE_WIDEST[net.version]:
+            confirmed.append(net)
+        elif net.version == 6 and net.prefixlen >= WF_CONFIRMED_NETWORK_WIDEST:
+            networks.append(net)
+        else:
+            readiness_only += 1
+    return {"source": source, "network": network, "confirmed": confirmed, "confirmed_networks": networks,
+            "readiness_only": readiness_only, "warnings": sorted(set(warnings))}
 
 
 def wf_confirmed(key, confirmed):
-    """Is this source (or /48) the operator's: does it overlap an entry of CLIENT_ADDRESSES_CONFIRMED?"""
+    """Is this source (or /48) the operator's: does it overlap an entry of the list given (wf_limits' `confirmed` for a
+    source, whose entries are never wider than a source, so overlapping is lying inside it; `confirmed_networks` for a
+    /48, whose entries are never wider than it)?"""
     import ipaddress
     try:
         net = ipaddress.ip_network(str(key), strict=False)
@@ -306,10 +320,11 @@ def wf_proven(events, conn, cfg, now):
 
 
 def wf_workplace(events, key, network, cfg, now):
-    """A workplace source (or, with `network`, a workplace /48): confirmed by the operator, or 3 or more different
-    accounts completed a sign-in there in the last 30 days. Never depends on a typed name or anything the browser
-    sends."""
-    return wf_confirmed(key, cfg["confirmed"]) or len(wf_signed_accounts(events, key, network, now)) >= WF_WORKPLACE_ACCOUNTS
+    """A workplace source (or, with `network`, a workplace /48): confirmed by the operator (a source by an entry no wider
+    than a source, a /48 by an entry from a /48 to a /63), or 3 or more different accounts completed a sign-in there in
+    the last 30 days. Never depends on a typed name or anything the browser sends."""
+    listed = cfg.get("confirmed_networks", []) if network else cfg["confirmed"]
+    return wf_confirmed(key, listed) or len(wf_signed_accounts(events, key, network, now)) >= WF_WORKPLACE_ACCOUNTS
 
 
 def wf_paused_until(events, right, account, conn, marker, now):
@@ -340,9 +355,11 @@ def wf_network_until(events, right, net, cfg, now):
 
 def wf_network_refusal(events, right, conn, net_until, cfg, now):
     """While the /48 is tightened (until `net_until`): this source's refusal end, or None (contract R.6.2). Unproven:
-    refused until the tightening ends. Abusive (WF_ABUSIVE_AFTER or more wrong in its own window and no right password
-    from it since that window began): refused, never after 15 minutes from its own newest wrong try. Any other source
-    (quiet and proven) is never refused by the network."""
+    refused until the tightening ends. Abusive (WF_ABUSIVE_AFTER or more wrong in its own window): refused, never after
+    15 minutes from its own newest wrong try. A right password from the source in that window excuses it only when the
+    operator confirmed the source (review of 15 November 2026, finding 2: otherwise anyone with an account could
+    excuse their own source by typing their own password once). Any other source (quiet and proven) is never refused
+    by the network."""
     if net_until is None:
         return None
     if not wf_proven(events, conn, cfg, now):
@@ -352,8 +369,8 @@ def wf_network_refusal(events, right, conn, net_until, cfg, now):
         return None
     newest = max(times)
     recent = [t for t in times if t >= newest - WF_WINDOW]
-    righted = any(e.get("kind") == "right" and e.get("conn") == conn and newest - WF_WINDOW <= e["at"] <= now
-                  for e in events)
+    righted = wf_confirmed(conn, cfg["confirmed"]) and any(
+        e.get("kind") == "right" and e.get("conn") == conn and newest - WF_WINDOW <= e["at"] <= now for e in events)
     if len(recent) >= WF_ABUSIVE_AFTER and not righted and now < newest + WF_WINDOW:
         return min(newest + WF_WINDOW, net_until)
     return None
@@ -642,22 +659,54 @@ def wf_ak_lock(cursor, *locks):
             cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [lock[0], wf_lock_key(lock[1])])
 
 
-def wf_ak_try_locks(account, conn):
+def wf_ak_try_locks(account, conn, proven=False):
     """The locks a try is recorded under: the source, its IPv6 /48 (review finding 4: tries from many /64s of one
-    /48 at the same moment are counted one at a time against the /48's limit too), the pair."""
-    net = (WF_LOCK_NET, "net:" + wf_network_key(conn)) if ":" in conn else None
+    /48 at the same moment are counted one at a time against the /48's limit too), the pair. A proven source skips the
+    /48's lock (review of 15 November 2026, findings 4 and 15): a tightened /48 refuses it only for its own wrong tries,
+    which its source lock already takes one at a time, so it never waits behind an attack's tries elsewhere in the /48
+    (a wait of 5 seconds fails closed). Its tries still count towards the /48; at most as many as are sent at the same
+    moment from proven sources can then overshoot the /48's limit, which refuses only unproven and abusive sources."""
+    net = (WF_LOCK_NET, "net:" + wf_network_key(conn)) if ":" in conn and not proven else None
     return (WF_LOCK_CONN, "conn:" + conn), net, (WF_LOCK_PAIR, "pair:" + account + "|" + conn)
+
+
+def wf_ak_where_conn(rows, conn):
+    """Narrows rows to a source's records by the event's address too, which authentik indexes (client_ip, PostgreSQL
+    inet), as well as by the context's wf_conn, which it doesn't (review of 15 November 2026, findings 4 and 15: a
+    JSON filter alone scanned every try of the look-back, and under a distributed attack ran into statement_timeout,
+    failing every password sign-in closed). An IPv4 source is matched in both of the forms an address was ever kept in
+    (dotted, and IPv4-mapped IPv6); a /64 by containment. A key that isn't an address keeps the context match only."""
+    import ipaddress
+    try:
+        net = ipaddress.ip_network(str(conn), strict=False)
+    except ValueError:
+        return rows
+    if net.version == 4:
+        mapped = "::ffff:%s/128" % net.network_address
+        return rows.extra(where=["(client_ip <<= %s::inet OR client_ip <<= %s::inet)"], params=[str(net), mapped])
+    return rows.extra(where=["client_ip <<= %s::inet"], params=[str(net)])
+
+
+# The records whose event carries the account as its user (wf_ak_record's `user`) whenever their context names it:
+# their wf_user_pk is matched by authentik's index on user->pk too.
+WF_USER_INDEXED = (WF_TRY, WF_RIGHT, WF_SIGNED, WF_UNLOCK, WF_UNLOCK_VOID)
 
 
 def wf_ak_rows(action, since, within=None, most=None, **context):
     """(created seconds, context) of one kind of record since a time, matching context values; with `within` (an IPv6
     /48), every record whose address lies in it instead of a wf_conn match (authentik keeps the address as PostgreSQL
     inet); with `most`, only the newest that many. Expired records too: authentik hides events past their retention,
-    which an administrator can shorten."""
+    which an administrator can shorten. A wf_conn or wf_user_pk match also uses authentik's indexes (wf_ak_where_conn,
+    WF_USER_INDEXED)."""
     from authentik.events.models import Event
     rows = Event.objects.db_manager("default").including_expired().filter(action="custom_" + action, created__gte=since)
     for key, value in context.items():
         rows = rows.filter(**{"context__" + key: value})
+    if "wf_conn" in context:
+        rows = wf_ak_where_conn(rows, context["wf_conn"])
+    pk = context.get("wf_user_pk")
+    if action in WF_USER_INDEXED and isinstance(pk, int) and not isinstance(pk, bool):
+        rows = rows.filter(user__pk=pk)
     if within is not None:
         import ipaddress
         rows = rows.extra(where=["client_ip <<= %s::inet"], params=[str(ipaddress.ip_network(within))])
@@ -677,6 +726,8 @@ def wf_ak_signed_rows(since, most, within=None, **context):
         action="custom_" + WF_SIGNED, created__gte=since, context__has_key="wf_user_pk").exclude(context__wf_user_pk=None)
     for key, value in context.items():
         rows = rows.filter(**{"context__" + key: value})
+    if "wf_conn" in context:
+        rows = wf_ak_where_conn(rows, context["wf_conn"])
     if within is not None:
         import ipaddress
         rows = rows.extra(where=["client_ip <<= %s::inet"], params=[str(ipaddress.ip_network(within))])
@@ -696,7 +747,9 @@ def wf_ak_record(action, keep, address, user=None, **context):
     record.user = {"pk": int(user.pk), "username": str(user.username)} if user is not None else {}
     try:
         import ipaddress
-        record.client_ip = str(ipaddress.ip_address(str(address)))
+        ip = ipaddress.ip_address(str(address))
+        # An IPv4-mapped address is kept as its IPv4, as its source key has it (wf_ak_where_conn finds both forms).
+        record.client_ip = str(ip.ipv4_mapped if ip.version == 6 and ip.ipv4_mapped is not None else ip)
     except ValueError:
         record.client_ip = None
     record.save()
@@ -717,7 +770,17 @@ def wf_ak_marker(pk, now):
     return wf_marker(changed, unlocks, now)
 
 
-WF_MOST_ROWS = 2000                # newest tries read from one source or /48 (more than any limit counts)
+WF_MOST_ROWS = 2000                # newest records of one kind read for one source, /48 or account (more than any
+                                   # limit counts), so no read grows with an attack (review findings 4 and 15)
+
+
+def wf_ak_proven_now(conn, cfg, now):
+    """Is this source proven (wf_proven) now: confirmed, or someone completed a sign-in from it in the last 30 days?
+    One indexed read, before the try's locks are taken (wf_ak_try_locks)."""
+    from datetime import datetime, timezone as tz
+    if wf_confirmed(conn, cfg["confirmed"]):
+        return True
+    return bool(wf_ak_rows(WF_SIGNED, datetime.fromtimestamp(now - WF_KNOWN_FOR, tz.utc), most=1, wf_conn=conn))
 
 
 def wf_ak_events(conn, account, user, now, spread):
@@ -733,20 +796,20 @@ def wf_ak_events(conn, account, user, now, spread):
     back = WF_SPREAD_HOUR if spread else WF_LOOK_BACK
     most = WF_ALERT_MOST_PKS if spread else WF_WORKPLACE_ACCOUNTS
     tries = wf_ak_rows(WF_TRY, at(now - back), most=WF_MOST_ROWS, wf_conn=conn)
-    rights = wf_ak_rows(WF_RIGHT, at(now - back), wf_conn=conn)
-    # The pair's own tries, always all of them (the newest WF_MOST_ROWS above can't hide a pause).
-    tries = tries + wf_ak_rows(WF_TRY, at(now - WF_LOOK_BACK), wf_account=account, wf_conn=conn)
+    rights = wf_ak_rows(WF_RIGHT, at(now - back), most=WF_MOST_ROWS, wf_conn=conn)
+    # The pair's own tries (the newest WF_MOST_ROWS of the source above can't hide a pause; a pause needs 5).
+    tries = tries + wf_ak_rows(WF_TRY, at(now - WF_LOOK_BACK), most=WF_MOST_ROWS, wf_account=account, wf_conn=conn)
     signed = [(t, pk, conn) for t, pk in wf_ak_signed_rows(at(now - WF_KNOWN_FOR), most, wf_conn=conn)]
     if ":" in conn:
         net = wf_network_key(conn)
         tries = tries + wf_ak_rows(WF_TRY, at(now - back), within=net, most=WF_MOST_ROWS)
-        rights = rights + wf_ak_rows(WF_RIGHT, at(now - back), within=net)
+        rights = rights + wf_ak_rows(WF_RIGHT, at(now - back), within=net, most=WF_MOST_ROWS)
         # The /48's accounts stand at the /48's key: they count for a workplace network, never for a source.
         signed += [(t, pk, net) for t, pk in wf_ak_signed_rows(at(now - WF_KNOWN_FOR), most, within=net)]
     if spread and user is not None:
         # The person's tries of the day, under any of their names.
-        tries = tries + wf_ak_rows(WF_TRY, at(now - WF_SPREAD_DAY), wf_user_pk=int(user.pk))
-        rights = rights + wf_ak_rows(WF_RIGHT, at(now - WF_SPREAD_DAY), wf_user_pk=int(user.pk))
+        tries = tries + wf_ak_rows(WF_TRY, at(now - WF_SPREAD_DAY), most=WF_MOST_ROWS, wf_user_pk=int(user.pk))
+        rights = rights + wf_ak_rows(WF_RIGHT, at(now - WF_SPREAD_DAY), most=WF_MOST_ROWS, wf_user_pk=int(user.pk))
     seen = set()
     events = []
     for e in wf_events(tries, "try") + wf_events(rights, "right"):
@@ -844,8 +907,8 @@ def wf_ak_status_of(user, now):
     def at(seconds):
         return datetime.fromtimestamp(seconds, tz.utc)
     pk = int(user.pk)
-    tries = wf_ak_rows(WF_TRY, at(now - WF_LOOK_BACK), wf_user_pk=pk)
-    rights = wf_ak_rows(WF_RIGHT, at(now - WF_LOOK_BACK), wf_user_pk=pk)
+    tries = wf_ak_rows(WF_TRY, at(now - WF_LOOK_BACK), most=WF_MOST_ROWS, wf_user_pk=pk)
+    rights = wf_ak_rows(WF_RIGHT, at(now - WF_LOOK_BACK), most=WF_MOST_ROWS, wf_user_pk=pk)
     events = wf_events(tries, "try") + wf_events(rights, "right")
     status = wf_status(events, pk, wf_ak_marker(pk, now), now)
     last = wf_ak_rows(WF_UNLOCK, at(now - WF_KEEP_UNLOCK), most=1, wf_user_pk=pk)
