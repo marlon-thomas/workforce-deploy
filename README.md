@@ -106,10 +106,15 @@ whatever you typed then.
 
 **Lost it anyway?** Use "Forgot your password?" on the sign-in page: from the
 version that includes it, the link goes to the recovery email below, as long as that is outside
-this server. If the app or email is down, rotate it with `./bin/reset-admin.sh`: run it
-bare to get a one-time verification phrase (`care-angels-XXXXXX`), then
-`./bin/reset-admin.sh --confirm <phrase>` to set a fresh password (printed
-once, and also written to the `initial-admin-password` file). The two-step
+this server. If the recovery mailbox is lost too, recover the account on the server
+(RUNBOOK.md, "admin's way back in"): under the appliance controller, its page's
+"Recover the emergency administrator" (the page on `127.0.0.1:8443` only, through
+`ssh -N -L 8443:127.0.0.1:8443 …`: RUNBOOK.md §6b); on a host install without it,
+`./bin/reset-admin.sh`: run it bare to get a one-time verification phrase
+(`care-angels-XXXXXX`), then `./bin/reset-admin.sh --confirm <phrase>`. Either sets a
+fresh password (shown once, written to no file), removes every other sign-in method,
+ends the account's sessions and tokens and holds password resets by email
+(the controller page, or `./bin/reset-admin.sh --allow-reset-mail`, lifts that). The two-step
 phrase gate exists because the script is also the support procedure for
 customer appliances — identity is verified on the call before the phrase is
 accepted.

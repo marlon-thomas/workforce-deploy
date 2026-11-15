@@ -933,7 +933,7 @@ def wf_ak_target(request):
 def wf_ak_unlockable(user):
     """May an unlock lift this account's pause? Only an active internal account that is not a superuser, not in
     "authentik Admins", not a service account and not the emergency administrator (whose way back is
-    ./bin/reset-admin.sh)."""
+    its recovery: the controller's page, or ./bin/reset-admin.sh)."""
     from authentik.core.models import UserTypes
     return (user.is_active and user.type == UserTypes.INTERNAL and not user.is_superuser
             and user.username != "admin" and not user.ak_groups.filter(name="authentik Admins").exists())

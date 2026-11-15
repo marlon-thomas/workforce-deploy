@@ -474,11 +474,18 @@ def compiled(name):
         check("474: " + name + " is in the blueprint, including password-unchanged.py", False, True)
         return lambda request: None
     src = open(os.path.join(TEMPLATES, "password-unchanged.py"), encoding="utf-8").read() + "\n" + body
-    code = "def policy(request):\n" + "\n".join("    " + l for l in src.split("\n"))
+    code = "def policy(request, ak_logger=None):\n" + "\n".join("    " + l for l in src.split("\n"))
     scope = {}
     exec(compile(code, name, "exec"), scope)
     return scope["policy"]
-seen_policy, replaced_policy = compiled("workforce-password-seen"), compiled("workforce-password-replaced")
+seen_policy, replaced_only = compiled("workforce-password-seen"), compiled("workforce-password-replaced")
+# 100's own policy (workforce-password-unchanged, review finding 1: not 99's negated) answers the other way round,
+# every time 99's is asked below.
+unchanged_policy = compiled("workforce-password-unchanged")
+def replaced_policy(req):
+    refused = replaced_only(req)
+    check("474 policy: 100 answers the other way round from 99 (%r)" % refused, unchanged_policy(req), not refused)
+    return refused
 class Person:
     def __init__(self, pk, password):
         self.pk, self.password = pk, password
@@ -531,12 +538,92 @@ check("474 policy: deactivated meanwhile: refused", replaced_policy(Req(p)), Tru
 del DB[7]
 check("474 policy: deleted meanwhile: refused", replaced_policy(Req(p)), True)
 
+# ---- Workforce issue 474 review, findings 1 and 2: an error refuses, in every policy the blueprint binds. authentik
+# 2026.8.5 turns an ordinary error in an expression policy into "fails" (failure_result covers PolicyException only), so
+# each policy's guard must answer the refusing value itself. Each is taken from the blueprint, its includes put in as
+# Ansible's Jinja would, and run as authentik runs an expression (the body of a function); first with an error raised
+# inside its guard, then with a request whose every attribute raises and a logger that raises too.
+REFUSING = {  # the answer that refuses, by where it is bound (deny stage or a step that must run: True; a gate: False)
+    "workforce-recovery-staff-only": False, "workforce-emergency-password": False,
+    "workforce-not-the-emergency-administrator": True, "default-authentication-flow-authenticator-validate-stage": True,
+    "workforce-codes-not-ready": True, "workforce-password-throttled": True, "workforce-network-tightened": True,
+    "workforce-password-paused": True, "workforce-password-may-try": False, "default-authentication-flow-password-stage": True,
+    "workforce-password-right": True, "workforce-password-not-checked-throttled": True,
+    "workforce-password-not-checked-network": True, "workforce-password-not-checked": True,
+    "workforce-client-address": False, "workforce-nobody": False, "workforce-emergency-password-not-here": False,
+    "workforce-only-the-emergency-administrator": False, "workforce-code-try": True, "workforce-codes-paused": True,
+    "workforce-password-seen": True, "workforce-password-replaced": True, "workforce-password-unchanged": False,
+}
+def rendered_policies():
+    """{name: source} for every expression policy in the blueprint that isn't removed, as authentik would hold it."""
+    out, lines, i = {}, bp_text.split("\n"), 0
+    while i < len(lines):
+        m = re.match(r"      name: ([\w-]+)$", lines[i])
+        j = i + 1
+        while m and j < len(lines) and (lines[j].startswith("      # ") or lines[j].startswith("      execution_logging")):
+            j += 1
+        if not m or j >= len(lines) or lines[j] != "      expression: |":
+            i += 1
+            continue
+        i, body = j + 1, []
+        while i < len(lines) and (lines[i].startswith("        ") or lines[i].startswith("{%") or lines[i] == ""):
+            inc = re.match(r"\{% include '([\w.-]+)' %\}$", lines[i])
+            if inc:
+                body.extend(("        " + l) if l else l for l in
+                            open(os.path.join(TEMPLATES, inc.group(1)), encoding="utf-8").read().rstrip("\n").split("\n"))
+            elif not lines[i].startswith("{%"):
+                body.append(lines[i])
+            i += 1
+        out[m.group(1)] = "\n".join(l[8:] for l in body).rstrip("\n") + "\n"
+    return out
+class Raises:
+    def __getattr__(self, name):
+        raise RuntimeError("injected: " + name)
+    def __call__(self, *a, **kw):
+        raise RuntimeError("injected call")
+def as_authentik(name, src):
+    code = "def handler(request, context, ak_message, ak_logger, ak_is_group_member):\n" + \
+        "\n".join("    " + l for l in src.split("\n"))
+    scope = {}
+    exec(compile(code, name, "exec"), scope)
+    return scope["handler"]
+class Logger:
+    def __init__(self): self.lines = []
+    def warning(self, msg, **kw): self.lines.append((msg, kw))
+policies = rendered_policies()
+policies.pop("workforce-sign-in-status-code", None)   # bound nowhere; its own try/except (blueprint-test.sh)
+policies.pop("workforce-no-first-run-page", None)      # "return False" alone
+check("474 errors: every policy the blueprint binds has a refusing value here", sorted(policies), sorted(REFUSING))
+for name, src in sorted(policies.items()):
+    want = REFUSING.get(name)
+    # One guard, and no other "try:" at its level in the whole policy (authentik-lock-e2e.sh injects an error there).
+    check(name + ": one guard", ("\n" + src).count("\ntry:\n"), 1)
+    injected = src.replace("\ntry:\n", "\ntry:\n    raise RuntimeError('injected inside the guard')\n") \
+        if not src.startswith("try:\n") else "try:\n    raise RuntimeError('injected inside the guard')\n" + src[5:]
+    log = Logger()
+    check(name + ": an error inside its guard refuses (" + str(want) + ")",
+          as_authentik(name, injected)(Req(None), {}, lambda m: None, log, lambda *a, **k: False), want)
+    check(name + ": and says so in the log, by name, without values", [(kw.get("policy"), kw.get("error")) for m, kw in log.lines],
+          [(name, "RuntimeError: injected inside the guard")])
+    check(name + ": a request that raises everywhere, and a logger that raises too: refuses (" + str(want) + ")",
+          as_authentik(name, src)(Raises(), Raises(), Raises(), Raises(), Raises()), want)
+    # The guard is what makes the difference: without it the same error leaves the policy, which authentik answers
+    # with "fails" (False), whatever the binding.
+    try:
+        marker = "# ---- the authentik part ----\n"
+        bare = (src.split(marker)[0] + marker if marker in src else "") + "raise RuntimeError('injected outside the guard')\n"
+        as_authentik(name, bare)(Req(None), {}, lambda m: None, Logger(), lambda *a, **k: False)
+        escaped = False
+    except RuntimeError:
+        escaped = True
+    check(name + ": (outside a guard the error escapes, which authentik answers with fails)", escaped, True)
+
 # ---- the files are Jinja includes: nothing that Jinja would read as its own
 for name in ("password-pause.py", "code-tries.py", "password-unchanged.py"):
     src = open(os.path.join(TEMPLATES, name), encoding="utf-8").read()
     check(name + " has no Jinja delimiters", re.findall(r"\{\{|\}\}|\{%|%\}|\{#|#\}", src), [])
 bp = open(os.path.join(TEMPLATES, "workforce-app.yaml.j2"), encoding="utf-8").read()
-for policy in ("workforce-password-paused", "workforce-password-try", "workforce-password-right",
+for policy in ("workforce-password-paused", "workforce-password-may-try", "workforce-password-right",
                "workforce-client-address", "workforce-code-try", "workforce-codes-paused", "workforce-network-tightened",
                "workforce-password-not-checked-network", "workforce-sign-in-status-code"):
     m = re.search(r"name: " + policy + r"\n(      execution_logging: false\n)?      expression: \|\n\{% filter indent\(8, true\) %\}\n\{% include 'password-pause.py' %\}", bp)

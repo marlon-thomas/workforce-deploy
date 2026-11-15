@@ -89,6 +89,9 @@ expect("a top-level secret", lambda c: c.update(secrets={"db_password": {"file":
 expect("bind options on a volume", lambda c: c["volumes"]["pg_data"].update(driver="local", driver_opts={"type": "none", "o": "bind", "device": "/etc"}), "driver options other than a tmpfs's")
 expect("bind hidden in a tmpfs's options", lambda c: c["volumes"]["pdf_socket"]["driver_opts"].update(o="size=1m,bind"), "driver options other than a tmpfs's")
 expect("nocopy lost", lambda c: c["services"]["gateway"]["volumes"][0].pop("volume"), "has lost nocopy")
+expect("a service publishing the controller's page (issue 488)",
+       lambda c: c["services"]["api"].update(ports=[{"mode": "ingress", "host_ip": "127.0.0.1", "target": 8443, "published": "8443", "protocol": "tcp"}]),
+       "publishes 8443")
 expect("the controller's volume not external", lambda c: c["volumes"]["controller"].pop("external"), "not declared as external")
 
 print(f"controller-compose self-test: {passed} passed, {failed} failed")

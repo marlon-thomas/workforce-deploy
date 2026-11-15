@@ -250,6 +250,19 @@ def main():
                 who = None
         out.append({"step": "me", "status": me.status_code, "username": who})
         print(json.dumps(out))
+    elif cmd == "signedin":                   # signedin <name> <password>: the last answer of a sign-in (no code
+        # step), then who its session is signed in as (the API's own answer: the username, or None when nobody is)
+        name, pw = args
+        s, first = start(name)
+        last = password(s, pw) if first.get("component") == "ak-stage-password" else first
+        me = s.get(BASE + "/api/v3/core/users/me/", timeout=30)
+        who = None
+        if me.status_code == 200:
+            try:
+                who = (me.json().get("user") or {}).get("username")
+            except ValueError:
+                who = None
+        print(json.dumps(dict(last, me=me.status_code, username=who)))
     elif cmd == "address":                    # address: what the sign-in server sees as this client's address
         r = session().get(executor("workforce-client-address"), timeout=30)
         print(json.dumps(outcome(r)))

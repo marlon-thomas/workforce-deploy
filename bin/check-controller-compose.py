@@ -12,7 +12,9 @@ Docker API resolve on the host, not in the controller, so this fails on:
   knows it by), without a plain subpath, or outside the service's own `services/<service>/…` (the api alone also
   gets the ADR-0031 mailbox and the health watch's status/health), or not read-only (only the mailbox's requests are written);
 - a volume mount without `nocopy` where compose.yaml has it: Docker's copy-up would hand the volume back to root
-  and undo volume-owners.
+  and undo volume-owners;
+- any service publishing 8443, the controller's page (Workforce issue 488): only the controller's own run command
+  publishes it, on 127.0.0.1 alone (RUNBOOK §6b).
 
 The controller's allow-list proxy enforces the same at run time; this catches it in review.
 
@@ -27,6 +29,8 @@ CONTROLLER_KEY = "controller"
 MAILBOX = {"mailbox/requests": False, "mailbox/results": True}  # subpath -> must be read-only
 # What the health watch last found: the health job's folder, outside services/ (Workforce PR 438), for the api only.
 STATUS = {"status/health": True}  # subpath -> must be read-only
+# The controller's page: published by the controller's own run command only, on 127.0.0.1 (Workforce issue 488).
+CONTROLLER_PAGE_PORT = "8443"
 TMPFS_OPTION = re.compile(r"^(uid=\d+|gid=\d+|mode=0?[0-7]{3,4}|size=\d+[kmg]?|nr_inodes=\d+[kmg]?)$")
 
 
@@ -78,6 +82,9 @@ def problems_in(config, base=None):
             out.append(f"{svc}: host devices ({', '.join(str(d.get('source', d)) if isinstance(d, dict) else str(d) for d in s['devices'])})")
         if s.get("volumes_from"):
             out.append(f"{svc}: volumes_from {', '.join(s['volumes_from'])}")
+        for port in s.get("ports") or []:
+            if CONTROLLER_PAGE_PORT in (str(port.get("published", "")), str(port.get("target", ""))):
+                out.append(f"{svc}: publishes {CONTROLLER_PAGE_PORT}, the controller's page (issue 488)")
         for m in s.get("volumes") or []:
             kind = m.get("type")
             target = m.get("target")

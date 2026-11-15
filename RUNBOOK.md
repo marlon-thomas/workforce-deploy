@@ -11,6 +11,8 @@ Takes a fresh Ubuntu 24.04 VPS from zero to `https://workforce.<your-domain>` in
 - A domain you control (registrar login). Two subdomains will point at the server.
 - Ports **80 and 443** reachable — the installer opens the machine's own firewall;
   if your provider has a separate cloud-firewall panel, open 22/80/443 there too.
+  Never open **8443** (the appliance controller's page): it is published on the server's loopback address only and
+  reached through SSH (§6b).
 - A **GitHub personal access token** with `read:packages` scope (classic tokens:
   Settings → Developer settings → Tokens (classic)). The container images are in a
   private GHCR registry until licensing ships; the server needs this token once.
@@ -29,6 +31,10 @@ Takes a fresh Ubuntu 24.04 VPS from zero to `https://workforce.<your-domain>` in
 > The machine's own firewall is handled by the installer (ufw/firewalld auto-detected).
 > The **cloud** firewall is a separate layer only you can open — this is the step most
 > often missed; the doctor's "reachability" check names it if it's wrong.
+>
+> **8443 is never opened**, in either firewall. A port Docker publishes on every address is reachable from outside
+> even when ufw or firewalld block it (Docker's rules come first), so the appliance controller's page is published
+> on `127.0.0.1` only (`-p 127.0.0.1:8443:8443`) and reached through an SSH tunnel: §6b.
 
 ## 2. Point DNS at the server
 
@@ -219,7 +225,8 @@ in this release (an unlock would lift it for the attacker too); an audited contr
 the person's record in Workforce (a registered manager or director; a data administrator if the organisation
 switched it on), which lifts their name's pause on every connection and changes nothing else (if their connection
 or its network is held, they are still refused there until that ends: use another connection); for `admin`,
-`./bin/reset-admin.sh`, which sets a new password and lifts its pause the same way. An unlock is recorded by the
+its recovery (§6, "admin's way back in"), which sets a new password and lifts its pause the same way. An unlock is
+recorded by the
 sign-in server itself, with its own clock, and wrong passwords **after** it count again, so an old unlock can't
 clear a later pause. Nothing lifts a connection's hold, a network's tightening or the codes' wait but time. Spread
 attempts (one connection trying five or more names in an hour, one account tried from three or more connections in
@@ -228,8 +235,9 @@ organisation its own on Today, and `doctor.sh` counts them ("sign-in attacks").
 
 **A new password stops sign-ins in progress** (Workforce issue 474). A sign-in that is past the password step but
 not finished yet (for staff, while they type their code) finishes only if the account's password is still the one
-that was checked. If it changes in between (the person's own change, a reset link, `./bin/reset-admin.sh`, the
-controller setting `admin`'s first password, or the password disabled), that sign-in is refused with "Invalid
+that was checked. If it changes in between (the person's own change, a reset link, the controller's or
+`./bin/reset-admin.sh`'s recovery of `admin` (which also ends such a sign-in outright), the controller setting
+`admin`'s first password, or the password disabled), that sign-in is refused with "Invalid
 password. Please sign in again.", the same words as for any wrong password, and nobody is signed in; signing in again
 with the new password works at once. Choosing the same password again counts as a change. Every account alike,
 `admin` included. Sessions already signed in are not ended by this.
@@ -240,14 +248,44 @@ person at a time, and only for someone the asker may reset. Workforce shows "pau
 check"; a failure is never shown as "not paused", and the sign-in decisions never depend on Workforce asking.
 
 Because nothing adds up guesses at `admin` from many addresses, its password is what stops them. The installer's
-and `reset-admin.sh`'s are 24 random characters; one you type into the installer needs at least 16; one chosen later
+and a recovery's are 24 random characters; one you type into the installer needs at least 16; one chosen later
 ("Forgot your password?", or Change password in Workforce's account menu) needs at least 16 that aren't easy to
 guess. authentik's own change-password page refuses `admin`. **On a server installed or updated before this rule:**
 if `admin`'s password is shorter than 16 characters, or easy to guess, change it now (Workforce's account menu, or
-`./bin/reset-admin.sh`).
+its recovery, below).
 
 All of this needs the sign-in server to see each person's own address (§7a). Workforce's Setup says "not ready"
 until the health check's "client addresses" row is OK.
+
+### admin's way back in
+
+When `admin`'s password is lost, use "Forgot your password?" on the sign-in page: it emails a link to the recovery
+address (`ADMIN_RECOVERY_EMAIL`) if email works and that address is outside this server. When that can't work (the
+recovery mailbox is lost too), recover the account on the server. Either way, in one transaction at the sign-in
+server: a new password of 24 random characters, shown once; every other sign-in method removed (authenticator apps,
+recovery codes, security keys and passkeys, email, text-message, Duo and device methods); everything signed in as it
+ended (its sessions and any sign-in part way through, its tokens, links to outside sign-ins, OAuth and SAML grants);
+the pause on the name `admin` lifted by an unlock record; and password resets by email held, so whoever has the lost
+mailbox can't reset the account again.
+
+A recovery lifts the pause on the **name** `admin` only. A hold on a whole **connection or network** after many wrong
+passwords for any name is not lifted: it ends by itself 15 minutes after the last of those tries, or sign in from
+another network.
+
+- **Under the appliance controller:** the controller page's **Recover the emergency administrator**. Reach the page
+  as §6b says (on `127.0.0.1` only, through SSH; the page refuses a recovery while 8443 is published on every
+  address), check the account it shows, then read the recovery code it asks for inside the controller's container:
+
+      docker exec workforce-controller cat /run/workforce/recovery-code
+
+  (In Portainer: a console in the container `workforce-controller`, then `cat /run/workforce/recovery-code`.) The
+  page shows the new password once and keeps it nowhere; it also ends `admin`'s sessions inside Workforce. Once the
+  recovery mailbox is your organisation's again, or `ADMIN_RECOVERY_EMAIL` has been changed, press **Allow password
+  reset by email again** on the overview.
+- **A host install without the controller:** `./bin/reset-admin.sh` (run it bare for the verification phrase, then
+  `--confirm <phrase>`). The password goes to the sign-in server on stdin only and is written to no file: save it from
+  the screen. It doesn't end `admin`'s sessions inside Workforce itself (sign it out there). Lift the hold on
+  resets by email with `./bin/reset-admin.sh --allow-reset-mail` once the mailbox is safe again.
 
 ## 6a. Jobs from the app
 
@@ -305,6 +343,34 @@ refuses a password ending in a backslash too.
 
 **Test appliance.** `SERVER_ACTIONS_PLAIN_RELAY=mailpit:1025` lets that one relay be saved without
 STARTTLS. It's only read from `.env`, so the app can't ask for it. **Never set it in production.**
+
+## 6b. The appliance controller's page (port 8443)
+
+The controller's page (setup, updates, recovery from a copy, `admin`'s recovery) has its own one-time access code and
+doesn't depend on the sign-in server or Workforce. It is never put on the internet (Workforce issue 488): publish it
+on the server's loopback address only, and reach it through SSH.
+
+1. **Check how it is published:** `docker port workforce-controller`. `127.0.0.1:8443` (or nothing) is right.
+   `0.0.0.0:8443` or `[::]:8443` is every address, reachable from outside even through ufw or firewalld: start it again
+   on loopback, with the image digest it runs now (`docker inspect -f '{{.Config.Image}}' workforce-controller`); its
+   data is in its volume, so nothing is lost (let an update or recovery from a copy finish first):
+
+       docker rm -f workforce-controller
+       docker run -d --name workforce-controller --restart unless-stopped \
+         -p 127.0.0.1:8443:8443 \
+         --security-opt no-new-privileges=true --tmpfs /run \
+         -v /var/run/docker.sock:/var/run/docker.sock \
+         -v workforce-controller:/var/lib/workforce \
+         ghcr.io/marlon-thomas/workforce-controller@sha256:<the same digest>
+
+   (In Portainer: set the container's or stack's port to `127.0.0.1:8443:8443` and redeploy it.)
+2. **Reach it through SSH**, from your own computer: `ssh -N -L 8443:127.0.0.1:8443 <you>@<server>`, then open
+   `https://localhost:8443`. Nothing else is opened.
+3. **Check the certificate.** The browser warns, because the certificate is the controller's own: compare its
+   fingerprint with the one in the controller's log, `docker logs workforce-controller 2>&1 | grep fingerprint`.
+4. **Sign in with the access code**, read on the server: `docker exec workforce-controller cat /run/workforce/access-code`
+   (in Portainer: a console in `workforce-controller`, then `cat /run/workforce/access-code`). Each code works once,
+   for 15 minutes; the page makes a new one when asked.
 
 ## 7. When something looks wrong
 
@@ -632,9 +698,10 @@ authentik cannot skip versions or go back. `compose.yaml` pins the version to en
 `bin/upgrade-authentik.sh` walks every minor line in between, one healthy step at a time, after
 taking a backup. `update.sh` runs it automatically when a new bundle pins a newer authentik.
 To move the pin, append the new version to `LADDER` in that script, then run
-`./bin/tests/authentik-policies-e2e.sh` (the sign-in policies that use authentik's own code, and
-`reset-admin.sh`, on the new image) and set its `VERIFIED_AUTHENTIK` to the new version once it passes:
-`bin/tests/blueprint-test.sh` fails until you do. An error in the wrong-tries lock would refuse every sign-in.
+`./bin/tests/authentik-policies-e2e.sh` (the sign-in policies that use authentik's own code, on the new image) and
+`./bin/tests/authentik-lock-e2e.sh` (the whole sign-in on a live authentik, `reset-admin.sh` included), and set each
+one's `VERIFIED_AUTHENTIK` to the new version once it passes: `bin/tests/blueprint-test.sh` fails until you do. An
+error in a sign-in policy refuses the sign-in (every policy's guard), so a broken one would refuse every sign-in.
 
 If a step fails, fix the cause and re-run the script: it resumes from the version that is running.
 To go back instead, read `authentik_version` from the `pre-authentik-upgrade` backup's `MANIFEST`,
@@ -919,7 +986,7 @@ What did not survive, and what to do:
 - **Passwords.** Everyone signs in with the password they had at the time of the backup, including `admin`. The password the
   new install made up opens nothing, so `secrets/initial-admin-password` is removed. If nobody knows the `admin` password,
   use "Forgot your password?" on the sign-in page with the recovery address (`ADMIN_RECOVERY_EMAIL`), which emails a link
-  if email is working and the address is outside the server. If that can't work, `./bin/reset-admin.sh`.
+  if email is working and the address is outside the server. If that can't work, recover it (§6, "admin's way back in").
 - **Organisations' own AI keys.** They were encrypted with the old `secrets/ai_credential_key`, so enter them again in Setup → AI assistant.
 - **Phone and browser notifications.** Each device has to switch them on again, because the push keys are new.
 - **Staff email.** Its settings were in the old `.env`: switch it on again in Setup → Email. Its database is restored only

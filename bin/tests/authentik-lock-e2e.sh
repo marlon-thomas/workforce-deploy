@@ -51,7 +51,10 @@
 #     (reset-admin.sh's program, the same password chosen again, the password disabled), is refused with authentik's
 #     words for a wrong password and nobody is signed in, the emergency administrator and staff (after their code)
 #     alike; one held while nothing changes signs in; with the check before the login (99) taken away, the login
-#     step's own check still signs nobody in.
+#     step's own check still signs nobody in; reset-admin.sh ends a sign-in held for admin outright (issue 487);
+#   - the review of issue 474 (findings 1, 2): each policy made to raise inside its own guard refuses the sign-in
+#     (its deny stage's words, the code step still asked, or nobody signed in), and the gates at 20 and 100 refuse
+#     an error raised outside the guard too; reset-admin.sh removes every sign-in method and ends sessions and tokens.
 # Needs Docker (pulls the pinned images) and python3 with jinja2 (Ansible's). Fifteen to forty-five minutes (the blueprint's
 # two applies take most of it on a busy machine). Every container and
 # network it makes is removed at the end. Exit 0 = all pass.
@@ -465,7 +468,7 @@ check "L6: a member of staff's own token: nothing" "$(st "$LEE_PK" '{"wf_op": "s
 check "L6: a superuser's token: no status (the interface answers the application only)" "$(st "$LEE_PK" '{"wf_op": "status"}' "$ROOT_TOKEN" | j 'd.get("known"), d.get("why"), "paused" in d')" "(False, 'caller', False)"
 OTHER_PM="$(sql "select pm_uuid from authentik_core_propertymapping where pm_uuid <> '$SPK' limit 1")"
 check "L6: the application's token can't test another mapping" "$(fc d "$IN" api POST "/api/v3/propertymappings/all/$OTHER_PM/test/" "$TOKEN" '{"context": {}}' | j 'd["status"] != 200')" True
-TRY_POLICY="$(sql "select policy_uuid from authentik_policies_policy where name = 'workforce-password-try'")"
+TRY_POLICY="$(sql "select policy_uuid from authentik_policies_policy where name = 'workforce-password-may-try'")"
 check "L6: nor test a policy" "$(fc d "$IN" api POST "/api/v3/policies/all/$TRY_POLICY/test/" "$TOKEN" "{\"user\": $LEE_PK}" | j 'd["status"] != 200')" True
 check "L6: nor list policies" "$(fc d "$IN" api GET /api/v3/policies/all/ "$TOKEN" | j 'd["status"]')" 403
 check "L6: nor change the interface" "$(fc d "$IN" api PATCH "/api/v3/propertymappings/all/$SPK/" "$TOKEN" '{"expression": "return 1"}' | j 'd["status"] >= 400')" True
@@ -537,17 +540,58 @@ has "authentik's own change-password page refuses admin" "$(j 'd[1]["message"]' 
 for i in 1 2 3 4 5; do fc f "$OUT" signin admin "wrong-$i" >/dev/null; done
 has "admin paused on F" "$(fc f "$OUT" signin admin "$NEW_ADMIN" | result)" "$PAUSED"
 check "admin from G: not paused" "$(fc g "$OUT" signin admin "$NEW_ADMIN" | j 'd["result"]')" next
-# reset-admin.sh's program, exactly as the script passes it to the container (the real database this time).
-python3 - "$REPO/bin/reset-admin.sh" "$WORK/reset.sh-c" <<'PY' || die "reset-admin.sh's program not found"
+# reset-admin.sh's program (RESET_PY), exactly as the script passes it to the container: `python -c`, what to do and
+# the password on stdin (Workforce issue 487). The real database this time.
+python3 - "$REPO/bin/reset-admin.sh" "$WORK/reset-admin.py" <<'PY' || die "reset-admin.sh's program not found"
 import re, sys
-m = re.search(r"authentik-server sh -c \\\n  '(.*?)' 2>&1 \| tail -1\)\"", open(sys.argv[1], encoding="utf-8").read(), re.S)
+m = re.search(r"\nRESET_PY=\"\$\(cat <<'PYEOF'\n(.*?)\nPYEOF\n\)\"\n", open(sys.argv[1], encoding="utf-8").read(), re.S)
 if not m:
     sys.exit(1)
 open(sys.argv[2], "w").write(m.group(1))
 PY
+reset_py() { # reset_py <stdin text>: the program's answer, its last line (authentik's JSON log lines left out)
+  printf '%s' "$1" | docker exec -i -w / "$P-server" python -c "$(cat "$WORK/reset-admin.py")" 2>&1 | grep -v '^{' | tail -1
+}
+admin_left() { # admin's sign-in methods, sessions and tokens, and whether its password resets by email are held
+  akshell "
+from authentik.core.models import AuthenticatedSession, Token, User
+from authentik.stages.authenticator import device_classes
+u = User.objects.get(username='admin')
+print('LEFT', sum(m.objects.filter(user=u).count() for m in device_classes()), AuthenticatedSession.objects.filter(user=u).count(),
+      Token.objects.filter(user=u).count(), bool(((u.attributes or {}).get('workforce') or {}).get('recovery_mail_held')))" | grep '^LEFT'
+}
+# Something to remove and end: a code app and recovery codes (two device classes), a token; admin's sign-ins above
+# left sessions.
+akshell "
+from authentik.core.models import Token, User
+from authentik.stages.authenticator_static.models import StaticDevice
+from authentik.stages.authenticator_totp.models import TOTPDevice
+u = User.objects.get(username='admin')
+StaticDevice.objects.create(user=u, name='e2e codes', confirmed=True)
+TOTPDevice.objects.create(user=u, name='e2e app', confirmed=True)
+Token.objects.update_or_create(identifier='e2e-admin', defaults={'user': u, 'intent': 'api', 'expiring': False, 'key': 'e2e-admin-$(openssl rand -hex 12)'})
+print('SET')" >/dev/null
+check "reset-admin.sh: before it, admin has two sign-in methods, sessions and a token, and no hold" \
+  "$(admin_left | awk '{print ($2 >= 2) "/" ($3 >= 1) "/" $4 "/" $5}')" "1/1/1/False"
+check "reset-admin.sh: a password shorter than 24 characters is refused" "$(reset_py "reset
+short-$(openssl rand -hex 4)
+$(uuid4)
+")" REFUSED
 RESET_PW="reset-$(openssl rand -hex 12)"
-r="$(docker exec -e WF_NEW_PW="$RESET_PW" "$P-server" sh -c "$(cat "$WORK/reset.sh-c")" 2>&1 | tail -1)"
-check "reset-admin.sh: OK" "$r" OK
+check "reset-admin.sh: OK" "$(reset_py "reset
+$RESET_PW
+$(uuid4)
+")" OK
+check "reset-admin.sh: every sign-in method removed, every session and token ended, password resets by email held" \
+  "$(admin_left)" "LEFT 0 0 0 True"
+check "reset-admin.sh: its recovery recorded" "$(sql "select count(*) from authentik_events_event where action = 'custom_workforce_admin_recovery' and (context->>'wf_removed')::jsonb <> '{}'")" 1
+check "reset-admin.sh --allow-reset-mail: the hold lifted" "$(reset_py "allow-mail
+$(uuid4)
+")" OK
+check "reset-admin.sh --allow-reset-mail: again, nothing held" "$(reset_py "allow-mail
+$(uuid4)
+")" NOT_HELD
+check "reset-admin.sh --allow-reset-mail: admin's hold is gone" "$(admin_left)" "LEFT 0 0 0 False"
 check "reset-admin.sh: an unlock record is written for admin (contract R.7.4), by the server's clock" "$(sql "select count(*) from authentik_events_event where action = 'custom_workforce_password_unlock' and (context->>'wf_user_pk')::int = $ADMIN_PK and context->>'wf_at' like '20%Z'")" 1
 check "reset-admin.sh: no account carries the old unlock attribute" "$(sql "select count(*) from authentik_core_user where attributes->'workforce' ? 'password_unlocked_at'")" 0
 check "after reset-admin.sh, admin signs in from F" "$(fc f "$OUT" signin admin "$RESET_PW" | j 'd["result"]')" next
@@ -876,17 +920,34 @@ release() { touch "$WORK/state/$1.go"; wait "$HELD_PID"; }
 # held_end <mark>: the password step's answer, the last step's result and words, and who the session is signed in as
 held_end() { j '"%s|%s|%s|%s:%s" % (d[1]["status"], d[-2]["result"], d[-2].get("message", ""), d[-1]["status"], d[-1]["username"])' < "$WORK/$1.json"; }
 admin_set() { # admin_set <new password>: reset-admin.sh's program, exactly as the script passes it to the container
-  docker exec -e WF_NEW_PW="$1" "$P-server" sh -c "$(cat "$WORK/reset.sh-c")" 2>&1 | tail -1
+  reset_py "reset
+$1
+$(uuid4)
+"
+}
+admin_pw() { # admin_pw <new password>: admin's password changed and nothing else (its sessions, held sign-ins too, kept)
+  akshell "
+from authentik.core.models import User
+u = User.objects.get(username='admin'); u.set_password('$1'); u.save()
+print('SET')" | grep -c '^SET$'
 }
 hold h474a 192.0.2.201 admin "$RESET_PW"
 release h474a
 check "474: held, nothing changed: admin signs in" "$(held_end h474a)" "302|next||200:admin"
 hold h474b 192.0.2.202 admin "$RESET_PW"
 ADMIN_474="reset-$(openssl rand -hex 12)"
-check "474: held, then reset-admin.sh sets a new password" "$(admin_set "$ADMIN_474")" OK
+check "474: held, then a new password (and nothing else)" "$(admin_pw "$ADMIN_474")" 1
 release h474b
 check "474: the held sign-in is refused, with a wrong password's words, and nobody is signed in" "$(held_end h474b)" \
   "302|denied|$REPLACED|403:None"
+# reset-admin.sh (issue 487) ends a sign-in held for admin outright: its session is gone, so it starts again.
+hold h474b2 192.0.2.206 admin "$ADMIN_474"
+ADMIN_474="reset-$(openssl rand -hex 12)"
+check "474: held, then reset-admin.sh" "$(admin_set "$ADMIN_474")" OK
+release h474b2
+check "474: the held sign-in is ended (back to the name), nobody signed in" \
+  "$(j '"%s|%s|%s:%s" % (d[1]["status"], d[-2].get("component") == "xak-flow-redirect", d[-1]["status"], d[-1]["username"])' < "$WORK/h474b2.json")" \
+  "302|False|403:None"
 check "474: the new password signs admin in" "$(fc s "$IN" signin --headers "$(xff 192.0.2.202)" admin "$ADMIN_474" | j 'd["result"] + ":" + d["component"]')" \
   "next:xak-flow-redirect"
 # Staff, held before the code step: the same password chosen again (a new salt) is a change too.
@@ -922,12 +983,75 @@ print('SWAPPED')" | grep -c '^SWAPPED$'; }
 check "474: 99 set aside" "$(swap474 workforce-password-replaced workforce-no-first-run-page)" 1
 hold h474e 192.0.2.205 admin "$ADMIN_474"
 ADMIN_474B="reset-$(openssl rand -hex 12)"
-check "474: held, then a new password" "$(admin_set "$ADMIN_474B")" OK
+check "474: held, then a new password" "$(admin_pw "$ADMIN_474B")" 1
 release h474e
 check "474: 99 aside, the login step's own check: nobody signed in" "$(j 'd[-1]["status"]' < "$WORK/h474e.json")" 403
 check "474: 99 put back" "$(swap474 workforce-no-first-run-page workforce-password-replaced)" 1
 check "474: and admin signs in with its new password" "$(fc s "$IN" signin --headers "$(xff 192.0.2.205)" admin "$ADMIN_474B" | j 'd["result"] + ":" + d["component"]')" \
   "next:xak-flow-redirect"
+
+# ---- 18. Workforce issue 474 review, findings 1 and 2: an error refuses. In authentik 2026.8.5 an error inside an
+# expression policy is "fails" (failure_result covers PolicyException only), so each policy's own guard answers the
+# refusing value. Each policy below is made to raise inside its guard (a line just after its "try:"), then a sign-in
+# that would otherwise go on is tried from a fresh source; then the policy is put back. "outside" raises just before
+# the guard instead (as authentik would raise around a policy): the gates at 20 and 100 still refuse.
+INJECTED='raise RuntimeError("workforce-e2e: injected")'
+inject() { # inject [<policy name> [inside|outside]]: every policy put back, then that one made to raise; prints INJECTED <n>
+  akshell "
+from authentik.policies.expression.models import ExpressionPolicy
+MARK = '$INJECTED'
+for p in ExpressionPolicy.objects.filter(expression__contains=MARK):
+    p.expression = '\n'.join(l for l in p.expression.split('\n') if l.strip() != MARK); p.save()
+n = 0
+for p in ExpressionPolicy.objects.filter(name='${1:-}'):
+    src = '\n' + p.expression
+    if src.count('\ntry:\n') == 1:
+        add = '\ntry:\n    ' + MARK + '\n' if '${2:-inside}' == 'inside' else '\n' + MARK + '\ntry:\n'
+        p.expression = src.replace('\ntry:\n', add)[1:]; p.save(); n += 1
+print('INJECTED', n)" | grep '^INJECTED'
+}
+signedin() { # signedin <source> <name> <password>: the sign-in's last answer, then who its session is signed in as
+  fc s "$IN" signedin --headers "$(xff "$1")" "$2" "$3" | j 'd["result"] + ":" + d.get("component", "") + ":" + str(d["username"])'
+}
+HR="Please ask HR to add it"
+CODES="That code was wrong too many times"
+SRC=220
+case474() { # case474 <policy> <inside|outside> <name> <password> <words expected in the answer>
+  SRC=$((SRC + 1))
+  check "error ($2 the guard of $1): injected" "$(inject "$1" "$2")" "INJECTED 1"
+  has "error ($2 the guard of $1): $3 refused" "$(via "192.0.2.$SRC" "$3" "$4")" "$5"
+}
+check "the control: sam's right password, on to the code" "$(via 192.0.2.220 sam "$PW_SAM" | cut -d: -f1-2)" "next:ak-stage-authenticator-validate"
+case474 workforce-password-throttled inside sam "$PW_SAM" "$THROTTLED"                          # 15
+case474 workforce-network-tightened inside sam "$PW_SAM" "$NETWORK"                             # 16
+case474 workforce-password-paused inside sam "$PW_SAM" "$PAUSED"                                # 17
+case474 workforce-password-may-try inside sam "$PW_SAM" "$PAUSED"                               # 20: not checked, 23 refuses
+case474 workforce-password-may-try outside sam "$PW_SAM" "$PAUSED"                              # 20, as authentik would
+case474 workforce-password-not-checked-throttled inside sam "$PW_SAM" "$THROTTLED"              # 21
+case474 workforce-password-not-checked-network inside sam "$PW_SAM" "$NETWORK"                  # 22
+case474 workforce-password-not-checked inside sam "$PW_SAM" "$PAUSED"                           # 23
+case474 workforce-password-right inside sam "$PW_SAM" "$PAUSED"                                 # 24
+case474 workforce-password-seen inside sam "$PW_SAM" "$PAUSED"                                  # 24
+case474 workforce-codes-not-ready inside sam "$PW_SAM" "$HR"                                    # 25
+case474 workforce-codes-paused inside sam "$PW_SAM" "$CODES"                                    # 29
+case474 workforce-code-try inside sam "$PW_SAM" "next:ak-stage-authenticator-validate"          # 30: still asked
+case474 default-authentication-flow-authenticator-validate-stage inside sam "$PW_SAM" "next:ak-stage-authenticator-validate"
+case474 workforce-password-replaced inside admin "$ADMIN_474B" "$REPLACED"                      # 99
+# 30 for admin (no authenticator app): an error asks it for a code too, which it can't give: not signed in.
+check "error (inside the guard of workforce-not-the-emergency-administrator): injected" "$(inject workforce-not-the-emergency-administrator)" "INJECTED 1"
+check "error (inside the guard of workforce-not-the-emergency-administrator): admin not signed in" \
+  "$(signedin 192.0.2.240 admin "$ADMIN_474B" | cut -d: -f3)" None
+# 100, with 99 set aside: an error inside its guard, then outside it, and nobody is signed in.
+check "474 errors: 99 set aside" "$(swap474 workforce-password-replaced workforce-no-first-run-page)" 1
+for where in inside outside; do
+  check "error ($where the guard of workforce-password-unchanged): injected" "$(inject workforce-password-unchanged "$where")" "INJECTED 1"
+  check "error ($where the guard of workforce-password-unchanged): admin not signed in" \
+    "$(signedin "192.0.2.24$([ "$where" = inside ] && echo 1 || echo 2)" admin "$ADMIN_474B" | cut -d: -f3)" None
+done
+check "474 errors: every policy put back" "$(inject)" "INJECTED 0"
+check "474 errors: 99 put back" "$(swap474 workforce-no-first-run-page workforce-password-replaced)" 1
+check "474 errors: no policy still raises" "$(sql "select count(*) from authentik_policies_expression_expressionpolicy where expression like '%workforce-e2e: injected%'")" 0
+check "474 errors: and admin signs in" "$(signedin 192.0.2.243 admin "$ADMIN_474B")" "next:xak-flow-redirect:admin"
 
 echo "authentik lock on the pinned authentik ($AK_IMAGE): ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]

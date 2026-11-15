@@ -9,6 +9,11 @@
 # `secrets: file:` can work there; bin/check-controller-compose.py fails CI if one comes back. compose.yaml
 # itself is unchanged: the install path of today keeps using it until the controller ships (ADR-0032).
 # Needs Docker Engine 26 or later (volume subpaths).
+#
+# The controller itself is not in this file: it runs as its own container, published on the server's loopback
+# address only (`docker run … -p 127.0.0.1:8443:8443 …`, never `-p 8443:8443`: Docker's published ports pass ufw and
+# firewalld) and reached through `ssh -N -L 8443:127.0.0.1:8443 <you>@<server>` (RUNBOOK §6b; Workforce issue 488).
+# Nothing here publishes 8443 (bin/check-controller-compose.py).
 
 x-own: &own
   type: volume

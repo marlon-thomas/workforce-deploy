@@ -82,9 +82,9 @@ first_run = next((e for e in entries if "policybinding" in e and "wf-no-first-ru
 check("the first-run page refuses everyone", "target: !KeyOf wf-first-run-flow" in first_run)
 check("its policy says no", any("id: wf-no-first-run" in e and "return False" in e for e in entries))
 
-# Any refusing or negated policy we bind must not be outvoted: its target needs all of its policies to pass.
+# Any refusing policy we bind on a gate must not be outvoted: its target needs all of its policies to pass.
 for e in entries:
-    if "policybinding" in e and ("negate: true" in e or "wf-no-first-run" in e):
+    if "policybinding" in e and ("wf-no-first-run" in e or "wf-password-may-try" in e or "wf-password-unchanged" in e):
         m = re.search(r"target: !KeyOf ([\w-]+)", e)
         target = next((t for t in entries if m and ("id: " + m.group(1) + "\n") in t), "")
         check("the target of a refusing binding needs all its policies (%s)" % (m.group(1) if m else "?"),
@@ -95,9 +95,12 @@ for e in entries:
 pw = binding("default-authentication-flow", "default-authentication-password")
 check("the password step is re-checked on every try", "re_evaluate_policies: true" in pw and order(pw) == 20)
 check("all of its policies must pass", "policy_engine_mode: all" in pw)
-check("one of them: not paused (issue 462), negated, an error refusing",
-      any("policybinding" in e and "target: !KeyOf wf-password-binding" in e and "policy: !KeyOf wf-password-try" in e
-          and "negate: true" in e and "failure_result: false" in e for e in entries))
+check("one of them: may try (issue 462), a yes for go on, never negated (issue 474 review, finding 2)",
+      any("policybinding" in e and "target: !KeyOf wf-password-binding" in e and "policy: !KeyOf wf-password-may-try" in e
+          and "negate" not in e and "failure_result: false" in e for e in entries))
+check("the old negated policy is removed (its binding goes with it)",
+      any("name: workforce-password-try }" in e and "state: absent" in e for e in entries)
+      and not any("id: wf-password-try\n" in e for e in entries))
 # ... and nothing goes past it without a password checked in this sign-in (a skipped password step refuses).
 guard = binding("default-authentication-flow", "wf-password-not-checked-stage")
 check("no password checked, no further", guard and 22 < order(guard) < 25 and "re_evaluate_policies: true" in guard)
@@ -135,13 +138,13 @@ check("30: each code typed recorded, never skipping the code step (it passes, an
       "failure_result: true" in bound("wf-code-step-binding", "wf-code-try"))
 check("the old locks are removed", all(any(k in e and "state: absent" in e for e in entries) for k in
       ("name: workforce-too-many-tries }", "name: workforce-too-many-tries-by-account }")))
-for key in ("wf-password-paused", "wf-password-try", "wf-password-right", "wf-code-try", "wf-codes-paused"):
+for key in ("wf-password-paused", "wf-password-may-try", "wf-password-right", "wf-code-try", "wf-codes-paused"):
     policy = next((e for e in entries if "id: " + key + "\n" in e), "")
     body = "\n".join(l for l in policy.splitlines() if not l.strip().startswith("#"))
     check(key + ": authentik's reputation score isn't read", "Reputation" not in body and "update_score" not in body)
     check(key + ": the address is authentik's own, through wf_ak_subject", "wf_ak_subject(request)" in body
           or "wf_ak_decide(request)" in body)
-try_policy = next((e for e in entries if "id: wf-password-try\n" in e), "")
+try_policy = next((e for e in entries if "id: wf-password-may-try\n" in e), "")
 check("a try is recorded only for a request the stage checks", "wf_password_request(http.method, http.data)" in try_policy)
 check("under the try's locks (the connection's, its /48's unless proven, the pair's)",
       "wf_ak_lock(cursor, *wf_ak_try_locks(account, conn, proven))" in try_policy
@@ -194,8 +197,8 @@ check("whose one policy always refuses with the address", bound("wf-client-addre
 
 # Workforce issue 474: a sign-in held between the password step and the login can't finish once the password changed.
 seen_b = bound("wf-password-right-binding", "wf-password-seen")
-check("474: 24 records what the password step saw (an error leaves no record, never shows the pause's words)",
-      order(right) == 24 and "order: 1," in seen_b and "failure_result: false" in seen_b and "negate" not in seen_b)
+check("474: 24 records what the password step saw (an error refuses there)",
+      order(right) == 24 and "order: 1," in seen_b and "failure_result: true" in seen_b and "negate" not in seen_b)
 check("474: before the code step, the only stage that could replace the plan's account",
       order(right) < order(binding("default-authentication-flow", "default-authentication-mfa-validation")) == 30)
 seen_p = next((e for e in entries if "id: wf-password-seen\n" in e), "")
@@ -203,13 +206,14 @@ seen_ak = "\n".join(l for l in seen_p.split("---- the authentik part ----")[-1].
 check("474: from the flow plan's account (the backend's own, as checked), never the database",
       'person = plan.context.get("pending_user")' in seen_ak and 'getattr(person, "password", None)' in seen_ak
       and "objects" not in seen_ak)
-check("474: recorded once, only once a password was checked, and it never refuses",
-      'not plan.context.get("user_backend") or WF_PLAN_SEEN in plan.context' in seen_ak and "return True" not in seen_ak)
+check("474: recorded once, only once a password was checked, and it refuses only on an error",
+      'not plan.context.get("user_backend") or WF_PLAN_SEEN in plan.context' in seen_ak
+      and "return True" not in seen_ak.split("except Exception")[0])
 replaced_p = next((e for e in entries if "id: wf-password-replaced\n" in e), "")
 check("474: the check compares with the account as the primary database has it now",
       'User.objects.using("default").filter(pk=seen["pk"]).values_list("pk", "password", "is_active").first()' in replaced_p
       and "return wf_password_replaced(seen, pending_pk, current) is not None" in replaced_p)
-check("474: no flow plan refuses", "if plan is None:\n            return True" in replaced_p)
+check("474: no flow plan refuses", "if plan is None:\n                return True" in replaced_p)
 for key in ("wf-password-seen", "wf-password-replaced"):
     e = next((x for x in entries if "id: " + key + "\n" in x), "")
     check("474: " + key + " includes the rule", "{% include 'password-unchanged.py' %}" in e)
@@ -221,9 +225,16 @@ login_b = binding("default-authentication-flow", "default-authentication-login")
 check("474: the login step's own binding: 100, re-checked when reached, all its policies",
       order(login_b) == 100 and "re_evaluate_policies: true" in login_b and "evaluate_on_plan: false" in login_b
       and "policy_engine_mode: all" in login_b and "id: wf-login-binding\n" in login_b)
-login_pb = bound("wf-login-binding", "wf-password-replaced")
-check("474: the same check there, negated, an error skipping the login",
-      "negate: true" in login_pb and "failure_result: false" in login_pb)
+login_pb = bound("wf-login-binding", "wf-password-unchanged")
+check("474: the same comparison there, as a yes for sign in, never negated (review finding 1)",
+      bool(login_pb) and "negate" not in login_pb and "failure_result: false" in login_pb)
+check("474: the negated binding it replaces is removed", "state: absent" in bound("wf-login-binding", "wf-password-replaced"))
+unchanged_p = next((e for e in entries if "id: wf-password-unchanged\n" in e), "")
+check("474: workforce-password-unchanged: the same comparison, answered the other way round",
+      'User.objects.using("default").filter(pk=seen["pk"]).values_list("pk", "password", "is_active").first()' in unchanged_p
+      and "return wf_password_replaced(seen, pending_pk, current) is None" in unchanged_p
+      and "if plan is None:\n                return False" in unchanged_p
+      and "{% include 'password-unchanged.py' %}" in unchanged_p)
 others = [order(e) for e in entries if "flowstagebinding" in e and "slug, default-authentication-flow]" in e
           and "state: absent" not in e and e not in (deny_474, login_b)]
 check("474: nothing else between the check and the login", bool(others) and max(others) < 99)
@@ -251,6 +262,78 @@ check("authentik's own change-password page refuses it", any("policybinding" in 
       and any("id: wf-default-password-change\n" in e and "slug: default-password-change }" in e and "state: created" in e
               for e in entries))
 
+# Workforce issue 474 review, findings 1 and 2: in authentik 2026.8.5 an ordinary error in an expression policy is
+# "fails" (failure_result covers PolicyException only) and a negated binding turns that into "passes". So: no binding
+# is negated, and every policy bound here (or checking a typed password) keeps its own code in one guard whose except
+# answers, written out, the value that refuses on every binding it has: True on a deny stage's binding or the code
+# step's (a step that must run), False on a gate (a flow, the password and login steps) or a password check. Each of
+# its bindings' failure_result says the same.
+check("no binding is negated", not any("policybinding" in e and "negate:" in e for e in entries))
+ids = {}
+for e in entries:
+    m = re.search(r"\n    id: ([\w-]+)\n", "\n" + e)
+    if m:
+        ids[m.group(1)] = e
+deny_stages = set(k for k, e in ids.items() if e.startswith("model: authentik_stages_deny.denystage"))
+MUST_RUN = {"wf-code-step-binding"}
+def refusing_for_target(key):
+    e = ids.get(key, "")
+    m = re.search(r"stage: !KeyOf ([\w-]+)", e)
+    if "flowstagebinding" in e and m and m.group(1) in deny_stages:
+        return True
+    return key in MUST_RUN
+want = {}   # policy key or name -> the refusing value
+for e in entries:
+    if "policybinding" in e and "state: absent" not in e:
+        tm, pm = re.search(r"target: !KeyOf ([\w-]+)", e), re.search(r"policy: !KeyOf ([\w-]+)", e)
+        if not (tm and pm):
+            check("a binding names its target and policy by key: " + e.split("\n")[0], False)
+            continue
+        v = refusing_for_target(tm.group(1))
+        check("%s on %s: one refusing value for all its bindings" % (pm.group(1), tm.group(1)), want.setdefault(pm.group(1), v) == v)
+        fr = re.search(r"failure_result: (true|false)", e)
+        check("%s on %s: failure_result says the same as its guard" % (pm.group(1), tm.group(1)),
+              (fr.group(1) == "true" if fr else False) == v)
+for e in entries:
+    for m in re.finditer(r"- !KeyOf ([\w-]+)", e.split("validation_policies:")[1] if "validation_policies:" in e else ""):
+        want.setdefault(m.group(1), False)
+# authentik's own policies on the password and code steps (its default flow binds them; restated here by name).
+for name in ("default-authentication-flow-password-stage", "default-authentication-flow-authenticator-validate-stage"):
+    want[name] = True
+CONSTANT = {"wf-no-first-run"}   # "return False" and nothing else: nothing to fail
+guarded = 0
+for e in entries:
+    if "authentik_policies_expression.expressionpolicy" not in e or "state: absent" in e:
+        continue
+    key = (re.search(r"\n    id: ([\w-]+)\n", "\n" + e) or [None, None])[1]
+    name = re.search(r"\n      name: ([\w-]+)\n", e).group(1)
+    if key == "wf-sign-in-status-code":
+        continue   # bound nowhere (checked above), with its own try/except
+    if key in CONSTANT:
+        check(key + ": a constant refusal", e.rstrip().endswith("expression: |\n        return False"))
+        continue
+    v = want.get(key, want.get(name))
+    check(name + ": bound or used, with a refusing value", v is not None)
+    body = e.split("expression: |\n", 1)[1]
+    own = body.split("# ---- the authentik part ----\n", 1)[-1]
+    lines = []
+    for l in own.split("\n"):
+        if l and not l.startswith("        "):
+            break   # the entry's own end (a comment or the next key follows)
+        lines.append(l)
+    while lines and lines[-1] == "":
+        lines.pop()
+    check(name + ": its own code is one guard", lines[0] == "        try:"
+          and all(l == "" or l.startswith("            ") for l in lines[1:-7]) and lines[-7] == "        except Exception as wf_error:"
+          and sum(1 for l in lines if l.startswith("        ") and not l.startswith("         ")) == 2)
+    check(name + ": whose except answers the refusing value (%s), whatever its log line does" % v,
+          lines[-6:] == ["            try:",
+                         '                ak_logger.warning("workforce: an error in a sign-in policy, so it refuses", policy="%s",' % name,
+                         '                                  error="%s: %s" % (type(wf_error).__name__, str(wf_error)[:200]))',
+                         "            except Exception:", "                pass", "            return %s" % v])
+    guarded += 1
+check("every guarded policy counted (23)", guarded == 23)
+
 print("blueprint self-test: %d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
 PY
@@ -268,10 +351,18 @@ done
 check "the converge closes the first-run page" "$(grep -c 'Setup.set(True)' "$REPO/ansible/roles/authentik/files/sign-in-hardening.py")" 1
 check "and moves the score's floor below the lock" "$(grep -c 'reputation_lower_limit = -100' "$REPO/ansible/roles/authentik/files/sign-in-hardening.py")" 1
 check "the converge runs it" "$(grep -c "ak shell -c \"exec(open(./tmp/sign-in-hardening.py.)" "$REPO/ansible/roles/authentik/tasks/main.yml")" 1
-check "the operator's recovery removes the emergency administrator's app (new problem 6)" \
-  "$(grep -c 'TOTPDevice.objects.filter(user=u).delete()' "$REPO/bin/reset-admin.sh")" 1
+RESET="$REPO/bin/reset-admin.sh"
+check "the operator's recovery removes every sign-in method of every class authentik has (new problem 6, issue 487)" \
+  "$(grep -c 'for m in device_classes():' "$RESET")/$(grep -c 'removed\[m._meta.label\] = m.objects.filter(user=u).count()' "$RESET")" 1/1
 check "and lifts its wrong-password pause by an unlock record (issue 462, contract R.7.4), not an attribute or by deleting records" \
-  "$(grep -c 'Event.new("workforce_password_unlock"' "$REPO/bin/reset-admin.sh")/$(grep -c 'wf\["password_unlocked_at"\] = \|Reputation' "$REPO/bin/reset-admin.sh")" 1/0
+  "$(grep -c 'record("workforce_password_unlock", u, at, wf_unlock_id=rid' "$RESET")/$(grep -c 'wf\["password_unlocked_at"\] = \|Reputation' "$RESET")" 1/0
+check "and ends its sessions, held sign-ins, tokens and grants (issue 487)" "$(grep -c 'ended = end_sign_ins(u)' "$RESET")" 1
+check "all of it in one transaction, under issue 462's lock on the account" \
+  "$(grep -c 'with transaction.atomic():' "$RESET")/$(grep -c 'pg_advisory_xact_lock(%s, %s)", \[WF_LOCK_ACCOUNT' "$RESET")" 2/2
+check "and holds password resets by email until --allow-reset-mail" \
+  "$(grep -c 'wf\["recovery_mail_held"\] = {"recovery": rid' "$RESET")/$(grep -c -- '--allow-reset-mail)\|"--allow-reset-mail" \]' "$RESET")" 1/1
+check "the new password: on stdin only, never on disk, in the environment or on a command line (issue 487)" \
+  "$(grep -c 'secrets/\|WF_NEW_PW\| -e ' "$RESET")/$(grep -c "printf 'reset\\\\n%s\\\\n%s\\\\n' \"\$NEW_PW\" \"\$(uuid)\" | run_py" "$RESET")" 0/1
 # Workforce issue 462 (contract R.8): the application's service account gets no event access, and loses any it had.
 INVITE="$REPO/ansible/roles/authentik/files/invite-service-account.py"
 check "invite-service-account.py grants no view_event" "$(python3 -I -c 'import re,sys; t=open(sys.argv[1]).read(); m=re.search(r"for perm in \((.*?)\):\n    assign\(perm\)", t, re.S); print(int("view_event" in m.group(1)) if m else "no list")' "$INVITE")" 0

@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # authentik-policies-e2e.sh — the blueprint's expression policies that reach into authentik's own code, run on the
-# pinned authentik image itself (compose.yaml's authentik-server, by digest), and ./bin/reset-admin.sh's program as
-# the script runs it there. Second review of the controller bundle, findings 2, 4 and 6:
+# pinned authentik image itself (compose.yaml's authentik-server, by digest). Second review of the controller bundle,
+# findings 2, 4 and 6:
 #   (the wrong-password pause of Workforce issue 462, which replaced the wrong-tries lock, runs on a live authentik
 #     with a real database in bin/tests/authentik-lock-e2e.sh)
 #   - the emergency administrator's password rule (wf-emergency-password; zxcvbn) and authentik's own
 #     change-password page refusing that account (wf-emergency-not-here); nobody else is affected.
-#   - reset-admin.sh: its `sh -c` exactly as the script passes it (the image's python, found on its PATH), with the
-#     database calls replaced by fakes that record what it did: the password set, the authenticator apps removed,
-#     the unlock marker written (issue 462), "OK" last.
+#   (./bin/reset-admin.sh's program, which since Workforce issue 487 removes every sign-in method and ends sessions
+#     and tokens in one transaction, runs on a real database in bin/tests/authentik-lock-e2e.sh, section 9.)
 # Each policy's source is read from the template, so a change there is what gets tested. No database: the queries
 # go to fakes that check the model's field names; authentik's own expression evaluator runs the code. Needs Docker,
 # no network (the image must be present or pullable). Not part of bin/ci-validate.sh.
@@ -29,10 +28,10 @@ case "$IMAGE" in
   *) [ -n "${AUTHENTIK_IMAGE:-}" ] || { echo "FAIL: compose.yaml pins $IMAGE, this test says $VERIFIED_AUTHENTIK"; exit 1; } ;;
 esac
 
-# The policies' source, from the template, and reset-admin.sh's sh -c argument.
-python3 -I - "$REPO/ansible/roles/authentik/templates/workforce-app.yaml.j2" "$REPO/bin/reset-admin.sh" "$WORK" <<'PY' || exit 1
+# The policies' source, from the template.
+python3 -I - "$REPO/ansible/roles/authentik/templates/workforce-app.yaml.j2" "$WORK" <<'PY' || exit 1
 import os, re, sys
-template, reset, work = sys.argv[1:4]
+template, work = sys.argv[1:3]
 text = open(template, encoding="utf-8").read()
 for key in ("wf-emergency-password", "wf-emergency-not-here"):
     m = re.search(r"\n    id: " + re.escape(key) + r"\n(?:.*\n)*?      expression: \|\n((?:        .*\n|\n)+)", text)
@@ -40,59 +39,22 @@ for key in ("wf-emergency-password", "wf-emergency-not-here"):
         sys.exit("FAIL: no expression for " + key + " in the template")
     body = "".join(line[8:] + "\n" for line in m.group(1).splitlines())
     open(os.path.join(work, key + ".py"), "w", encoding="utf-8").write(body)
-script = open(reset, encoding="utf-8").read()
-m = re.search(r"authentik-server sh -c \\\n  '(.*?)' 2>&1 \| tail -1\)\"", script, re.S)
-if not m:
-    sys.exit("FAIL: reset-admin.sh's sh -c argument not found")
-open(os.path.join(work, "reset-admin.sh-c"), "w", encoding="utf-8").write(m.group(1))
 PY
 
 mkdir -p "$WORK/site"
-# Run first in every python the container starts: Django set up, and the database replaced by recording fakes.
+# Run first in every python the container starts: Django set up (no database: the policies here don't query one).
 cat > "$WORK/site/sitecustomize.py" <<'PY'
-import atexit, os, sys
+import os, sys
 sys.path.insert(0, "/")
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "authentik.root.settings")
 import django
 django.setup()
-from authentik.core.models import User
-from authentik.stages.authenticator_totp.models import TOTPDevice
-
-RECORD = []
-
-class FakeUser:
-    username = "admin"
-    attributes = {"workforce": {"codes": "kept"}, "other": 1}
-    def set_password(self, pw):
-        RECORD.append("password set: " + ("the given one" if pw == os.environ.get("WF_NEW_PW") else "another"))
-    def save(self, *a, **kw):
-        wf = (self.attributes or {}).get("workforce") or {}
-        RECORD.append("user saved; marker %s; kept %s" % ("set" if wf.get("password_unlocked_at") else "missing",
-                      wf.get("codes") == "kept" and self.attributes.get("other") == 1))
-
-class Users:
-    def get(self, **kw):
-        assert kw == {"username": "admin"}, kw
-        return FakeUser()
-
-class Devices:
-    def filter(self, **kw):
-        assert set(kw) == {"user"} and isinstance(kw["user"], FakeUser), kw
-        class D:
-            def delete(self):
-                RECORD.append("authenticator apps deleted")
-                return 0, {}
-        return D()
-
-User.objects = Users()
-TOTPDevice.objects = Devices()
-atexit.register(lambda: [print("RECORD", r) for r in RECORD])
 PY
 
 cat > "$WORK/policies.py" <<'PY'
 import sys
 sys.path.insert(0, "/t/site")
-import sitecustomize as fakes
+import sitecustomize
 from django.test import RequestFactory
 from authentik.core.models import User
 from authentik.policies.expression.evaluator import PolicyEvaluator
@@ -109,6 +71,12 @@ def check(name, ok):
 
 src = {k: open("/t/%s.py" % k).read() for k in ("wf-emergency-password", "wf-emergency-not-here")}
 
+class Log:
+    def __init__(self):
+        self.lines = []
+    def warning(self, *a, **kw):
+        self.lines.append((a, kw))
+
 def run(key, user, ip="192.0.2.10", context=None, groups=()):
     req = PolicyRequest(user)
     req.http_request = RequestFactory().post("/if/flow/default-authentication-flow/", REMOTE_ADDR=ip)
@@ -116,7 +84,13 @@ def run(key, user, ip="192.0.2.10", context=None, groups=()):
     ev = PolicyEvaluator(key)
     ev.set_policy_request(req)
     ev._globals["ak_is_group_member"] = lambda u, **kw: kw.get("name") in groups
-    return ev.evaluate(src[key])   # an error raises (authentik's PolicyException): this test fails
+    # Each policy's guard turns an error into a refusal and a log line (Workforce issue 474 review): none may happen
+    # here, or a refusal below could be an error rather than the rule.
+    log = Log()
+    ev._globals["ak_logger"] = log
+    result = ev.evaluate(src[key])
+    check(key + ": no error inside its guard", not log.lines)
+    return result
 
 # User.is_superuser asks the database (a group with superuser rights); here it is what the test says.
 User.is_superuser = property(lambda self: getattr(self, "_wf_superuser", False))
@@ -151,8 +125,7 @@ print("authentik policies on the pinned image: %d passed, %d failed" % (passed, 
 sys.exit(1 if failed else 0)
 PY
 
-PASS=0; FAILN=0
-check() { if [ "$2" = "$3" ]; then PASS=$((PASS+1)); else FAILN=$((FAILN+1)); printf 'FAIL: %s: expected [%s] got [%s]\n' "$1" "$3" "$2"; fi; }
+FAILN=0
 chmod -R a+rX "$WORK"
 RUN=(docker run --rm --network none -e AUTHENTIK_SECRET_KEY=e2e-test-only -v "$WORK:/t:ro")
 
@@ -161,17 +134,5 @@ POL_RC=$?
 grep -E '^(FAIL|authentik policies|Traceback)|Error' "$WORK/policies.out" | grep -v '"level"' | tail -20
 [ "$POL_RC" -eq 0 ] || FAILN=$((FAILN+1))
 
-# reset-admin.sh's program, exactly as the script hands it to the container's sh.
-"${RUN[@]}" -e WF_NEW_PW=e2e-new-password -e PYTHONPATH=/t/site --entrypoint sh "$IMAGE" -c "$(cat "$WORK/reset-admin.sh-c")" \
-  > "$WORK/reset.out" 2>&1
-RESET_RC=$?
-check "reset-admin.sh: the program runs" "$RESET_RC" 0
-check "reset-admin.sh: it ends OK (what the script reads)" "$(grep -v '^RECORD ' "$WORK/reset.out" | grep -v '^{' | tail -1)" OK
-check "reset-admin.sh: the given password is set" "$(grep -c '^RECORD password set: the given one$' "$WORK/reset.out")" 1
-check "reset-admin.sh: and saved, with the unlock marker, other attributes kept" "$(grep -c '^RECORD user saved; marker set; kept True$' "$WORK/reset.out")" 1
-check "reset-admin.sh: authenticator apps removed" "$(grep -c '^RECORD authenticator apps deleted$' "$WORK/reset.out")" 1
-check "reset-admin.sh: no record deleted (the marker lifts the pause)" "$(grep -c '^RECORD reputation' "$WORK/reset.out")" 0
-[ "$RESET_RC" -eq 0 ] || grep -v '^{' "$WORK/reset.out" | tail -5
-
-echo "reset-admin.sh on the pinned image: ${PASS} passed, ${FAILN} failed"
+echo "the policies on the pinned image: ${FAILN} failed"
 [ "$FAILN" -eq 0 ]
