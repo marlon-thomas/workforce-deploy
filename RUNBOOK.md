@@ -267,9 +267,11 @@ recovery codes, security keys and passkeys, email, text-message, Duo and device 
 ended (its sessions and any sign-in part way through, its tokens, links to outside sign-ins, OAuth and SAML grants);
 the pause on the name `admin` lifted by an unlock record; and password resets by email held, so whoever has the lost
 mailbox can't reset the account again. The sign-in server enforces that hold itself: while it is set, it makes no
-reset link for `admin`, whatever Workforce asks. `./bin/reset-admin.sh` checks that the installed sign-in set-up does
-this and says plainly if it doesn't (a set-up older than the script: bring it up to date with `./bin/update.sh`, and
-until then change `admin`'s email address in Workforce to one only your organisation reads).
+reset link for `admin`, whatever Workforce asks, from the moment of the recovery (the sign-in server's cached answers
+about reset links are cleared with it). `./bin/reset-admin.sh` checks that the installed sign-in set-up does this
+(including that its password-reset flow needs every policy on it to pass) and says plainly if it doesn't (a set-up
+older than the script, or one changed by hand: bring it up to date with `./bin/update.sh`, and until then change
+`admin`'s email address in Workforce to one only your organisation reads).
 
 A recovery lifts the pause on the **name** `admin` only. A hold on a whole **connection or network** after many wrong
 passwords for any name is not lifted: it ends by itself 15 minutes after the last of those tries, or sign in from

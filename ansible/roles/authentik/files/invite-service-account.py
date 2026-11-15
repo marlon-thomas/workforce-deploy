@@ -135,6 +135,18 @@ if fresh.has_perm("authentik_core.view_propertymapping") or fresh.has_perm("auth
     leaks.append("it may read every property mapping or policy")
 if leaks:
     raise SystemExit("workforce-invites: " + "; ".join(leaks) + " (a role or group gives it): remove that, then run this again")
+# Review of 497af97: every sign-in policy loads the shared code (workforce-sign-in-code) when it runs, and a binding on
+# the recovery flow enforces the hold on resets by email; whoever may add, change or delete a policy or a binding,
+# globally or on one object, could run code in every sign-in or unbind the hold. The application never needs to.
+from django.db.models import Q
+
+POLICY_WRITE = Permission.objects.filter(
+    (Q(content_type__app_label="authentik_policies") | Q(content_type__app_label__startswith="authentik_policies_"))
+    & (Q(codename__startswith="add_") | Q(codename__startswith="change_") | Q(codename__startswith="delete_")))
+if any(fresh.has_perm("%s.%s" % (p.content_type.app_label, p.codename)) for p in POLICY_WRITE.select_related("content_type")) \
+        or RoleObjectPermission.objects.filter(role__in=fresh.all_roles(), permission__in=POLICY_WRITE).exists():
+    raise SystemExit("workforce-invites: it may add, change or delete a sign-in policy or binding (a role or group gives "
+                     "it): remove that, then run this again")
 
 Token.objects.update_or_create(
     identifier="workforce-invite-token",

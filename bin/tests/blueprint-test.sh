@@ -428,6 +428,21 @@ check "reset-admin.sh looks for exactly that check on the recovery flow" \
   "$(grep -c "expression__contains='wf.get(\"recovery_mail_held\") is not None')" "$RESET")" 1
 check "and says the hold is in force only when it finds it" \
   "$(grep -c "^  HOLD=\"Password resets by email$" "$RESET")/$(grep -c "grep -qx 'mail hold: enforced'" "$RESET")" 2/1
+# Live run and review of 497af97, finding 1: authentik keeps a policy's answer per account for up to 300 s and forgets
+# it when a policy or binding changes, never an account; so after the hold is set or lifted the script drops the cached
+# answers of the recovery flows' bindings, after the commit (and again while it looks for requests under way), and says
+# "enforced" only when that worked. Finding 2: "held" means the same as in the policy (present and not null), and the
+# lift removes whatever is there. Finding 3: the recovery flow needs every binding to pass, and the script checks that.
+check "the recovery flow needs every binding to pass (finding 3)" \
+  "$(awk '/id: wf-recovery-flow$/{on=1; next} on && /^  - /{exit} on && /^      policy_engine_mode: all$/{print "yes"; exit}' "$BP")" yes
+check "reset-admin.sh drops authentik's cached answers of the recovery bindings, as authentik's own signal does" \
+  "$(grep -c 'cache.keys(f"{CACHE_PREFIX}{b.policy_binding_uuid.hex}_\*")' "$RESET")" 1
+check "after each commit and on each look for requests under way" \
+  "$(grep -c 'forget_recovery_answers()' "$RESET")" 4
+check "and says enforced only when that worked and the flow needs every binding to pass" \
+  "$(grep -c '"enforced" if forgot and mail_hold_enforced()' "$RESET")/$(grep -c 'f.policy_engine_mode == PolicyEngineMode.MODE_ALL' "$RESET")" 1/1
+check "held means present and not null everywhere (finding 2)" \
+  "$(grep -c 'if not wf.get("recovery_mail_held")\|wf.get("recovery_mail_held") or' "$RESET")/$(grep -c 'def mail_held(wf):' "$RESET")" 0/1
 check "the new password: on stdin only, never on disk, in the environment or on a command line (issue 487)" \
   "$(grep -c 'secrets/\|WF_NEW_PW\| -e ' "$RESET")/$(grep -c "printf 'reset\\\\n%s\\\\n%s\\\\n' \"\$NEW_PW\" \"\$(uuid)\" | run_py" "$RESET")" 0/1
 # Workforce issue 462 (contract R.8): the application's service account gets no event access, and loses any it had.
@@ -435,6 +450,10 @@ INVITE="$REPO/ansible/roles/authentik/files/invite-service-account.py"
 check "invite-service-account.py grants no view_event" "$(python3 -I -c 'import re,sys; t=open(sys.argv[1]).read(); m=re.search(r"for perm in \((.*?)\):\n    assign\(perm\)", t, re.S); print(int("view_event" in m.group(1)) if m else "no list")' "$INVITE")" 0
 check "and revokes it (globally and on objects), then fails if anything still gives it" \
   "$(grep -c 'RoleModelPermission.objects.filter(role=r, permission=VIEW_EVENT).delete()\|RoleObjectPermission.objects.filter(role=r, permission=VIEW_EVENT).delete()\|fresh.has_perm("authentik_events.view_event")\|raise SystemExit("workforce-invites: "' "$INVITE")" 4
+# Review of 497af97: a role that may change any policy or binding (globally or on one object) could change the shared
+# sign-in code or unbind the hold, so the application's account must have none.
+check "invite-service-account.py fails if the account may add, change or delete a policy or binding" \
+  "$(grep -c 'raise SystemExit("workforce-invites: it may add, change or delete' "$INVITE")" 1
 check "the status interface: object permissions on that one mapping only" \
   "$(grep -c 'role.assign_perms(\["authentik_core.view_propertymapping", "authentik_core.add_propertymapping"\], mapping)' "$INVITE")" 1
 check "and the old unlock attribute is removed from every account" "$(grep -c 'wf.pop("password_unlocked_at", None)' "$INVITE")" 1

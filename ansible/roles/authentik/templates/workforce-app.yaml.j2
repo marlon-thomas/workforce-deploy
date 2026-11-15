@@ -266,6 +266,9 @@ entries:
       # depend on the application's version. Anything there but an absent or null value holds, as the application's
       # own check (AuthentikRecovery.mailResetHeld). Only reset-admin.sh --allow-reset-mail or the controller page
       # lifts it (the application's credential could write the attribute too, but it decides about links anyway).
+      # authentik keeps this policy's answer per account for up to cache.timeout_policies (300 s) and forgets it when a
+      # policy or binding changes, not when an account does: whatever sets or lifts the hold drops the cached answers
+      # of the recovery flow's bindings after its commit (review of 497af97, finding 1), or the hold waits up to 300 s.
       expression: |
         try:
             user = request.user
@@ -343,6 +346,9 @@ entries:
       designation: recovery
       authentication: none
       layout: stacked
+      # Every binding must pass (review of 497af97, finding 3): authentik's default, "any", would let a link through
+      # if someone bound another policy here that passes, whatever workforce-recovery-staff-only says.
+      policy_engine_mode: all
   - model: authentik_policies.policybinding
     identifiers: { target: !KeyOf wf-recovery-flow, policy: !KeyOf wf-recovery-staff-only }
     attrs: { order: 0, enabled: true }

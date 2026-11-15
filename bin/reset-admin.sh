@@ -147,15 +147,43 @@ def record(action, u, at, **context):
 
 def mail_hold_enforced():
     """Whether this sign-in server itself refuses a reset link while the hold is set: every brand's recovery flow has
-    an enabled, not negated binding of an expression policy that reads it (the Workforce blueprint's
-    workforce-recovery-staff-only, since the final review of the controller bundle). No recovery flow: no link at all."""
+    an enabled, not negated binding of the Workforce blueprint's workforce-recovery-staff-only, which reads it (since the
+    final review of the controller bundle), and needs every binding to pass (review of 497af97, finding 3: with "any",
+    another binding that passes lets a link through). No recovery flow: no link at all."""
     from authentik.brands.models import Brand
     from authentik.policies.expression.models import ExpressionPolicy
-    from authentik.policies.models import PolicyBinding
+    from authentik.policies.models import PolicyBinding, PolicyEngineMode
     flows = [b.flow_recovery for b in Brand.objects.exclude(flow_recovery=None)]
-    return all(ExpressionPolicy.objects.filter(
+    return all(f.policy_engine_mode == PolicyEngineMode.MODE_ALL and ExpressionPolicy.objects.filter(
         pk__in=PolicyBinding.objects.filter(target__pbm_uuid=f.pbm_uuid, enabled=True, negate=False).values("policy_id"),
+        name="workforce-recovery-staff-only",
         expression__contains='wf.get("recovery_mail_held") is not None').exists() for f in flows)
+
+def forget_recovery_answers():
+    """Drops authentik's cached answers of every binding on a recovery flow (review of 497af97, finding 1). authentik
+    keeps a policy's answer per account for cache.timeout_policies (300 s by default) and forgets it when a policy or
+    binding changes, never an account: without this, a reset link made or checked in the 5 minutes before the hold was
+    set lets the next one through, and after the lift a cached refusal stays. Run after the commit, never inside it (a
+    request under way would put the old answer back). The same keys authentik's own invalidate_policy_cache drops."""
+    from django.core.cache import cache
+    from django.db.models import Q
+    from authentik.brands.models import Brand
+    from authentik.flows.models import Flow, FlowDesignation
+    from authentik.policies.models import PolicyBinding
+    from authentik.policies.types import CACHE_PREFIX
+    targets = set(Flow.objects.filter(designation=FlowDesignation.RECOVERY).values_list("pbm_uuid", flat=True))
+    targets |= set(Brand.objects.exclude(flow_recovery=None).values_list("flow_recovery__pbm_uuid", flat=True))
+    for b in PolicyBinding.objects.filter(Q(target__pbm_uuid__in=targets) | Q(policy__name="workforce-recovery-staff-only")):
+        cache.delete_many(cache.keys(f"{CACHE_PREFIX}{b.policy_binding_uuid.hex}_*") or [])
+
+def mail_held(wf):
+    """Whether this workforce attributes value holds resets by email: as the recovery flow's policy reads it (present
+    and not null; review of 497af97, finding 2)."""
+    return isinstance(wf, dict) and wf.get("recovery_mail_held") is not None
+
+def workforce_attrs(u):
+    wf = (u.attributes or {}).get("workforce")
+    return dict(wf) if isinstance(wf, dict) else {}
 
 def said(counts):
     return ", ".join("%s %d" % (k, v) for k, v in sorted(counts.items()) if v) or "none"
@@ -185,7 +213,7 @@ try:
             ended = end_sign_ins(u)
             u.set_password(pw, signal=False)
             u.is_active = True
-            wf = dict((u.attributes or {}).get("workforce") or {})
+            wf = workforce_attrs(u)
             wf.pop("password_unlocked_at", None)
             wf.pop("controller_set", None)
             wf["recovery_mail_held"] = {"recovery": rid, "at": iso(at)}
@@ -198,12 +226,19 @@ try:
             # it committed, so the answer is UNSURE, never FAILED.
             committing = True
         signal.alarm(0)
+        try:
+            forget_recovery_answers()
+            forgot = True
+        except Exception:
+            forgot = False
         print("removed sign-in methods: " + said(removed))
         print("ended: " + said(ended))
         try:
             found = {}
             for look in range(3):
                 time.sleep(1)
+                # A request under way at the commit may have cached the old answer since.
+                forget_recovery_answers()
                 for k, v in end_sign_ins(User.objects.get(pk=first.pk)).items():
                     found[k] = found.get(k, 0) + v
             print("ended after the change (requests already under way): " + said(found))
@@ -211,7 +246,7 @@ try:
         except Exception as e:
             print("looking again after the change failed (%s): run this again to be sure" % type(e).__name__)
         try:
-            print("mail hold: " + ("enforced" if mail_hold_enforced() else "not enforced"))
+            print("mail hold: " + ("enforced" if forgot and mail_hold_enforced() else "not enforced"))
         except Exception:
             print("mail hold: unknown")
         print("OK")
@@ -224,12 +259,14 @@ try:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [WF_LOCK_ACCOUNT, lock_key("account:%d" % int(first.pk))])
             u = User.objects.select_for_update().get(pk=first.pk)
-            wf = dict((u.attributes or {}).get("workforce") or {})
-            if not wf.get("recovery_mail_held"):
+            wf = (u.attributes or {}).get("workforce")
+            if not mail_held(wf):
                 out = "NOT_HELD"
             else:
                 at = timezone.now()
-                held_by = (wf.pop("recovery_mail_held", None) or {}).get("recovery")
+                wf = dict(wf)
+                was = wf.pop("recovery_mail_held")
+                held_by = was.get("recovery") if isinstance(was, dict) else None
                 u.attributes = dict(u.attributes or {}, workforce=wf)
                 u.save(update_fields=["attributes"])
                 record("workforce_admin_recovery_mail_allowed", u, at, wf_request_id=rid, wf_held_by=held_by, wf_at=iso(at),
@@ -237,6 +274,11 @@ try:
                 out = "OK"
             committing = True
         signal.alarm(0)
+        if out == "OK":
+            try:
+                forget_recovery_answers()
+            except Exception:
+                print("cache: kept")
         print(out)
     else:
         print("REFUSED")
@@ -255,7 +297,11 @@ uuid() { cat /proc/sys/kernel/random/uuid; }
 if [ "${1:-}" = "--allow-reset-mail" ]; then
   OUT="$(printf 'allow-mail\n%s\n' "$(uuid)" | run_py)" || true
   case "$(printf '%s\n' "$OUT" | tail -1)" in
-    OK) echo "Password resets by email for 'admin' are allowed again." ;;
+    OK) if printf '%s\n' "$OUT" | grep -qx 'cache: kept'; then
+          echo "Password resets by email for 'admin' are allowed again (within 5 minutes: the sign-in server may still refuse until then)."
+        else
+          echo "Password resets by email for 'admin' are allowed again."
+        fi ;;
     NOT_HELD) echo "Password resets by email for 'admin' weren't held: nothing changed." ;;
     *) echo "That didn't work ($(printf '%s\n' "$OUT" | tail -1)) — send ./bin/doctor.sh output to support."; exit 1 ;;
   esac
@@ -308,7 +354,9 @@ only your organisation reads)."
 else
   HOLD="Password resets by email
 for 'admin' are recorded as held, BUT this sign-in server's set-up doesn't enforce
-that itself (it is older than this script, or couldn't be checked): whoever reads
+that itself (it is older than this script, its recovery flow was changed, or it
+couldn't be checked; or its cached answers couldn't be cleared, which can let a
+link through for 5 minutes): whoever reads
 admin's recovery email address may still be sent a reset link. Bring the set-up
 up to date now (./bin/update.sh), and until then change admin's email address in
 Workforce to one only your organisation reads."
