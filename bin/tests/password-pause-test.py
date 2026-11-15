@@ -257,6 +257,63 @@ al = sp(other + plain, "n:%032x" % 9, "198.51.100.60", None, base + 10, before=o
 check("Q5: sign-ins from another source don't count", [a["wf_affected_pks"] for a in al], [[], []])
 check("every alert has the same keys", sorted(al[0].keys()), sorted(["wf_kind", "wf_conn", "wf_user_pk", "wf_user_pks", "wf_accounts",
       "wf_connections", "wf_wrong", "wf_window", "wf_workplace", "wf_affected_pks"]))
+# Review of the Q1 to Q5 build, finding 2: at a busy place, the alert names the accounts that signed in there most
+# recently (at most WF_ALERT_MOST_PKS), never an arbitrary or alphabetical few, so which organisations see its address
+# doesn't change from one read to the next.
+busy = [{"at": base - 86400 + 60 * k, "kind": "signed", "account": "u:%d" % (100 + k), "conn": "198.51.100.62"} for k in range(60)]
+plain62 = [dict(e, conn="198.51.100.62", **{"try": "b" + e["try"]}) for e in plain]
+al = [a for a in sp(busy + plain62, "n:%032x" % 9, "198.51.100.62", None, base + 10, before=busy + plain62[:-1]) if a["wf_kind"] == "throttled"]
+check("Q5: a busy source's alert names the 50 who signed in there most recently", [a["wf_affected_pks"] for a in al],
+      [list(range(110, 160))])
+
+
+class FakeRows:
+    """authentik's Event rows, grouped per account as wf_ak_signed_rows asks, stored oldest first: what an unordered
+    read may return."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def db_manager(self, _):
+        return self
+
+    def including_expired(self):
+        return self
+
+    def filter(self, *a, **k):
+        return self
+
+    exclude = extra = values = annotate = filter
+
+    def order_by(self, *keys):
+        rows = list(self.rows)
+        for key in reversed(keys):
+            rows.sort(key=lambda r: r[key.lstrip("-")], reverse=key.startswith("-"))
+        return FakeRows(rows)
+
+    def __getitem__(self, cut):
+        return self.rows[cut]
+
+
+import datetime as _dt
+import types as _types
+_old = {m: sys.modules.get(m) for m in ("django", "django.db", "django.db.models", "authentik", "authentik.events",
+                                        "authentik.events.models")}
+_when = lambda k: _dt.datetime(2026, 11, 14, 9, 0, k, tzinfo=_dt.timezone.utc)
+_fake_rows = FakeRows([{"context__wf_user_pk": 100 + k, "newest": _when(k)} for k in range(60)])
+for _m in _old:
+    sys.modules[_m] = _types.ModuleType(_m)
+sys.modules["django.db.models"].Max = lambda field: field
+sys.modules["authentik.events.models"].Event = type("Event", (), {"objects": _fake_rows})
+try:
+    got = g("wf_ak_signed_rows")(_when(0), 3, wf_conn="198.51.100.62")
+finally:
+    for _m, _v in _old.items():
+        if _v is None:
+            sys.modules.pop(_m, None)
+        else:
+            sys.modules[_m] = _v
+check("Q5: the sign-in server reads the accounts that signed in there most recently", [pk for _, pk in got], [159, 158, 157])
 
 # ---- V6, the status interface's answers (contract R.7): the pair rule over every name tied to the person
 st = g("wf_status")

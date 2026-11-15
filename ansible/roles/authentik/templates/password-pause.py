@@ -26,7 +26,9 @@
 #   spelling), refuse every name there until 15 minutes after the tenth; a workplace source's cap is
 #   SIGN_IN_WORKPLACE_SOURCE_LIMIT (default 50, 20 to 100; the owner's Q1): higher, never unlimited;
 # - network (IPv6): 30 wrong tries from one /48 within 15 minutes (SIGN_IN_WORKPLACE_NETWORK_LIMIT for a workplace
-#   network, default 300, 100 to 1000) tighten the /48: only its unproven sources (nobody completed a sign-in there in
+#   network, default 300, 100 to 1000; a workplace source's wrong tries count toward its own cap only, never its
+#   /48's, so an office confirmed as its IPv6 /64 can't tighten its own /48 before its cap of 50) tighten the /48:
+#   only its unproven sources (nobody completed a sign-in there in
 #   30 days) and its abusive ones (5 or more wrong in its own window, each for at most 15 minutes after its own
 #   newest; a right password excuses only a source the operator confirmed) are refused, quiet unproven ones too, for at
 #   most 15 minutes after the /48's newest counted try (the owner's Q2); quiet, proven sources carry on;
@@ -304,19 +306,31 @@ def wf_held_until(times, limit, now):
     return None
 
 
-def wf_signed_accounts(events, key, network, now):
+def wf_signed_newest(events, key, network, now):
     """Different real accounts with a completed sign-in (a "signed" record) from here (a source key, or with `network`
-    a /48) in the last WF_KNOWN_FOR. One account counts once, however often it signed in. Used for proven (any) and
-    for the alerts' affected accounts; never for workplace (the owner's Q3)."""
-    accounts = set()
+    a /48) in the last WF_KNOWN_FOR, each with its newest such sign-in's time. One account counts once, however often
+    it signed in."""
+    newest = {}
     for e in events:
         if e.get("kind") != "signed" or not str(e.get("account") or "").startswith("u:"):
             continue
         if not now - WF_KNOWN_FOR <= e["at"] <= now:
             continue
         if (wf_network_key(e.get("conn")) if network else e.get("conn")) == key:
-            accounts.add(e["account"])
-    return accounts
+            newest[e["account"]] = max(e["at"], newest.get(e["account"], e["at"]))
+    return newest
+
+
+def wf_signed_accounts(events, key, network, now):
+    """The accounts of wf_signed_newest. Used for proven (any); never for workplace (the owner's Q3)."""
+    return set(wf_signed_newest(events, key, network, now))
+
+
+def wf_signed_recent(events, key, network, now):
+    """The alerts' affected accounts (the owner's Q5): the WF_ALERT_MOST_PKS accounts that completed a sign-in here
+    most recently, never an arbitrary or alphabetical few (review of the Q1 to Q5 build, finding 2)."""
+    newest = wf_signed_newest(events, key, network, now)
+    return sorted(newest, key=lambda a: (-newest[a], a))[:WF_ALERT_MOST_PKS]
 
 
 def wf_proven(events, conn, cfg, now):
@@ -345,6 +359,21 @@ def wf_source_times(events, right, key, network, now):
             and (wf_network_key(e.get("conn")) if network else e.get("conn")) == key]
 
 
+def wf_network_wrong(events, right, net, cfg, now):
+    """The wrong tries that count toward a /48's tightening: from its sources, except those of a workplace source (a
+    confirmed office), whose wrong passwords count toward its own cap only (review of the Q1 to Q5 build, finding 3:
+    otherwise an IPv6 office confirmed as its /64 would tighten its own ordinary /48 at 30, and be refused there,
+    before its own cap of 50). An ordinary source can't tighten its /48 alone either: its cap of 10 holds it first."""
+    workplace = {}
+
+    def counted(conn):
+        if conn not in workplace:
+            workplace[conn] = wf_workplace(conn, False, cfg)
+        return not workplace[conn]
+    return [e for e in events if wf_is_wrong(e, right, now, now - WF_LOOK_BACK)
+            and wf_network_key(e.get("conn")) == net and counted(e.get("conn"))]
+
+
 def wf_source_until(events, right, conn, cfg, now):
     """The source cap (contract R.3): (the hold's end or None, whether it is a workplace source)."""
     workplace = wf_workplace(conn, False, cfg)
@@ -356,7 +385,7 @@ def wf_network_until(events, right, net, cfg, now):
     """The network's tightening (contract R.6): (its end or None, whether it is a workplace network)."""
     workplace = wf_workplace(net, True, cfg)
     limit = cfg["network"] if workplace else WF_NETWORK_AFTER
-    return wf_held_until(wf_source_times(events, right, net, True, now), limit, now), workplace
+    return wf_held_until([e["at"] for e in wf_network_wrong(events, right, net, cfg, now)], limit, now), workplace
 
 
 def wf_network_refusal(events, right, conn, net_until, cfg, now):
@@ -437,7 +466,7 @@ def wf_spread(events, account, conn, user_pk, now, before=None, cfg=None):
         names = set(e.get("account") for e in from_here)
         if len(names) >= WF_SPREAD_ACCOUNTS:
             alerts.append(alert("connection-spread", key, None, names, len(set(e.get("conn") for e in from_here)),
-                                len(from_here), WF_SPREAD_HOUR, False, wf_signed_accounts(events, key, network, now)))
+                                len(from_here), WF_SPREAD_HOUR, False, wf_signed_recent(events, key, network, now)))
     if user_pk is not None:
         # The person, whichever of their names was typed (each counts apart for the pause, never for an alert).
         def mine(e):
@@ -458,16 +487,15 @@ def wf_spread(events, account, conn, user_pk, now, before=None, cfg=None):
             times = [e for e in events if wf_is_wrong(e, right, now, now - WF_LOOK_BACK) and e.get("conn") == conn]
             names = set(e.get("account") for e in times)
             alerts.append(alert("workplace-throttled" if workplace else "throttled", conn, None, names, 1, len(times),
-                                WF_WINDOW, workplace, wf_signed_accounts(events, conn, False, now)))
+                                WF_WINDOW, workplace, wf_signed_recent(events, conn, False, now)))
         if ":" in conn:
             net = wf_network_key(conn)
             held, workplace = wf_network_until(events, right, net, cfg, now)
             if held is not None and wf_network_until(before, right_before, net, cfg, now)[0] is None:
-                times = [e for e in events if wf_is_wrong(e, right, now, now - WF_LOOK_BACK)
-                         and wf_network_key(e.get("conn")) == net]
+                times = wf_network_wrong(events, right, net, cfg, now)
                 names = set(e.get("account") for e in times)
                 alerts.append(alert("network-tightened", net, None, names, len(set(e.get("conn") for e in times)),
-                                    len(times), WF_WINDOW, workplace, wf_signed_accounts(events, net, True, now)))
+                                    len(times), WF_WINDOW, workplace, wf_signed_recent(events, net, True, now)))
     return alerts
 
 
@@ -725,9 +753,9 @@ def wf_ak_rows(action, since, within=None, most=None, **context):
 
 
 def wf_ak_signed_rows(since, most, within=None, **context):
-    """For proven and the alerts' affected accounts (wf_signed_accounts): one "signed" record per account that completed a sign-in here
-    since a time (its newest), at most `most` of them, so a busy office's month of sign-ins isn't read for every
-    try."""
+    """For proven (wf_signed_accounts) and the alerts' affected accounts (wf_signed_recent): one "signed" record per account that completed a sign-in here
+    since a time (its newest), at most `most` of them, those who signed in most recently, so a busy office's month of
+    sign-ins isn't read for every try."""
     from django.db.models import Max
     from authentik.events.models import Event
     rows = Event.objects.db_manager("default").including_expired().filter(
@@ -739,7 +767,8 @@ def wf_ak_signed_rows(since, most, within=None, **context):
     if within is not None:
         import ipaddress
         rows = rows.extra(where=["client_ip <<= %s::inet"], params=[str(ipaddress.ip_network(within))])
-    rows = rows.values("context__wf_user_pk").annotate(newest=Max("created")).order_by()[:most]
+    # The most recent first, then cut (review of the Q1 to Q5 build, finding 2: an unordered cut kept an arbitrary few).
+    rows = rows.values("context__wf_user_pk").annotate(newest=Max("created")).order_by("-newest")[:most]
     return [(r["newest"].timestamp(), int(r["context__wf_user_pk"])) for r in rows]
 
 

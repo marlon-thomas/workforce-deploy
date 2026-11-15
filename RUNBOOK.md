@@ -189,8 +189,9 @@ changes nothing, and requests sent at the same moment are counted one at a time.
   carry on as normal; connections nobody has signed in from (including any new /64, which is how someone rotating
   through /64s is stopped) and connections with five or more wrong passwords in their own 15 minutes are refused
   ("Too many wrong passwords from this network…"; a right password typed there excuses only a connection you
-  confirmed). It ends 15 minutes after the newest counted wrong password. One connection can't cause it alone (its
-  own limit is lower). **Who is caught by it although they did nothing:** anyone on a /64 of that /48 nobody has
+  confirmed). It ends 15 minutes after the newest counted wrong password. One connection can't cause it alone: an
+  ordinary one's own limit of ten is lower, and a confirmed office's wrong passwords count toward its own limit of
+  fifty only, never its /48's, so an office you list as its /64 is held at fifty, not at thirty by its /48. **Who is caught by it although they did nothing:** anyone on a /64 of that /48 nobody has
   completed a sign-in from in 30 days, typically a phone on mobile data whose /64 changes, or a new starter's home.
   They are refused for as long as the tightening lasts, and someone who keeps sending wrong passwords from fresh /64s
   can keep it going in 15-minute renewals; the way out is another connection (the workplace Wi-Fi, a home
@@ -209,7 +210,7 @@ connection within a second, so colleagues there practically can't sign in from i
 keeps sending that many wrong passwords every 15 minutes, the connection stays held for as long as they keep it up;
 each hold is an alert (Today in Workforce within 5 minutes, and this server's health email), naming the connection
 and the times, so the office's IT can find the device (Workforce shows a connection's address only to an
-organisation whose own people completed a sign-in from it; any other organisation whose people were tried is told
+organisation whose own people completed a sign-in from it, among the 50 who did most recently; any other organisation whose people were tried is told
 only that a connection tried that many of its people). Nobody, a manager or you, can lift a connection's hold early
 in this release (an unlock would lift it for the attacker too); an audited control for the operator is planned
 (Workforce issue 486).
