@@ -89,6 +89,26 @@ FAKE_ANSWER=$'\n\n000' client_address_probe >/dev/null; rc=$?
 check "no answer: FAIL" "$rc" 1
 printf '{"schema":1,"checkedAt":"2026-11-14T10:00:00Z","probeAddress":"172.18.0.9","seen":"172.18.0.9","forgedIgnored":true,"ok":true,"why":null,"networks":null}\n' > status/client-address.json
 client_address_read; check "the controller's record with networks null: read as unknown" "$CA_NETWORKS_KNOWN" no
+# The controller image's sed is busybox on musl, which refuses a bound over 255 (bin/tests/controller-busybox-e2e.sh
+# runs this file there): the reason up to 300 characters, and networks however many, up to the 4096-byte head.
+rec() { printf '{"schema":1,"checkedAt":"2026-11-14T10:00:00Z","probeAddress":"172.18.0.9","seen":"198.51.100.11","forgedIgnored":false,"ok":false,"why":%s,"networks":%s}\n' "$1" "$2" > status/client-address.json; }
+why300="$(printf 'w%.0s' $(seq 1 300))"
+rec "\"$why300\"" '["172.18.0.0/16"]'; client_address_read
+check "a reason of 300 characters is read" "$? ${#why300} $([ "$CA_WHY" = "$why300" ] && echo same) $CA_NETWORKS" "0 300 same 172.18.0.0/16"
+rec "\"${why300}x\"" '["172.18.0.0/16"]'; client_address_read
+check "one of 301 is not" "$? [$CA_WHY] $CA_NETWORKS" "0 [] 172.18.0.0/16"
+why_utf8="$(printf '\303\251%.0s' $(seq 1 300))"
+rec "\"$why_utf8\"" null; client_address_read
+check "300 characters of two bytes each are 300 characters" "$([ "$CA_WHY" = "$why_utf8" ] && echo same)" same
+rec '"a \"quoted\" reason"' null; client_address_read
+check "a reason with an escape is not used" "$? [$CA_WHY]" "0 []"
+rec '""' null; client_address_read
+check "an empty reason is none" "[$CA_WHY]" "[]"
+nets="$(for i in $(seq 1 100); do printf '"fd00:abcd:ef01:%x::/64",' "$i"; done)"; nets="${nets%,}"
+rec '"x"' "[$nets]"; client_address_read
+check "100 IPv6 networks (over 2000 characters) are all read" \
+  "$CA_NETWORKS_KNOWN $(printf '%s\n' "$CA_NETWORKS" | grep -c .) $([ "${#nets}" -gt 2000 ] && echo long)" "yes 100 long"
+check "the first and the last" "$(printf '%s\n' "$CA_NETWORKS" | sed -n '1p;$p' | paste -sd' ' -)" "fd00:abcd:ef01:1::/64 fd00:abcd:ef01:64::/64"
 printf 'nonsense' > status/client-address.json
 client_address_read; check "an unreadable record" "$?" 2
 rm -f status/client-address.json

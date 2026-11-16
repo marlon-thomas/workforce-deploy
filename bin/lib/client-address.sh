@@ -247,10 +247,16 @@ client_address_read() {
   CA_OK="$(bs_field "$j" ok 'true|false')"
   CA_SEEN="$(bs_field "$j" seen '"[0-9a-f.:/]{2,64}"' | tr -d '"')"
   CA_PROBE="$(bs_field "$j" probeAddress '"[0-9a-f.:/]{2,64}"' | tr -d '"')"
-  CA_WHY="$(bs_field "$j" why '"[^"\\]{1,300}"' | tr -d '"')"
+  # No bound in a pattern above 255: the controller image's sed and grep are busybox on musl, which refuses one
+  # ("Invalid contents of {}"), so every record read there as "networks couldn't be read" and no reason was ever
+  # shown (found by the comparison of Workforce PRs 467 and 499; bin/ci-validate.sh refuses such a bound). The
+  # 4096-byte head bounds both fields; a reason is 1-300 characters (the controller's plain() keeps 300), counted
+  # here as characters (UTF-8 lead bytes), not bytes.
+  CA_WHY="$(bs_field "$j" why '"[^"\\]*"' | tr -d '"')"
+  [ "$(printf '%s' "$CA_WHY" | LC_ALL=C tr -d '\200-\277' | wc -c | tr -d ' ')" -le 300 ] || CA_WHY=""
   # The stack's own networks, as the controller (or the probe here) read them from Docker; null when it couldn't.
   local nets
-  nets="$(printf '%s' "$j" | sed -nE 's/.*"networks":\[([^]]{0,2000})\].*/\1/p' | head -n 1)"
+  nets="$(printf '%s' "$j" | sed -nE 's/.*"networks":\[([^]]*)\].*/\1/p' | head -n 1)"
   if printf '%s' "$j" | grep -qE '"networks":\['; then
     CA_NETWORKS_KNOWN=yes
     CA_NETWORKS="$(printf '%s' "$nets" | tr ',' '\n' | tr -d '" ' | grep -E '^[0-9a-fA-F.:]+/[0-9]{1,3}$' || true)"

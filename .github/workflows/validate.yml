@@ -35,6 +35,10 @@ jobs:
         run: |
           printf 'apk add -q --no-progress bash jq openssl age curl python3 tar >/dev/null\nbash /w/bin/tests/recovery-test.sh\n' > "$RUNNER_TEMP/alpine-recovery.sh"
           docker run --rm -v "$PWD:/w:ro" -v "$RUNNER_TEMP:/s:ro" alpine:3.20.10@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc sh /s/alpine-recovery.sh
+      # What the appliance controller runs (doctor.sh, healthwatch.sh, backup.sh, server-actions.sh), on its own base
+      # image: busybox on musl, which refuses a regular-expression bound over 255 and has no flock -w.
+      - name: The controller's scripts' self-tests on its base image (busybox on musl)
+        run: ./bin/tests/controller-busybox-e2e.sh
       - name: Off-site encryption end to end (real age, real rsync over ssh to a write-only key, helper container)
         run: ./bin/tests/backup-encrypt-e2e.sh
       # Review of the controller bundle (finding 7): the health watch's own database role against a real PostgreSQL

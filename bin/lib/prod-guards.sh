@@ -6,11 +6,12 @@
 # bin/tests/prod-guards-test.sh. "The test appliance" is ENV_NAME=test, as everywhere else in this repo.
 
 # profiles_include_mail <COMPOSE_PROFILES> — true when compose would start mailpit: the "mail" profile, or "*" (every
-# profile). Compose trims spaces around each entry, so this does too.
+# profile). Compose trims spaces around each entry, so this does too. Split by read, never by an unquoted expansion:
+# that globbed "*" into the names of the files in the working folder (doctor.sh's is the bundle), so it passed.
 profiles_include_mail() {
-  local entry
-  local IFS=,
-  for entry in $1; do
+  local entry entries=()
+  IFS=, read -r -a entries <<< "$1"
+  for entry in "${entries[@]}"; do
     entry="$(printf '%s' "$entry" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
     case "$entry" in mail|'*') return 0 ;; esac
   done
@@ -44,7 +45,9 @@ prod_guard_env_file() {
 # prod_guard_caddyfile <Caddyfile> — a production gateway config never routes to mailpit or the test inbox.
 prod_guard_caddyfile() {
   local f="$1"
-  if [ ! -r "$f" ]; then
+  # A regular file: busybox's grep (the controller image, the backup container) finds nothing in a folder and says
+  # so with 1, not 2, so a folder would pass.
+  if [ ! -f "$f" ] || [ ! -r "$f" ]; then
     echo "$f can't be read, so it can't be checked"
     return 1
   fi

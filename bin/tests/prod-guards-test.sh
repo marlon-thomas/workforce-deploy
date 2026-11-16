@@ -26,6 +26,8 @@ check "an exported TEST_INBOX (finding 36)" "$(env_with 'export TEST_INBOX=on')"
 check "an indented, exported mail profile" "$(env_with '  export COMPOSE_PROFILES=staffmail,mail')" 1
 check "mailpit in capitals" "$(env_with 'SMTP_HOST=MailPit')" 1
 check "every profile (*) includes mail" "$(env_with 'COMPOSE_PROFILES=*')" 1
+check "every profile (*), from a folder with files in it" "$(cd "$HERE" && env_with 'COMPOSE_PROFILES=*')" 1
+check "' * ' among others, from a folder with files in it" "$(cd "$HERE" && rc prod_guard_start prod '' '' 'staffmail, * ')" 1
 
 printf 'example.org {\n\treverse_proxy api:8080\n}\n' > "$WORK/Caddyfile"
 check "a clean production Caddyfile" "$(rc prod_guard_caddyfile "$WORK/Caddyfile")" 0
@@ -33,7 +35,7 @@ printf 'testmail.example.org {\n\treverse_proxy mailpit:8025\n}\n' >> "$WORK/Cad
 check "a production Caddyfile with the inbox" "$(rc prod_guard_caddyfile "$WORK/Caddyfile")" 1
 check "a missing Caddyfile fails (finding 35)" "$(rc prod_guard_caddyfile "$WORK/no-such-Caddyfile")" 1
 mkdir -p "$WORK/a-directory"
-check "a Caddyfile grep can't search fails" "$(rc prod_guard_caddyfile "$WORK/a-directory")" 1
+check "a folder in its place fails (busybox's grep finds nothing there and says 1)" "$(rc prod_guard_caddyfile "$WORK/a-directory")" 1
 
 check "runtime: the test appliance may" "$(rc prod_guard_runtime test on testmail.x mail yes)" 0
 check "runtime: prod, nothing test-only" "$(rc prod_guard_runtime prod '' '' staffmail no)" 0

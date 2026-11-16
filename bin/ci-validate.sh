@@ -3,6 +3,7 @@
 # .github/workflows/validate.yml on every push/PR; run it locally before
 # pushing. Touches no host and starts no container.
 #   1. bash -n on every shell script
+#      and nothing busybox on musl refuses (a regular-expression bound over 255, flock -w)
 #   2. python byte-compile of every python script (no __pycache__ written)
 #   3. `docker compose config -q` for compose.yaml (+ each overlay) against a
 #      placeholder env file — catches YAML/interpolation breakage at PR time,
@@ -26,6 +27,31 @@ for f in bin/*.sh bin/lib/*.sh bin/tests/*.sh; do
   [ -e "$f" ] || continue
   bash -n "$f" || bad "syntax: $f"
 done
+
+echo "== busybox: the controller image and the backup container"
+# Their sed, grep, awk and flock are busybox on musl (bin/tests/controller-busybox-e2e.sh runs the self-tests
+# there). musl refuses a regular-expression bound over 255 ("Invalid contents of {}"), in sed, grep, awk and
+# bash's =~ alike, and busybox's flock has no -w: client_address_read read every record as "the server's own
+# networks couldn't be read", and backup.sh --tag (every update's first step) stopped at once (found by the
+# comparison of Workforce PRs 467 and 499). Comment lines are skipped.
+python3 -I - bin/*.sh bin/lib/*.sh <<'PY' || bad "a script uses what busybox on musl refuses"
+import re, sys
+failed = False
+bound = re.compile(r"\\?\{([0-9]+)(?:,([0-9]*))?\\?\}")
+for path in sys.argv[1:]:
+    for n, line in enumerate(open(path, encoding="utf-8"), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        for m in bound.finditer(line):
+            if any(g and int(g) > 255 for g in m.groups()):
+                print("FAIL %s:%d: the bound %s is over 255; use * and check the length in shell" % (path, n, m.group(0)))
+                failed = True
+        if re.search(r"\bflock\s+(-[a-z]*w|--wait|--timeout)", line):
+            print("FAIL %s:%d: busybox's flock has no -w; use lock_wait (bin/lib/common.sh)" % (path, n))
+            failed = True
+sys.exit(1 if failed else 0)
+PY
+[ "$RC" -ne 0 ] || echo "ok   no regular-expression bound over 255 and no -w to flock in bin/*.sh or bin/lib/*.sh"
 
 echo "== python compile"
 for f in bin/*.py; do

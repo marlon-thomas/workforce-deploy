@@ -186,7 +186,7 @@ fi
 # Nothing else takes this lock, and it goes when the process does, however it ended.
 if { exec 8>>backups/.backup.lock; } 2>/dev/null && command -v flock >/dev/null 2>&1; then
   if [ -n "$TAG" ]; then
-    flock -w 3600 8 || { echo "Another backup has been running for over an hour; not waiting any longer."; exit 75; }
+    lock_wait 8 3600 || { echo "Another backup has been running for over an hour; not waiting any longer."; exit 75; }
   elif ! flock -n 8; then
     echo "Another backup is already running."; exit 75
   fi

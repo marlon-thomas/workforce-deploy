@@ -450,6 +450,16 @@ backup_status_read() {
 # are grouped, so `0|[1-9]…` holds for the whole value).
 bs_field() { printf '%s' "$1" | sed -nE "s/.*[{,]\"$2\":($3)[,}].*/\\1/p" | head -n 1; }
 
+# lock_wait <fd> <seconds> — takes the lock on an open descriptor, waiting at most that long (1 when it couldn't).
+# Busybox's flock (the controller image, the backup container) has no -w, so this asks with -n once a second.
+lock_wait() {
+  local waited=0
+  until flock -n "$1"; do
+    [ "$waited" -lt "$2" ] || return 1
+    sleep 1; waited=$((waited + 1))
+  done
+}
+
 # helper_args NETWORK — fills the array HELPER with what a helper container (`docker run` of the off-site
 # copy or encryption tools) needs under the controller: the project's labels, as a one-off (the backup
 # job's allow-list lets it make only those), and one of the project's networks (or none), since the
