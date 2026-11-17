@@ -392,6 +392,15 @@ check("the policies that use it load it, as the first thing inside their guard: 
                          "wf-client-address-policy", "wf-sign-in-status-code", "wf-code-try", "wf-codes-paused"])
       and all(("        try:\n" + LOAD) in re.sub(r"\n            # [^\n]*", "", ids[k]) for k in loaders))
 
+# Workforce issue 502: the brand is authentik's default one, found by its (unique) domain alone; never by `default`
+# too, which fails the whole blueprint where the brand was made first and not the default.
+brands = [e for e in entries if e.startswith("model: authentik_brands.brand")]
+check("two brand entries, both found by domain authentik-default alone",
+      len(brands) == 2 and all(re.search(r"identifiers:\n      domain: authentik-default\n    attrs:", e) for e in brands))
+check("the first brand entry makes it the default", re.search(r"\n    attrs:\n      default: true\n", brands[0]) is not None)
+check("the recovery flow is set on it after the flow is defined",
+      "flow_recovery: !KeyOf wf-recovery-flow" in brands[1] and text.index("id: wf-recovery-flow") < text.index(brands[1]))
+
 print("blueprint self-test: %d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
 PY

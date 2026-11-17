@@ -18,10 +18,20 @@ entries:
   # Sign-in, enrolment and sign-out pages look like Workforce, not authentik (ux-product-review
   # R5): the browser-tab title, logo and icon. The logo and icon are the app's public build-time
   # brand files (no tenant data); branding/authentik-custom.css does the page styling.
+  # It must be authentik's DEFAULT brand (Workforce issue 502): every request whose host matches no brand's domain (the
+  # application asks for reset links on the internal address) is answered with the default one, else with a built-in
+  # brand that has no recovery flow (reset links 400) and no branding. authentik's own default-brand.yaml makes it as
+  # {domain: authentik-default, default: true}, only when no default brand exists, and authentik's worker applies both
+  # blueprints in no fixed order. So this one is found by its domain alone (the domain is unique: authentik refuses a
+  # second brand with it, so identifying it by `default` too would fail this whole blueprint on an install where it was
+  # made first, not the default) and made the default here: applied first, it is created as the default and
+  # default-brand.yaml then does nothing; applied after, it updates that one. Applied at the same moment, there can be
+  # two; the appliance controller repairs that (identity/brand.mjs).
   - model: authentik_brands.brand
     identifiers:
       domain: authentik-default
     attrs:
+      default: true
       branding_title: Workforce
       branding_logo: https://{{ app_hostname }}/icons/wordmark.svg
       branding_favicon: https://{{ app_hostname }}/icons/icon.svg
