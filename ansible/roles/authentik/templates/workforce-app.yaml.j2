@@ -18,20 +18,22 @@ entries:
   # Sign-in, enrolment and sign-out pages look like Workforce, not authentik (ux-product-review
   # R5): the browser-tab title, logo and icon. The logo and icon are the app's public build-time
   # brand files (no tenant data); branding/authentik-custom.css does the page styling.
-  # It must be authentik's DEFAULT brand (Workforce issue 502): every request whose host matches no brand's domain (the
+  # It should be authentik's DEFAULT brand (Workforce issue 502): every request whose host matches no brand's domain (the
   # application asks for reset links on the internal address) is answered with the default one, else with a built-in
   # brand that has no recovery flow (reset links 400) and no branding. authentik's own default-brand.yaml makes it as
   # {domain: authentik-default, default: true}, only when no default brand exists, and authentik's worker applies both
   # blueprints in no fixed order. So this one is found by its domain alone (the domain is unique: authentik refuses a
   # second brand with it, so identifying it by `default` too would fail this whole blueprint on an install where it was
-  # made first, not the default) and made the default here: applied first, it is created as the default and
-  # default-brand.yaml then does nothing; applied after, it updates that one. Applied at the same moment, there can be
-  # two; the appliance controller repairs that (identity/brand.mjs).
+  # made first, not the default), and the next entry makes it the default, with default-brand.yaml's own condition: only
+  # when no brand is the default yet. Applied first, it is created and made the default, and default-brand.yaml then does
+  # nothing; applied after, it updates that one, already the default. Where an organisation has made its own brand the
+  # default, it is left alone (authentik refuses a second default brand, which would fail this whole blueprint); the
+  # appliance controller warns about that (identity/brand.mjs). Applied at the same moment, there can be two; the
+  # controller repairs that.
   - model: authentik_brands.brand
     identifiers:
       domain: authentik-default
     attrs:
-      default: true
       branding_title: Workforce
       branding_logo: https://{{ app_hostname }}/icons/wordmark.svg
       branding_favicon: https://{{ app_hostname }}/icons/icon.svg
@@ -41,6 +43,14 @@ entries:
         settings:
           theme:
             base: light
+  - model: authentik_brands.brand
+    identifiers:
+      domain: authentik-default
+    conditions:
+      # The condition default-brand.yaml uses: only when no brand is the default yet.
+      - !Condition [NOR, !Find [authentik_brands.brand, [default, True]]]
+    attrs:
+      default: true
   - model: authentik_providers_oauth2.scopemapping
     id: workforce-invite-scope
     identifiers:

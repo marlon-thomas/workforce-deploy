@@ -392,14 +392,20 @@ check("the policies that use it load it, as the first thing inside their guard: 
                          "wf-client-address-policy", "wf-sign-in-status-code", "wf-code-try", "wf-codes-paused"])
       and all(("        try:\n" + LOAD) in re.sub(r"\n            # [^\n]*", "", ids[k]) for k in loaders))
 
-# Workforce issue 502: the brand is authentik's default one, found by its (unique) domain alone; never by `default`
-# too, which fails the whole blueprint where the brand was made first and not the default.
+# Workforce issue 502: the brand is made authentik's default one, only when no brand is the default yet (authentik refuses
+# a second default brand, which fails the whole blueprint where an organisation made its own the default); every brand
+# entry finds it by its (unique) domain alone, never by `default` too, which fails the whole blueprint where the brand
+# was made first and not the default.
 brands = [e for e in entries if e.startswith("model: authentik_brands.brand")]
-check("two brand entries, both found by domain authentik-default alone",
-      len(brands) == 2 and all(re.search(r"identifiers:\n      domain: authentik-default\n    attrs:", e) for e in brands))
-check("the first brand entry makes it the default", re.search(r"\n    attrs:\n      default: true\n", brands[0]) is not None)
+check("three brand entries, all found by domain authentik-default alone",
+      len(brands) == 3 and all(re.search(r"identifiers:\n      domain: authentik-default\n    (attrs|conditions):", e) for e in brands))
+check("only the second sets default, and only when no brand is the default yet",
+      [("default: true" in e) for e in brands] == [False, True, False]
+      and "conditions:\n      # The condition default-brand.yaml uses: only when no brand is the default yet.\n"
+          "      - !Condition [NOR, !Find [authentik_brands.brand, [default, True]]]\n    attrs:\n      default: true" in brands[1]
+      and brands[1].rstrip().endswith("default: true"))
 check("the recovery flow is set on it after the flow is defined",
-      "flow_recovery: !KeyOf wf-recovery-flow" in brands[1] and text.index("id: wf-recovery-flow") < text.index(brands[1]))
+      "flow_recovery: !KeyOf wf-recovery-flow" in brands[2] and text.index("id: wf-recovery-flow") < text.index(brands[2]))
 
 print("blueprint self-test: %d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
